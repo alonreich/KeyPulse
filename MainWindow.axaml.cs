@@ -212,8 +212,9 @@ namespace KeyPulse
                 isStartup = key?.GetValue(AppName) != null;
             }
 
-            var w = new Window { Title = "Settings", Width = 300, Height = 150, WindowStartupLocation = WindowStartupLocation.CenterOwner, Icon = this.Icon };
-            var sp = new StackPanel { Margin = new Avalonia.Thickness(20), Spacing = 10 };
+            var w = new Window { Title = "Settings", Width = 400, Height = 250, WindowStartupLocation = WindowStartupLocation.CenterOwner, Icon = this.Icon };
+            var grid = new Grid { Margin = new Avalonia.Thickness(20), RowDefinitions = new Avalonia.Controls.RowDefinitions("Auto,Auto,Auto,*,Auto") };
+            
             var chk = new CheckBox { Content = "Launch on Boot", IsChecked = isStartup };
             chk.IsCheckedChanged += (s, ev) =>
             {
@@ -223,12 +224,75 @@ namespace KeyPulse
                 else
                     regKey?.DeleteValue(AppName, false);
             };
+            Grid.SetRow(chk, 0);
+            grid.Children.Add(chk);
+
+            var backupBtn = new Button { Content = "Backup Configuration", Margin = new Avalonia.Thickness(0,10,0,0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+            Grid.SetRow(backupBtn, 1);
+            grid.Children.Add(backupBtn);
+
+            var restoreBtn = new Button { Content = "Restore Configuration", Margin = new Avalonia.Thickness(0,10,0,0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+            Grid.SetRow(restoreBtn, 2);
+            grid.Children.Add(restoreBtn);
+
+            var statusTxt = new TextBlock { Margin = new Avalonia.Thickness(0,10,0,0), Foreground = Avalonia.Media.Brushes.Orange, TextWrapping = Avalonia.Media.TextWrapping.Wrap, FontSize = 12 };
+            Grid.SetRow(statusTxt, 3);
+            grid.Children.Add(statusTxt);
+
             var closeBtn = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
             closeBtn.Click += (s, ev) => w.Close();
+            Grid.SetRow(closeBtn, 4);
+            grid.Children.Add(closeBtn);
 
-            sp.Children.Add(chk);
-            sp.Children.Add(closeBtn);
-            w.Content = sp;
+            backupBtn.Click += async (s, ev) =>
+            {
+                var options = new Avalonia.Platform.Storage.FilePickerSaveOptions { Title = "Export Backup", DefaultExtension = "json", SuggestedFileName = "KeyPulse_Backup.json" };
+                var file = await w.StorageProvider.SaveFilePickerAsync(options);
+                if (file != null)
+                {
+                    try {
+                        SaveConfig();
+                        File.Copy(ConfigPath, file.Path.LocalPath, true);
+                        statusTxt.Text = "Backup exported successfully.";
+                        statusTxt.Foreground = Avalonia.Media.Brushes.LightGreen;
+                    } catch (Exception ex) { statusTxt.Text = "Export failed: " + ex.Message; statusTxt.Foreground = Avalonia.Media.Brushes.Red; }
+                }
+            };
+
+            restoreBtn.Click += async (s, ev) =>
+            {
+                var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { Title = "Import Backup", AllowMultiple = false };
+                var files = await w.StorageProvider.OpenFilePickerAsync(options);
+                if (files != null && files.Count > 0)
+                {
+                    try {
+                        var json = File.ReadAllText(files[0].Path.LocalPath);
+                        var loaded = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.AppConfig);
+                        if (loaded != null)
+                        {
+                            _currentConfig = loaded;
+                            Hotkeys.Clear();
+                            var conflicts = 0;
+                            foreach (var item in loaded.Hotkeys)
+                            {
+                                if (!HotkeyManager.Probe(item.KeyCombination)) conflicts++;
+                                Hotkeys.Add(item);
+                            }
+                            SaveConfig();
+                            ApplyHotkeys();
+                            if (conflicts > 0) {
+                                statusTxt.Text = $"Restored with warnings: {conflicts} shortcut(s) are already taken by the OS or another app (it is technically impossible to identify which external app). Please re-assign them.";
+                                statusTxt.Foreground = Avalonia.Media.Brushes.Orange;
+                            } else {
+                                statusTxt.Text = "Restore completed successfully with zero conflicts.";
+                                statusTxt.Foreground = Avalonia.Media.Brushes.LightGreen;
+                            }
+                        }
+                    } catch (Exception ex) { statusTxt.Text = "Import failed: " + ex.Message; statusTxt.Foreground = Avalonia.Media.Brushes.Red; }
+                }
+            };
+
+            w.Content = grid;
             w.ShowDialog(this);
         }
 

@@ -12,7 +12,8 @@
 
 ### Boot / Initialization (`Program.cs` & `App.axaml.cs`)
 1. Executable is launched. `Program.cs` intercepts the startup arguments.
-2. **Lifecycle Hooks**:
+2. **Native Asset Unpacking**: Due to NativeAOT stripping C++ dependencies, `ExtractNativeLibs()` manually dumps `libSkiaSharp.dll`, `av_libglesv2.dll`, and `libHarfBuzzSharp.dll` from the assembly's embedded resources into the executing directory instantly before Avalonia boots.
+3. **Lifecycle Hooks**:
    - If `--uninstall` is passed, it copies itself to `%TEMP%\KeyPulse_Uninstaller.exe` and restarts. The temp instance boots Avalonia and opens `SetupWindow(isUninstall: true)`.
    - If `--install-worker` is passed, it boots Avalonia and opens `SetupWindow(isUninstall: false)`.
    - If run normally outside of its installation directory (`%LOCALAPPDATA%\Programs\KeyPulse`), it dynamically copies itself to `%TEMP%` and relaunches with `--install-worker` to trigger the installation pipeline.
@@ -26,6 +27,7 @@
 ### Configuration & State UI (`MainWindow.axaml` & `.cs`)
 - **Dynamic Capture**: The `TextBox` for hotkeys uses a `KeyDown` hook (`KeyCombo_KeyDown`) to intercept and record physical modifier+key combinations instantly.
 - **Validation**: When text changes, it calls `HotkeyManager.Probe()` to ensure the key isn't claimed by the OS (colors Red if conflicting).
+- **Settings Dialog**: Uses Avalonia's `StorageProvider` to backup (`export`) and restore (`import`) the `config.json` payload. During restoration, every single imported hotkey is immediately live-probed against the OS's `RegisterHotKey` pool to detect and warn about external collisions.
 - **Window Persistence**: `MainWindow` dimensions (`X`, `Y`, `Width`, `Height`, `WindowState`) are continuously tracked.
 - **Tray Daemonization**: `OnClosing` is intercepted. Unless `App.IsExiting` is explicitly `true` (via the Tray menu), `e.Cancel = true` fires and `this.Hide()` is called, burying the app into the System Tray.
 

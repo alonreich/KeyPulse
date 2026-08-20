@@ -31,13 +31,15 @@ class Program
                 });
                 return;
             }
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            ExtractNativeLibs();
+            SafeStart(args);
             return;
         }
 
         if (args.Contains("--install-worker"))
         {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            ExtractNativeLibs();
+            SafeStart(args);
             return;
         }
 
@@ -54,7 +56,52 @@ class Program
             return;
         }
 
-        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        ExtractNativeLibs();
+        SafeStart(args);
+    }
+
+    private static void SafeStart(string[] args)
+    {
+        try {
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        } catch (Exception ex) {
+            File.WriteAllText(Path.Combine(Path.GetTempPath(), "keypulse_crash.txt"), ex.ToString());
+            if (ex.InnerException != null) File.AppendAllText(Path.Combine(Path.GetTempPath(), "keypulse_crash.txt"), "\nINNER: " + ex.InnerException.ToString());
+        }
+    }
+
+    private static void ExtractNativeLibs()
+    {
+        File.WriteAllText(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), "ExtractNativeLibs started\n");
+        var libs = new[] { "av_libglesv2.dll", "libHarfBuzzSharp.dll", "libSkiaSharp.dll" };
+        var targetDir = Path.GetDirectoryName(Environment.ProcessPath!)!;
+        foreach (var lib in libs)
+        {
+            var target = Path.Combine(targetDir, lib);
+            if (!File.Exists(target))
+            {
+                using var stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream($"KeyPulse.NativeLibs.{lib}");
+                if (stream != null)
+                {
+                    try {
+                        using var fs = File.Create(target);
+                        stream.CopyTo(fs);
+                        File.AppendAllText(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), $"Extracted {lib}\n");
+                    } catch (Exception ex) {
+                        File.AppendAllText(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), $"Error extracting {lib}: {ex.Message}\n");
+                    }
+                }
+                else
+                {
+                    File.AppendAllText(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), $"Resource KeyPulse.NativeLibs.{lib} not found!\n");
+                }
+            }
+            else
+            {
+                File.AppendAllText(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), $"{lib} already exists\n");
+            }
+        }
+        File.AppendAllText(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), "ExtractNativeLibs finished\n");
     }
 
     private static bool IsRunningFromInstallPath()
