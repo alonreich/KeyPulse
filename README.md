@@ -19,8 +19,8 @@
 
 ## Installation
 
-1. Download the latest `KeyPulse.exe` from the Releases page.
-2. Run `KeyPulse.exe`. 
+1. Download the latest release here: [📥 Download KeyPulse.exe](https://github.com/alonreich/KeyPulse/releases/latest/download/KeyPulse.exe)
+2. Run the downloaded `KeyPulse.exe`. 
 3. The built-in setup engine will seamlessly move the executable to its local app data directory, establish all necessary Registry keys, and launch the application into your System Tray.
 
 ## Uninstallation
