@@ -13,6 +13,7 @@ public partial class App : Application
 
     public bool IsExiting { get; private set; }
 
+    public static MainWindow? HiddenWindow;
     public override void OnFrameworkInitializationCompleted()
     {
         KeyPulse.Program.LogDebug("OnFrameworkInitializationCompleted started");
@@ -48,17 +49,22 @@ public partial class App : Application
 
     public void OpenKeybinds_Clicked(object? sender, System.EventArgs e)
     {
-        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop && desktop.MainWindow != null)
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.MainWindow.Show();
+            var mw = desktop.MainWindow as MainWindow ?? HiddenWindow;
+            if (mw != null)
+            {
+                if (desktop.MainWindow == null) desktop.MainWindow = mw;
+                desktop.MainWindow.Show();
             desktop.MainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
             desktop.MainWindow.Activate();
+            }
         }
-    }
+        }
 
     public void OpenSettings_Clicked(object? sender, System.EventArgs e)
     {
-        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop && desktop.MainWindow is MainWindow mw)
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop && (desktop.MainWindow as MainWindow ?? HiddenWindow) is MainWindow mw)
         {
             mw.Settings_Click(null, new Avalonia.Interactivity.RoutedEventArgs());
         }
@@ -73,3 +79,8 @@ public partial class App : Application
         }
     }
 }
+
+
+
+
+

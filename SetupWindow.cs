@@ -266,7 +266,7 @@ namespace KeyPulse
                     _actionButton.IsVisible = true;
                     _actionButton.Click += (s, ev) =>
                     {
-                        try { Process.Start(new ProcessStartInfo { FileName = Program.ExePath, Arguments = "--hidden", UseShellExecute = true }); } catch { }
+                        try { Process.Start(new ProcessStartInfo { FileName = Program.ExePath, Arguments = "", UseShellExecute = true }); } catch { }
                         ((App)Application.Current!).Exit_Clicked(null, null);
                     };
                 });
@@ -360,6 +360,7 @@ namespace KeyPulse
         }
     }
 }
+
 
 
 

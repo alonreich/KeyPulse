@@ -18,7 +18,8 @@ namespace KeyPulse
 
         public MainWindow()
         {
-            if (Environment.GetCommandLineArgs().Contains("--hidden")) { EventHandler? handler = null; handler = (s, e) => { this.Hide(); this.Opened -= handler; }; this.Opened += handler; }
+            this.Opened += (s, e) => { this.Topmost = true; this.Activate(); this.Topmost = false; };
+            
             InitializeComponent();
             DataContext = this;
             LoadConfig();
@@ -183,7 +184,7 @@ namespace KeyPulse
                         Process.Start(new ProcessStartInfo(fileName, arguments) { UseShellExecute = true });
                         break;
                     case ActionType.BrowseChrome:
-                        Process.Start("chrome.exe", $"\"{entry.Target}\"");
+                        Process.Start(new ProcessStartInfo("chrome.exe", $"\"{entry.Target}\"") { UseShellExecute = true });
                         break;
                     case ActionType.TypeText:
                         InputSimulator.TypeText(entry.Target);
@@ -425,6 +426,11 @@ namespace KeyPulse
         }
     }
 }
+
+
+
+
+
 
 
 

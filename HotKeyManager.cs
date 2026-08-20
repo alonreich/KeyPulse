@@ -216,13 +216,13 @@ namespace KeyPulse
 
                     if (vk == 0)
                     {
-                        if (Enum.TryParse<ConsoleKey>(p.Trim(), true, out var key))
-                        {
-                            vk = (uint)key;
-                        }
-                        else if (p.Trim().Length == 1)
+                        if (p.Trim().Length == 1)
                         {
                             vk = (uint)p.Trim().ToUpperInvariant()[0];
+                        }
+                        else if (Enum.TryParse<ConsoleKey>(p.Trim(), true, out var key))
+                        {
+                            vk = (uint)key;
                         }
                     }
                 }
@@ -248,3 +248,4 @@ namespace KeyPulse
         }
     }
 }
+
