@@ -140,13 +140,49 @@ namespace KeyPulse
                 else if (trim == "win" || trim == "windows") modifiers |= 0x0008;
                 else
                 {
-                    if (Enum.TryParse<ConsoleKey>(p.Trim(), true, out var key))
+                    vk = trim switch
                     {
-                        vk = (uint)key;
-                    }
-                    else if (p.Trim().Length == 1)
+                        "return" => 0x0D,
+                        "enter" => 0x0D,
+                        "space" => 0x20,
+                        "spacebar" => 0x20,
+                        "up" => 0x26,
+                        "down" => 0x28,
+                        "left" => 0x25,
+                        "right" => 0x27,
+                        "escape" => 0x1B,
+                        "tab" => 0x09,
+                        "back" => 0x08,
+                        "delete" => 0x2E,
+                        "insert" => 0x2D,
+                        "home" => 0x24,
+                        "end" => 0x23,
+                        "pageup" => 0x21,
+                        "pagedown" => 0x22,
+                        "oemplus" => 0xBB,
+                        "oemcomma" => 0xBC,
+                        "oemminus" => 0xBD,
+                        "oemperiod" => 0xBE,
+                        "oemtilde" => 0xC0,
+                        "oemquestion" => 0xBF,
+                        "oemquotes" => 0xDE,
+                        "oempipe" => 0xDC,
+                        "oemopenbrackets" => 0xDB,
+                        "oemclosebrackets" => 0xDD,
+                        "oemsemicolon" => 0xBA,
+                        _ => 0
+                    };
+
+                    if (vk == 0)
                     {
-                        vk = (uint)p.Trim().ToUpperInvariant()[0];
+                        if (Enum.TryParse<ConsoleKey>(p.Trim(), true, out var key))
+                        {
+                            vk = (uint)key;
+                        }
+                        else if (p.Trim().Length == 1)
+                        {
+                            vk = (uint)p.Trim().ToUpperInvariant()[0];
+                        }
                     }
                 }
             }

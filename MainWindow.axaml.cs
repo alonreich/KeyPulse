@@ -44,7 +44,14 @@ namespace KeyPulse
 
                         if (!double.IsNaN(loaded.MainWindowX) && !double.IsNaN(loaded.MainWindowY))
                         {
-                            Position = new Avalonia.PixelPoint((int)loaded.MainWindowX, (int)loaded.MainWindowY);
+                            var pos = new Avalonia.PixelPoint((int)loaded.MainWindowX, (int)loaded.MainWindowY);
+                            bool isVisible = false;
+                            foreach (var scr in Screens.All)
+                            {
+                                if (scr.Bounds.Contains(pos)) { isVisible = true; break; }
+                            }
+                            if (isVisible) Position = pos;
+                            else WindowStartupLocation = WindowStartupLocation.CenterScreen;
                         }
                         if (loaded.MainWindowWidth > 0 && loaded.MainWindowHeight > 0)
                         {
@@ -101,7 +108,22 @@ namespace KeyPulse
                         Process.Start("explorer.exe", $"\"{entry.Target}\"");
                         break;
                     case ActionType.LaunchProgram:
-                        Process.Start(new ProcessStartInfo(entry.Target) { UseShellExecute = true });
+                        string fileName = entry.Target;
+                        string arguments = "";
+                        if (fileName.StartsWith("\"")) {
+                            int end = fileName.IndexOf("\"", 1);
+                            if (end > 0) {
+                                arguments = fileName.Substring(end + 1).Trim();
+                                fileName = fileName.Substring(1, end - 1);
+                            }
+                        } else {
+                            int space = fileName.IndexOf(" ");
+                            if (space > 0) {
+                                arguments = fileName.Substring(space + 1).Trim();
+                                fileName = fileName.Substring(0, space);
+                            }
+                        }
+                        Process.Start(new ProcessStartInfo(fileName, arguments) { UseShellExecute = true });
                         break;
                     case ActionType.BrowseChrome:
                         Process.Start("chrome.exe", $"\"{entry.Target}\"");
@@ -130,6 +152,13 @@ namespace KeyPulse
                 return;
             }
 
+            if (tb.Text.EndsWith("+"))
+            {
+                error.IsVisible = false;
+                tb.Foreground = Avalonia.Media.Brushes.White;
+                return;
+            }
+
             if (!HotkeyManager.Probe(tb.Text))
             {
                 error.Text = "Shortcut already taken by OS or another app!";
@@ -152,7 +181,11 @@ namespace KeyPulse
 
             if (!string.IsNullOrWhiteSpace(combo) && !string.IsNullOrWhiteSpace(target) && actionCombo != null)
             {
-                if (!HotkeyManager.Probe(combo)) return;
+                if (!HotkeyManager.Probe(combo))
+                {
+                    if (error != null) { error.Text = "Cannot save: Shortcut taken or invalid!"; error.IsVisible = true; }
+                    return;
+                }
 
                 var actionType = (ActionType)actionCombo.SelectedIndex;
                 var entry = new HotkeyEntry
@@ -183,11 +216,6 @@ namespace KeyPulse
         public void KeyCombo_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
         {
             e.Handled = true;
-            if (e.Key == Avalonia.Input.Key.LeftCtrl || e.Key == Avalonia.Input.Key.RightCtrl ||
-                e.Key == Avalonia.Input.Key.LeftAlt || e.Key == Avalonia.Input.Key.RightAlt ||
-                e.Key == Avalonia.Input.Key.LeftShift || e.Key == Avalonia.Input.Key.RightShift ||
-                e.Key == Avalonia.Input.Key.LWin || e.Key == Avalonia.Input.Key.RWin)
-                return;
 
             var mods = e.KeyModifiers;
             var parts = new System.Collections.Generic.List<string>();
@@ -196,11 +224,21 @@ namespace KeyPulse
             if (mods.HasFlag(Avalonia.Input.KeyModifiers.Shift)) parts.Add("Shift");
             if (mods.HasFlag(Avalonia.Input.KeyModifiers.Meta)) parts.Add("Win");
             
-            parts.Add(e.Key.ToString());
+            bool isModifierOnly = (e.Key == Avalonia.Input.Key.LeftCtrl || e.Key == Avalonia.Input.Key.RightCtrl ||
+                e.Key == Avalonia.Input.Key.LeftAlt || e.Key == Avalonia.Input.Key.RightAlt ||
+                e.Key == Avalonia.Input.Key.LeftShift || e.Key == Avalonia.Input.Key.RightShift ||
+                e.Key == Avalonia.Input.Key.LWin || e.Key == Avalonia.Input.Key.RWin);
+
+            if (!isModifierOnly)
+            {
+                parts.Add(e.Key.ToString());
+            }
 
             if (sender is TextBox tb)
             {
-                tb.Text = string.Join("+", parts);
+                var txt = string.Join("+", parts);
+                if (isModifierOnly && parts.Count > 0) txt += "+";
+                tb.Text = txt;
             }
         }
 

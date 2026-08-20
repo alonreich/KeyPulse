@@ -90,7 +90,8 @@ namespace KeyPulse
 
         private void SetupWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
-            SaveConfig();
+            if (!_isUninstall)
+                SaveConfig();
         }
 
         private void Log(string message)
@@ -192,6 +193,10 @@ namespace KeyPulse
                 Log("Step 3/4: Removing Registry keys (appwiz.cpl & Startup)...");
                 try { Registry.CurrentUser.DeleteSubKeyTree($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{Program.AppName}", false); } catch { }
                 try { Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)?.DeleteValue(Program.AppName, false); } catch { }
+                Log("  -> Success.");
+
+                Log("Step 3.5/4: Purging AppData configuration...");
+                try { Directory.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse"), true); } catch { }
                 Log("  -> Success.");
 
                 Log("Step 4/4: Removing Start Menu shortcut...");

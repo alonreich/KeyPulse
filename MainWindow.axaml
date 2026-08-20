@@ -40,7 +40,7 @@
         </Border>
         
         <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,15,0,0">
-            <TextBlock Grid.Column="0" Text="KeyPulse Background Service Running" Foreground="#888" VerticalAlignment="Center" FontSize="11" />
+            <TextBlock Grid.Column="0" Text="KeyPulse Background Service Running (Run as Admin for elevated apps)" ToolTip.Tip="If you wish to trigger hotkeys and type text into Administrator elevated windows, you must run KeyPulse as Administrator." Foreground="#888" VerticalAlignment="Center" FontSize="11" />
             <Button Grid.Column="1" Content="Settings ⚙" Click="Settings_Click" Padding="15,5" />
         </Grid>
     </Grid>
