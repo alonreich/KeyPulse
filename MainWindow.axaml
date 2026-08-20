@@ -1,0 +1,44 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:KeyPulse"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        x:Class="KeyPulse.MainWindow"
+        x:DataType="local:MainWindow"
+        Icon="avares://KeyPulse/KeyPulse.ico"
+        Title="KeyPulse" Width="700" Height="500">
+    
+    <Grid RowDefinitions="Auto,*,Auto" Margin="10">
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="0,0,0,10">
+            <TextBox Name="KeyCombo" PlaceholderText="Press keys..." Width="150" IsReadOnly="True" KeyDown="KeyCombo_KeyDown" TextChanged="KeyCombo_TextChanged" />
+            <ComboBox Name="ActionCombo" SelectedIndex="0" Width="150">
+                <ComboBoxItem>Open Folder</ComboBoxItem>
+                <ComboBoxItem>Launch Program</ComboBoxItem>
+                <ComboBoxItem>Browse Chrome</ComboBoxItem>
+                <ComboBoxItem>Type Text</ComboBoxItem>
+                <ComboBoxItem>Insert Text (Paste)</ComboBoxItem>
+            </ComboBox>
+            <TextBox Name="TargetText" PlaceholderText="Target (Path/URL/Text)" Width="250" />
+            <Button Content="Add" Click="Add_Click" />
+        </StackPanel>
+        <TextBlock Name="ErrorText" Grid.Row="0" Foreground="Red" Margin="0,35,0,0" IsVisible="False" />
+        
+        <ListBox Grid.Row="1" ItemsSource="{Binding Hotkeys}">
+            <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="local:HotkeyEntry">
+                    <Grid ColumnDefinitions="150, 150, *, Auto">
+                        <TextBlock Grid.Column="0" Text="{Binding KeyCombination}" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="{Binding Action}" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Text="{Binding Target}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
+                        <Button Grid.Column="3" Content="Remove" Click="Remove_Click" />
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+        
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
+            <Button Content="Settings ⚙" Click="Settings_Click" />
+        </StackPanel>
+    </Grid>
+</Window>
