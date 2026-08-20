@@ -1,0 +1,58 @@
+================================================================================
+# KEYPULSE - ARCHITECTURE AND SOURCE OF TRUTH (CONTEXT FILE)
+================================================================================
+
+## 1. PROJECT OVERVIEW
+**KeyPulse** is a lightning-fast, ultra-lightweight Windows hotkey manager designed for power users. 
+- **Tech Stack**: C# 13, .NET 9, Avalonia UI 12.1.
+- **Compilation**: Single-file `NativeAOT` (No .NET runtime dependencies).
+- **OS Target**: Windows x64 Strictly (Heavily relies on Win32 P/Invoke).
+
+## 2. CORE ARCHITECTURE & LOGIC FLOW
+
+### Boot / Initialization (`Program.cs` & `App.axaml.cs`)
+1. Executable is launched. `Program.cs` intercepts the startup arguments.
+2. **Lifecycle Hooks**:
+   - If `--uninstall` is passed, it copies itself to `%TEMP%\KeyPulse_Uninstaller.exe` and restarts. The temp instance boots Avalonia and opens `SetupWindow(isUninstall: true)`.
+   - If `--install-worker` is passed, it boots Avalonia and opens `SetupWindow(isUninstall: false)`.
+   - If run normally outside of its installation directory (`%LOCALAPPDATA%\Programs\KeyPulse`), it dynamically copies itself to `%TEMP%` and relaunches with `--install-worker` to trigger the installation pipeline.
+   - If run normally from its installation directory, it launches the standard `MainWindow`.
+
+### Installation & Setup UI (`SetupWindow.cs`)
+- An Avalonia `Window` bypassing the main app logic to provide verbose terminal-like logging (using `Consolas` font) during lifecycle events.
+- **Install Flow**: Kills existing instances -> Creates `%LOCALAPPDATA%` directory -> Copies binary -> Writes Registry keys for `appwiz.cpl` (Add/Remove Programs) -> Calls PowerShell COM object to create Start Menu `.lnk` shortcut -> Cold boots the installed app.
+- **Uninstall Flow**: Kills instances -> Purges directory -> Purges `appwiz.cpl` and `Run` startup registry keys -> Purges Start Menu shortcuts -> Self-terminates.
+
+### Configuration & State UI (`MainWindow.axaml` & `.cs`)
+- **Dynamic Capture**: The `TextBox` for hotkeys uses a `KeyDown` hook (`KeyCombo_KeyDown`) to intercept and record physical modifier+key combinations instantly.
+- **Validation**: When text changes, it calls `HotkeyManager.Probe()` to ensure the key isn't claimed by the OS (colors Red if conflicting).
+- **Window Persistence**: `MainWindow` dimensions (`X`, `Y`, `Width`, `Height`, `WindowState`) are continuously tracked.
+- **Tray Daemonization**: `OnClosing` is intercepted. Unless `App.IsExiting` is explicitly `true` (via the Tray menu), `e.Cancel = true` fires and `this.Hide()` is called, burying the app into the System Tray.
+
+### Hotkey Interception (`HotKeyManager.cs`)
+- Due to Avalonia's UI thread constraints and cross-platform architecture, relying on Avalonia for global hooks is impossible.
+- **Background Win32 Loop**: Spawns a dedicated background thread utilizing `CreateWindowEx(HWND_MESSAGE)` to construct a hidden Win32 message-only window.
+- **Native Intercepts**: Uses `RegisterHotKey` and `UnregisterHotKey`. Traps `WM_HOTKEY` events globally across the OS, translating the integer ID back into a C# `Action` callback.
+- **Probe Functionality**: Dynamically registers and immediately unregisters a dummy ID to determine OS-level availability of a key combination.
+
+### Automation Engine (`InputSimulator.cs`)
+- Handles execution of user actions.
+- **Win32 `SendInput`**: Injects hardware-level keystrokes array-by-array for the `TypeText` action.
+- **Win32 Clipboard Hooking**: `InsertText` utilizes `OpenClipboard` and `SetClipboardData` directly. Avalonia's built-in clipboard is purposefully abandoned to prevent `Dispatcher.UIThread` deadlocks when triggered asynchronously from the background hotkey thread. It injects the payload and simulates a `Ctrl+V`.
+
+### Data Persistence (`Models.cs`)
+- State is managed via the `AppConfig` class, stored at `%APPDATA%\KeyPulse\config.json`.
+- Holds an array of `HotkeyEntry` objects (Combo, ActionType, Target string) alongside UI bounds.
+- **Serialization Constraint**: As the app is `NativeAOT`, reflection-based JSON serialization is forbidden. `JsonSerializerContext` source generators (`AppConfigJsonContext`) are strictly enforced.
+
+## 3. CI/CD & DEPLOYMENT (`build.cmd`)
+- Acts as the deterministic compiler and GitHub release orchestrator.
+- **Phase 1 (Compile)**: Purges previous artifacts -> Confirms `link.exe` / C++ Build Tools exist -> Triggers `dotnet publish -p:PublishAot=true` targeting `win-x64`.
+- **Phase 2 (Validation)**: Assets the singular `KeyPulse.exe` payload was generated cleanly without lingering debug debris.
+- **Phase 3 (Publish)**: Validates GitHub CLI (`gh`) authentication -> Computes `SHA256` of the `.exe` -> Purges all previous remote releases -> Generates a `vYYYY.MM.DD` tag -> Pushes release via `gh release create` -> Validates the remote asset checksum matches the local artifact exactly.
+
+## 4. AGENT DIRECTIVES & GUIDELINES
+- **NEVER use reflection**: This is a NativeAOT app. Use Source Generators for JSON, Regex, or interop.
+- **NEVER break the self-installer**: The `IsRunningFromInstallPath()` mechanic in `Program.cs` is critical.
+- **NEVER mix UI Threads**: Callbacks from `HotKeyManager` execute on a raw background thread. Any modification to Avalonia UI elements during a hotkey trigger MUST be wrapped in `Dispatcher.UIThread.Post(() => { ... })`.
+- **Windows Only**: Do not attempt to introduce Linux/macOS cross-platform polyfills. The app's architecture explicitly leverages Windows-only DLLs (`user32.dll`, `kernel32.dll`).
