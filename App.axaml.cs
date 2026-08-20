@@ -33,7 +33,7 @@ public partial class App : Application
             }
             else
             {
-                desktop.MainWindow = new MainWindow();
+                var mw = new MainWindow(); if (System.Linq.Enumerable.Contains(args, "--hidden")) { mw.WindowState = Avalonia.Controls.WindowState.Minimized; } desktop.MainWindow = mw;
                 KeyPulse.Program.LogDebug("Set MainWindow");
             }
         }
@@ -46,13 +46,21 @@ public partial class App : Application
         KeyPulse.Program.LogDebug("OnFrameworkInitializationCompleted finished");
     }
 
-    public void Settings_Clicked(object? sender, System.EventArgs e)
+    public void OpenKeybinds_Clicked(object? sender, System.EventArgs e)
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop && desktop.MainWindow != null)
         {
             desktop.MainWindow.Show();
             desktop.MainWindow.WindowState = Avalonia.Controls.WindowState.Normal;
             desktop.MainWindow.Activate();
+        }
+    }
+
+    public void OpenSettings_Clicked(object? sender, System.EventArgs e)
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop && desktop.MainWindow is MainWindow mw)
+        {
+            mw.Settings_Click(null, new Avalonia.Interactivity.RoutedEventArgs());
         }
     }
 

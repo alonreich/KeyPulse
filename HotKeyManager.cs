@@ -70,8 +70,15 @@ namespace KeyPulse
                 _hWnd = CreateWindowEx(0, "Static", "KeyPulseMessageWindow", 0, 0, 0, 0, 0, new IntPtr(-3), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
                 tcs.Set();
 
-                while (GetMessage(out MSG msg, IntPtr.Zero, 0, 0) > 0)
+                int bRet;
+                while ((bRet = GetMessage(out MSG msg, IntPtr.Zero, 0, 0)) != 0)
                 {
+                    if (bRet == -1)
+                    {
+                        Thread.Sleep(500);
+                        continue;
+                    }
+
                     if (msg.message == WM_HOTKEY)
                     {
                         int id = msg.wParam.ToInt32();
@@ -198,7 +205,13 @@ namespace KeyPulse
                         "oemopenbrackets" => 0xDB,
                         "oemclosebrackets" => 0xDD,
                         "oemsemicolon" => 0xBA,
-                        _ => 0
+                        "mediaplaypause" => 0xB3,
+                        "playpause" => 0xB3,
+                        "play" => 0xB3,
+                        "volumemute" => 0xAD,
+                        "volumedown" => 0xAE,
+                        "volumeup" => 0xAF,
+                        _ => (uint)0
                     };
 
                     if (vk == 0)

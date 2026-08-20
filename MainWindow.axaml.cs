@@ -18,6 +18,7 @@ namespace KeyPulse
 
         public MainWindow()
         {
+            if (Environment.GetCommandLineArgs().Contains("--hidden")) { EventHandler? handler = null; handler = (s, e) => { this.Hide(); this.Opened -= handler; }; this.Opened += handler; }
             InitializeComponent();
             DataContext = this;
             LoadConfig();
@@ -100,38 +101,42 @@ namespace KeyPulse
 
         public async void ActionCombo_SelectionChanged(object? sender, Avalonia.Controls.SelectionChangedEventArgs e)
         {
-            if (sender is ComboBox cb && cb.SelectedIndex != -1)
+            try
             {
-                var actionType = (ActionType)cb.SelectedIndex;
-                var targetText = this.FindControl<TextBox>("TargetText");
-                if (targetText == null) return;
+                if (sender is ComboBox cb && cb.SelectedIndex != -1)
+                {
+                    var actionType = (ActionType)cb.SelectedIndex;
+                    var targetText = this.FindControl<TextBox>("TargetText");
+                    if (targetText == null) return;
 
-                if (actionType == ActionType.OpenFolder)
-                {
-                    var options = new Avalonia.Platform.Storage.FolderPickerOpenOptions { Title = "Select Folder", AllowMultiple = false };
-                    var folders = await this.StorageProvider.OpenFolderPickerAsync(options);
-                    if (folders != null && folders.Count > 0)
+                    if (actionType == ActionType.OpenFolder)
                     {
-                        targetText.Text = folders[0].Path.LocalPath;
+                        var options = new Avalonia.Platform.Storage.FolderPickerOpenOptions { Title = "Select Folder", AllowMultiple = false };
+                        var folders = await this.StorageProvider.OpenFolderPickerAsync(options);
+                        if (folders != null && folders.Count > 0)
+                        {
+                            targetText.Text = folders[0].Path.LocalPath;
+                        }
                     }
-                }
-                else if (actionType == ActionType.LaunchProgram)
-                {
-                    var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { 
-                        Title = "Select Executable", 
-                        AllowMultiple = false, 
-                        FileTypeFilter = new[] { 
-                            new Avalonia.Platform.Storage.FilePickerFileType("Executables") { Patterns = new[] { "*.exe", "*.bat", "*.cmd", "*.ps1", "*.vbs", "*.lnk" } }, 
-                            new Avalonia.Platform.Storage.FilePickerFileType("All Files") { Patterns = new[] { "*.*" } } 
-                        } 
-                    };
-                    var files = await this.StorageProvider.OpenFilePickerAsync(options);
-                    if (files != null && files.Count > 0)
+                    else if (actionType == ActionType.LaunchProgram)
                     {
-                        targetText.Text = "\"" + files[0].Path.LocalPath + "\"";
+                        var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { 
+                            Title = "Select Executable", 
+                            AllowMultiple = false, 
+                            FileTypeFilter = new[] { 
+                                new Avalonia.Platform.Storage.FilePickerFileType("Executables") { Patterns = new[] { "*.exe", "*.bat", "*.cmd", "*.ps1", "*.vbs", "*.lnk" } }, 
+                                new Avalonia.Platform.Storage.FilePickerFileType("All Files") { Patterns = new[] { "*.*" } } 
+                            } 
+                        };
+                        var files = await this.StorageProvider.OpenFilePickerAsync(options);
+                        if (files != null && files.Count > 0)
+                        {
+                            targetText.Text = "\"" + files[0].Path.LocalPath + "\"";
+                        }
                     }
                 }
             }
+            catch { }
         }
 
         private void ExecuteAction(HotkeyEntry entry)
@@ -226,6 +231,7 @@ namespace KeyPulse
 
         public void Add_Click(object? sender, RoutedEventArgs e)
         {
+            Program.PlaySound("click");
             var combo = this.FindControl<TextBox>("KeyCombo")?.Text;
             var actionCombo = this.FindControl<ComboBox>("ActionCombo");
             var target = this.FindControl<TextBox>("TargetText")?.Text;
@@ -257,6 +263,7 @@ namespace KeyPulse
 
         public void Remove_Click(object? sender, RoutedEventArgs e)
         {
+            Program.PlaySound("close");
             if (sender is Button btn && btn.DataContext is HotkeyEntry entry)
             {
                 if (btn.Content?.ToString() == "Confirm?")
@@ -312,10 +319,11 @@ namespace KeyPulse
 
         public void Settings_Click(object? sender, RoutedEventArgs e)
         {
+            Program.PlaySound("open");
             var isStartup = false;
             using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false))
             {
-                isStartup = key?.GetValue(AppName) != null;
+                isStartup = key?.GetValue("KeyPulse") != null;
             }
 
             var w = new Window { Title = "Settings", Width = 400, Height = 250, WindowStartupLocation = WindowStartupLocation.CenterOwner, Icon = this.Icon };
@@ -324,11 +332,7 @@ namespace KeyPulse
             var chk = new CheckBox { Content = "Launch on Boot", IsChecked = isStartup, TabIndex = 0, IsTabStop = true };
             chk.IsCheckedChanged += (s, ev) =>
             {
-                using var regKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
-                if (chk.IsChecked == true)
-                    regKey?.SetValue(AppName, Process.GetCurrentProcess().MainModule?.FileName ?? "");
-                else
-                    regKey?.DeleteValue(AppName, false);
+                Program.SetStartup(chk.IsChecked == true);
             };
             Grid.SetRow(chk, 0);
             grid.Children.Add(chk);
@@ -403,7 +407,7 @@ namespace KeyPulse
             };
 
             w.Content = grid;
-            w.ShowDialog(this);
+            if (this.IsVisible) { w.ShowDialog(this); } else { w.Show(); }
         }
 
         protected override void OnClosing(Avalonia.Controls.WindowClosingEventArgs e)
@@ -421,3 +425,7 @@ namespace KeyPulse
         }
     }
 }
+
+
+
+

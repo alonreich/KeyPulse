@@ -23,5 +23,12 @@
       <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
       <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="System.Windows.Extensions" Version="10.0.11" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\click.wav" />
+    <EmbeddedResource Include="Assets\close.wav" />
+    <EmbeddedResource Include="Assets\error.wav" />
   </ItemGroup>
 </Project>
+

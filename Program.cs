@@ -1,131 +1,143 @@
-using Avalonia;
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
-using Microsoft.Win32;
+using Avalonia;
+using System.Diagnostics;
 
 namespace KeyPulse;
 
 class Program
 {
+    private static Mutex? _mutex;
     public static string AppName = "KeyPulse";
-    public static string InstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", AppName);
+    public static string InstallDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), AppName);
     public static string ExePath = Path.Combine(InstallDir, "KeyPulse.exe");
+
+    private static object _logLock = new object();
+    private static string DebugLogPath = Path.Combine(InstallDir, "keypulse_debug.txt");
+    private static string CrashLogPath = Path.Combine(InstallDir, "keypulse_crash.txt");
+
+    public static void LogDebug(string msg) => RollingLog(DebugLogPath, msg);
+    public static void LogCrash(string msg) => RollingLog(CrashLogPath, msg);
+
+    private static void RollingLog(string path, string msg)
+    {
+        try
+        {
+            lock (_logLock)
+            {
+                if (File.Exists(path) && new FileInfo(path).Length > 5 * 1024 * 1024)
+                {
+                    File.Delete(path);
+                }
+                File.AppendAllText(path, $"[{DateTime.Now:O}] {msg}\n");
+            }
+        }
+        catch { }
+    }
 
     [STAThread]
     public static void Main(string[] args)
     {
+                _mutex = new Mutex(false, "KeyPulse_SingleInstance");
+        bool createdNew = false;
+        try { createdNew = _mutex.WaitOne(3000); } catch (AbandonedMutexException) { createdNew = true; }
+        if (!createdNew && !args.Contains("--uninstall") && !args.Contains("--install-worker")) return;
+
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+        {
+            LogCrash($"Unhandled Exception: {e.ExceptionObject}");
+        };
+
+        ExtractNativeLibs();
+
         if (args.Contains("--uninstall"))
         {
             var tempUninstaller = Path.Combine(Path.GetTempPath(), "KeyPulse_Uninstaller.exe");
             if (!Environment.ProcessPath!.Equals(tempUninstaller, StringComparison.OrdinalIgnoreCase))
             {
                 File.Copy(Environment.ProcessPath!, tempUninstaller, true);
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = tempUninstaller,
-                    Arguments = "--uninstall",
-                    UseShellExecute = true
-                });
+                try { var ps = new Process { StartInfo = new ProcessStartInfo { FileName = tempUninstaller, Arguments = "--uninstall", UseShellExecute = true, Verb = "runas" } }; ps.Start(); } catch { }
                 return;
             }
-            ExtractNativeLibs();
-            SafeStart(args);
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
             return;
         }
 
         if (args.Contains("--install-worker"))
         {
-            ExtractNativeLibs();
-            SafeStart(args);
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
             return;
         }
 
         if (!IsRunningFromInstallPath())
         {
-            var tempInstaller = Path.Combine(Path.GetTempPath(), "KeyPulse_Installer.exe");
-            File.Copy(Environment.ProcessPath!, tempInstaller, true);
-            Process.Start(new ProcessStartInfo
+            try
             {
-                FileName = tempInstaller,
-                Arguments = "--install-worker",
-                UseShellExecute = true
-            });
+                var ps = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = Environment.ProcessPath!,
+                        Arguments = "--install-worker",
+                        UseShellExecute = true,
+                        Verb = "runas"
+                    }
+                };
+                ps.Start();
+            }
+            catch (Exception ex)
+            {
+                LogCrash($"Elevation failed: {ex.Message}");
+            }
             return;
         }
 
-        ExtractNativeLibs();
-        SafeStart(args);
-    }
-
-    private static void SafeStart(string[] args)
-    {
-        try {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
-        } catch (Exception ex) {
-            LogCrash(ex);
-        }
-    }
-
-    public static void LogDebug(string message)
-    {
-        RollingLog(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt"), message);
-    }
-
-    public static void LogCrash(Exception ex)
-    {
-        RollingLog(Path.Combine(Path.GetTempPath(), "keypulse_crash.txt"), ex.ToString());
-        if (ex.InnerException != null)
-        {
-            RollingLog(Path.Combine(Path.GetTempPath(), "keypulse_crash.txt"), "INNER: " + ex.InnerException.ToString());
-        }
-    }
-
-    private static void RollingLog(string path, string message)
-    {
         try
         {
-            var info = new FileInfo(path);
-            if (info.Exists && info.Length > 5 * 1024 * 1024)
-            {
-                File.Delete(path);
-            }
-            File.AppendAllText(path, $"[{DateTime.Now:O}] {message}\n");
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            LogCrash($"Fatal avalonia crash: {ex}");
+        }
     }
 
     private static void ExtractNativeLibs()
     {
         LogDebug("ExtractNativeLibs started");
-        var libs = new[] { "av_libglesv2.dll", "libHarfBuzzSharp.dll", "libSkiaSharp.dll" };
-        var targetDir = Path.GetDirectoryName(Environment.ProcessPath!)!;
-        foreach (var lib in libs)
+        var asm = Assembly.GetExecutingAssembly();
+        var resources = asm.GetManifestResourceNames();
+        var outDir = Path.GetDirectoryName(Environment.ProcessPath!)!;
+
+        foreach (var res in resources)
         {
-            var target = Path.Combine(targetDir, lib);
-            if (!File.Exists(target))
+            if (res.EndsWith(".dll"))
             {
-                using var stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream($"KeyPulse.NativeLibs.{lib}");
-                if (stream != null)
+                var target = Path.Combine(outDir, res.Split('.').SkipLast(1).Last() + ".dll");
+                using var stream = asm.GetManifestResourceStream(res);
+                if (stream == null) continue;
+
+                if (!File.Exists(target) || new FileInfo(target).Length != stream.Length)
                 {
-                    try {
+                    LogDebug($"Extracting {target}");
+                    try 
+                    { 
                         using var fs = File.Create(target);
                         stream.CopyTo(fs);
-                        LogDebug($"Extracted {lib}");
-                    } catch (Exception ex) {
-                        LogDebug($"Error extracting {lib}: {ex.Message}");
+                    } 
+                    catch(Exception ex) 
+                    { 
+                        LogDebug($"Failed to extract: {ex}"); 
                     }
                 }
                 else
                 {
-                    LogDebug($"Resource KeyPulse.NativeLibs.{lib} not found!");
+                    LogDebug($"{Path.GetFileName(target)} already exists");
                 }
-            }
-            else
-            {
-                LogDebug($"{lib} already exists");
             }
         }
         LogDebug("ExtractNativeLibs finished");
@@ -133,7 +145,53 @@ class Program
 
     private static bool IsRunningFromInstallPath()
     {
-        return Environment.ProcessPath!.Equals(ExePath, StringComparison.OrdinalIgnoreCase);
+        return AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/').Equals(InstallDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static void SetStartup(bool enable)
+    {
+        try
+        {
+            var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
+            if (key == null) return;
+
+            if (enable)
+            {
+                var vbsPath = Path.Combine(InstallDir, "boot.vbs");
+                var vbsCode = $@"Set WshShell = CreateObject(""WScript.Shell"")
+WshShell.Run """"{ExePath}"""", 0, False
+WScript.Sleep 10000
+WshShell.Run """"{ExePath}"""", 0, False
+WScript.Sleep 10000
+WshShell.Run """"{ExePath}"""", 0, False
+WScript.Sleep 10000
+WshShell.Run """"{ExePath}"""", 0, False";
+                File.WriteAllText(vbsPath, vbsCode);
+                key.SetValue(AppName, $"wscript.exe \"{vbsPath}\"");
+            }
+            else
+            {
+                key.DeleteValue(AppName, false);
+                var vbsPath = Path.Combine(InstallDir, "boot.vbs");
+                if (File.Exists(vbsPath)) File.Delete(vbsPath);
+            }
+        }
+        catch { }
+    }
+
+    public static void PlaySound(string soundName)
+    {
+        try
+        {
+            var asm = typeof(Program).Assembly;
+            using var stream = asm.GetManifestResourceStream($"KeyPulse.Assets.{soundName}.wav");
+            if (stream != null)
+            {
+                using var player = new System.Media.SoundPlayer(stream);
+                player.Play();
+            }
+        }
+        catch { }
     }
 
     public static AppBuilder BuildAvaloniaApp()
@@ -142,3 +200,14 @@ class Program
             .WithInterFont()
             .LogToTrace();
 }
+
+
+
+
+
+
+
+
+
+
+

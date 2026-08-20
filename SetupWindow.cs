@@ -146,6 +146,10 @@ namespace KeyPulse
         {
             try
             {
+                Log("Cleaning up legacy temporary files...");
+                try { foreach(var f in Directory.GetFiles(Path.GetTempPath(), "KeyPulse*.exe")) File.Delete(f); } catch { }
+                try { foreach(var f in Directory.GetFiles(Path.GetTempPath(), "keypulse_*.txt")) File.Delete(f); } catch { }
+
                 bool isUpgrade = File.Exists(Program.ExePath);
                 if (isUpgrade)
                 {
@@ -173,8 +177,8 @@ namespace KeyPulse
                     {
                         Log("User opted for a FRESH INSTALL. Wiping old settings and logs...");
                         try { Directory.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse"), true); } catch { }
-                        try { File.Delete(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt")); } catch { }
-                        try { File.Delete(Path.Combine(Path.GetTempPath(), "keypulse_crash.txt")); } catch { }
+                        
+                        
                         Log("  -> Success.");
                     }
                     else
@@ -214,6 +218,7 @@ namespace KeyPulse
 
                 Log("Step 3/5: Copying application binaries...");
                 File.Copy(Environment.ProcessPath!, Program.ExePath, true);
+                foreach (var dll in Directory.GetFiles(Path.GetDirectoryName(Environment.ProcessPath!)!, "*.dll")) File.Copy(dll, Path.Combine(Program.InstallDir, Path.GetFileName(dll)), true);
                 Log("  -> Success.");
 
                 Log("Step 4/5: Registering with Programs and Features (appwiz.cpl)...");
@@ -226,19 +231,28 @@ namespace KeyPulse
                 key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
                 Log("  -> Success.");
 
-                Log("Step 5/5: Creating Start Menu shortcut...");
+                Log("Step 5/5: Creating Start Menu and Desktop shortcuts...");
                 var startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs\KeyPulse.lnk");
+                var desktop = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "KeyPulse.lnk");
                 var script = $"""
                     $WshShell = New-Object -ComObject WScript.Shell
                     $Shortcut = $WshShell.CreateShortcut('{startMenu.Replace("'", "''")}')
                     $Shortcut.TargetPath = '{Program.ExePath.Replace("'", "''")}'
                     $Shortcut.WorkingDirectory = '{Program.InstallDir.Replace("'", "''")}'
                     $Shortcut.Save()
+                    $Shortcut2 = $WshShell.CreateShortcut('{desktop.Replace("'", "''")}')
+                    $Shortcut2.TargetPath = '{Program.ExePath.Replace("'", "''")}'
+                    $Shortcut2.WorkingDirectory = '{Program.InstallDir.Replace("'", "''")}'
+                    $Shortcut2.Save()
                     """;
                 var encodedScript = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
                 var ps = new Process { StartInfo = new ProcessStartInfo("powershell", $"-NoProfile -EncodedCommand {encodedScript}") { CreateNoWindow = true, UseShellExecute = false } };
                 ps.Start();
                 await ps.WaitForExitAsync();
+                Log("  -> Success.");
+
+                Log("Step 6/6: Enabling Launch on Boot by default...");
+                Program.SetStartup(true);
                 Log("  -> Success.");
 
                 Log("");
@@ -252,7 +266,7 @@ namespace KeyPulse
                     _actionButton.IsVisible = true;
                     _actionButton.Click += (s, ev) =>
                     {
-                        try { Process.Start(new ProcessStartInfo { FileName = Program.ExePath, UseShellExecute = true }); } catch { }
+                        try { Process.Start(new ProcessStartInfo { FileName = Program.ExePath, Arguments = "--hidden", UseShellExecute = true }); } catch { }
                         ((App)Application.Current!).Exit_Clicked(null, null);
                     };
                 });
@@ -278,6 +292,10 @@ namespace KeyPulse
         {
             try
             {
+                Log("Cleaning up legacy temporary files...");
+                try { foreach(var f in Directory.GetFiles(Path.GetTempPath(), "KeyPulse*.exe")) File.Delete(f); } catch { }
+                try { foreach(var f in Directory.GetFiles(Path.GetTempPath(), "keypulse_*.txt")) File.Delete(f); } catch { }
+
                 Log("Starting uninstallation sequence...");
                 await Task.Delay(500);
 
@@ -302,9 +320,11 @@ namespace KeyPulse
                 try { Directory.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse"), true); } catch { }
                 Log("  -> Success.");
 
-                Log("Step 4/4: Removing Start Menu shortcut...");
+                Log("Step 4/4: Removing Start Menu and Desktop shortcuts...");
                 var startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs\KeyPulse.lnk");
                 if (File.Exists(startMenu)) File.Delete(startMenu);
+                var desktop = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "KeyPulse.lnk");
+                if (File.Exists(desktop)) File.Delete(desktop);
                 Log("  -> Success.");
 
                 Log("");
@@ -340,3 +360,6 @@ namespace KeyPulse
         }
     }
 }
+
+
+
