@@ -98,6 +98,42 @@ namespace KeyPulse
             }
         }
 
+        public async void ActionCombo_SelectionChanged(object? sender, Avalonia.Controls.SelectionChangedEventArgs e)
+        {
+            if (sender is ComboBox cb && cb.SelectedIndex != -1)
+            {
+                var actionType = (ActionType)cb.SelectedIndex;
+                var targetText = this.FindControl<TextBox>("TargetText");
+                if (targetText == null) return;
+
+                if (actionType == ActionType.OpenFolder)
+                {
+                    var options = new Avalonia.Platform.Storage.FolderPickerOpenOptions { Title = "Select Folder", AllowMultiple = false };
+                    var folders = await this.StorageProvider.OpenFolderPickerAsync(options);
+                    if (folders != null && folders.Count > 0)
+                    {
+                        targetText.Text = folders[0].Path.LocalPath;
+                    }
+                }
+                else if (actionType == ActionType.LaunchProgram)
+                {
+                    var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { 
+                        Title = "Select Executable", 
+                        AllowMultiple = false, 
+                        FileTypeFilter = new[] { 
+                            new Avalonia.Platform.Storage.FilePickerFileType("Executables") { Patterns = new[] { "*.exe", "*.bat", "*.cmd", "*.ps1", "*.vbs", "*.lnk" } }, 
+                            new Avalonia.Platform.Storage.FilePickerFileType("All Files") { Patterns = new[] { "*.*" } } 
+                        } 
+                    };
+                    var files = await this.StorageProvider.OpenFilePickerAsync(options);
+                    if (files != null && files.Count > 0)
+                    {
+                        targetText.Text = "\"" + files[0].Path.LocalPath + "\"";
+                    }
+                }
+            }
+        }
+
         private void ExecuteAction(HotkeyEntry entry)
         {
             try
@@ -105,7 +141,7 @@ namespace KeyPulse
                 switch (entry.Action)
                 {
                     case ActionType.OpenFolder:
-                        Process.Start("explorer.exe", $"\"{entry.Target}\"");
+                        Process.Start("explorer.exe", $"\"{entry.Target.Trim('"')}\"");
                         break;
                     case ActionType.LaunchProgram:
                         string fileName = entry.Target;
@@ -117,10 +153,26 @@ namespace KeyPulse
                                 fileName = fileName.Substring(1, end - 1);
                             }
                         } else {
-                            int space = fileName.IndexOf(" ");
-                            if (space > 0) {
-                                arguments = fileName.Substring(space + 1).Trim();
-                                fileName = fileName.Substring(0, space);
+                            if (!File.Exists(fileName)) {
+                                int lastSpace = fileName.LastIndexOf(" ");
+                                while (lastSpace > 0) {
+                                    string testPath = fileName.Substring(0, lastSpace);
+                                    if (File.Exists(testPath)) {
+                                        arguments = fileName.Substring(lastSpace + 1).Trim();
+                                        fileName = testPath;
+                                        break;
+                                    }
+                                    lastSpace = fileName.LastIndexOf(" ", lastSpace - 1);
+                                }
+                                if (!File.Exists(fileName))
+                                {
+                                    int firstSpace = fileName.IndexOf(" ");
+                                    if (firstSpace > 0)
+                                    {
+                                        arguments = fileName.Substring(firstSpace + 1).Trim();
+                                        fileName = fileName.Substring(0, firstSpace);
+                                    }
+                                }
                             }
                         }
                         Process.Start(new ProcessStartInfo(fileName, arguments) { UseShellExecute = true });
@@ -207,9 +259,25 @@ namespace KeyPulse
         {
             if (sender is Button btn && btn.DataContext is HotkeyEntry entry)
             {
-                Hotkeys.Remove(entry);
-                SaveConfig();
-                ApplyHotkeys();
+                if (btn.Content?.ToString() == "Confirm?")
+                {
+                    Hotkeys.Remove(entry);
+                    SaveConfig();
+                    ApplyHotkeys();
+                }
+                else
+                {
+                    btn.Content = "Confirm?";
+                    btn.Foreground = Avalonia.Media.Brushes.Red;
+                    Avalonia.Threading.DispatcherTimer.RunOnce(() =>
+                    {
+                        if (btn.Content?.ToString() == "Confirm?")
+                        {
+                            btn.Content = "Remove";
+                            btn.Foreground = Avalonia.Media.Brushes.White; // Reset color, since we force Dark mode this is safe
+                        }
+                    }, TimeSpan.FromSeconds(3));
+                }
             }
         }
 
@@ -253,7 +321,7 @@ namespace KeyPulse
             var w = new Window { Title = "Settings", Width = 400, Height = 250, WindowStartupLocation = WindowStartupLocation.CenterOwner, Icon = this.Icon };
             var grid = new Grid { Margin = new Avalonia.Thickness(20), RowDefinitions = new Avalonia.Controls.RowDefinitions("Auto,Auto,Auto,*,Auto") };
             
-            var chk = new CheckBox { Content = "Launch on Boot", IsChecked = isStartup };
+            var chk = new CheckBox { Content = "Launch on Boot", IsChecked = isStartup, TabIndex = 0, IsTabStop = true };
             chk.IsCheckedChanged += (s, ev) =>
             {
                 using var regKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
@@ -265,11 +333,11 @@ namespace KeyPulse
             Grid.SetRow(chk, 0);
             grid.Children.Add(chk);
 
-            var backupBtn = new Button { Content = "Backup Configuration", Margin = new Avalonia.Thickness(0,10,0,0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+            var backupBtn = new Button { Content = "Backup Configuration", Margin = new Avalonia.Thickness(0,10,0,0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), Background = Avalonia.Media.Brushes.DarkSlateBlue, TabIndex = 1, IsTabStop = true };
             Grid.SetRow(backupBtn, 1);
             grid.Children.Add(backupBtn);
 
-            var restoreBtn = new Button { Content = "Restore Configuration", Margin = new Avalonia.Thickness(0,10,0,0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+            var restoreBtn = new Button { Content = "Restore Configuration", Margin = new Avalonia.Thickness(0,10,0,0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), Background = Avalonia.Media.Brushes.Transparent, BorderBrush = Avalonia.Media.Brushes.Gray, BorderThickness = new Avalonia.Thickness(1), TabIndex = 2, IsTabStop = true };
             Grid.SetRow(restoreBtn, 2);
             grid.Children.Add(restoreBtn);
 
@@ -277,13 +345,14 @@ namespace KeyPulse
             Grid.SetRow(statusTxt, 3);
             grid.Children.Add(statusTxt);
 
-            var closeBtn = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
+            var closeBtn = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 3, IsTabStop = true };
             closeBtn.Click += (s, ev) => w.Close();
             Grid.SetRow(closeBtn, 4);
             grid.Children.Add(closeBtn);
 
             backupBtn.Click += async (s, ev) =>
             {
+                backupBtn.IsEnabled = false; restoreBtn.IsEnabled = false;
                 var options = new Avalonia.Platform.Storage.FilePickerSaveOptions { Title = "Export Backup", DefaultExtension = "json", SuggestedFileName = "KeyPulse_Backup.json" };
                 var file = await w.StorageProvider.SaveFilePickerAsync(options);
                 if (file != null)
@@ -295,10 +364,12 @@ namespace KeyPulse
                         statusTxt.Foreground = Avalonia.Media.Brushes.LightGreen;
                     } catch (Exception ex) { statusTxt.Text = "Export failed: " + ex.Message; statusTxt.Foreground = Avalonia.Media.Brushes.Red; }
                 }
+                backupBtn.IsEnabled = true; restoreBtn.IsEnabled = true;
             };
 
             restoreBtn.Click += async (s, ev) =>
             {
+                backupBtn.IsEnabled = false; restoreBtn.IsEnabled = false;
                 var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { Title = "Import Backup", AllowMultiple = false };
                 var files = await w.StorageProvider.OpenFilePickerAsync(options);
                 if (files != null && files.Count > 0)
@@ -319,15 +390,16 @@ namespace KeyPulse
                             SaveConfig();
                             ApplyHotkeys();
                             if (conflicts > 0) {
-                                statusTxt.Text = $"Restored with warnings: {conflicts} shortcut(s) are already taken by the OS or another app (it is technically impossible to identify which external app). Please re-assign them.";
+                                statusTxt.Text = $"⚠ RESTORE WARNING\n\n• {conflicts} shortcut(s) could not be registered.\n• These keys are reserved by Windows or another app.\n\nPlease assign new keys.";
                                 statusTxt.Foreground = Avalonia.Media.Brushes.Orange;
                             } else {
-                                statusTxt.Text = "Restore completed successfully with zero conflicts.";
+                                statusTxt.Text = "✔ Restore completed successfully.\nAll shortcuts are active.";
                                 statusTxt.Foreground = Avalonia.Media.Brushes.LightGreen;
                             }
                         }
                     } catch (Exception ex) { statusTxt.Text = "Import failed: " + ex.Message; statusTxt.Foreground = Avalonia.Media.Brushes.Red; }
                 }
+                backupBtn.IsEnabled = true; restoreBtn.IsEnabled = true;
             };
 
             w.Content = grid;

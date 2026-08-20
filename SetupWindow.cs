@@ -15,6 +15,9 @@ namespace KeyPulse
     public class SetupWindow : Window
     {
         private TextBlock _logText;
+        private TextBlock _headerText;
+        private Button _actionButton;
+        private Grid _mainGrid;
         private bool _isUninstall;
 
         private AppConfig _config = new AppConfig();
@@ -30,6 +33,15 @@ namespace KeyPulse
 
             LoadConfig();
 
+            _headerText = new TextBlock
+            {
+                Text = isUninstall ? "Processing Uninstallation..." : "Processing Installation...",
+                FontSize = 22,
+                FontWeight = FontWeight.Bold,
+                Margin = new Thickness(15, 15, 15, 5),
+                Foreground = Brushes.LightBlue
+            };
+
             _logText = new TextBlock
             {
                 TextWrapping = TextWrapping.Wrap,
@@ -38,8 +50,30 @@ namespace KeyPulse
                 FontSize = 14
             };
 
-            var scroll = new ScrollViewer { Content = _logText, Margin = new Thickness(10) };
-            Content = scroll;
+            _actionButton = new Button
+            {
+                Content = "...",
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(15),
+                Padding = new Thickness(25, 10),
+                IsVisible = false,
+                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+            };
+
+            _mainGrid = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto") };
+            
+            Grid.SetRow(_headerText, 0);
+            _mainGrid.Children.Add(_headerText);
+
+            var scroll = new ScrollViewer { Content = _logText, Margin = new Thickness(15, 0, 15, 0) };
+            var border = new Border { BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1), Margin = new Thickness(15, 0, 15, 0), Child = scroll };
+            Grid.SetRow(border, 1);
+            _mainGrid.Children.Add(border);
+
+            Grid.SetRow(_actionButton, 2);
+            _mainGrid.Children.Add(_actionButton);
+
+            Content = _mainGrid;
 
             Loaded += SetupWindow_Loaded;
             Closing += SetupWindow_Closing;
@@ -112,13 +146,64 @@ namespace KeyPulse
         {
             try
             {
+                bool isUpgrade = File.Exists(Program.ExePath);
+                if (isUpgrade)
+                {
+                    var tcs = new TaskCompletionSource<bool>();
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        var panel = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Spacing = 20 };
+                        panel.Children.Add(new TextBlock { Text = "Existing Installation Detected", FontSize = 22, FontWeight = FontWeight.Bold, HorizontalAlignment = HorizontalAlignment.Center, Foreground = Brushes.LightBlue });
+                        panel.Children.Add(new TextBlock { Text = "Do you want to wipe all settings for a fresh install or keep your existing configuration?", TextWrapping = TextWrapping.Wrap, MaxWidth = 450, TextAlignment = TextAlignment.Center });
+                        
+                        var btnKeep = new Button { Content = "Keep Settings & Upgrade", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand) };
+                        var btnWipe = new Button { Content = "Wipe Settings (Fresh Install)", Foreground = Brushes.LightCoral, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand) };
+                        
+                        btnKeep.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(false); };
+                        btnWipe.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(true); };
+                        
+                        panel.Children.Add(btnKeep);
+                        panel.Children.Add(btnWipe);
+                        
+                        Content = new Border { Background = new SolidColorBrush(Color.Parse("#1e1e1e")), Child = panel };
+                    });
+
+                    bool wipe = await tcs.Task;
+                    if (wipe)
+                    {
+                        Log("User opted for a FRESH INSTALL. Wiping old settings and logs...");
+                        try { Directory.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse"), true); } catch { }
+                        try { File.Delete(Path.Combine(Path.GetTempPath(), "keypulse_debug.txt")); } catch { }
+                        try { File.Delete(Path.Combine(Path.GetTempPath(), "keypulse_crash.txt")); } catch { }
+                        Log("  -> Success.");
+                    }
+                    else
+                    {
+                        Log("User opted to UPGRADE. Keeping existing settings.");
+                        Log("Validating existing configuration schema...");
+                        try 
+                        {
+                            var json = File.ReadAllText(ConfigPath);
+                            var loaded = System.Text.Json.JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.AppConfig);
+                            if (loaded == null || loaded.Hotkeys == null) throw new Exception("Invalid Schema");
+                            File.WriteAllText(ConfigPath, System.Text.Json.JsonSerializer.Serialize(loaded, AppConfigJsonContext.Default.AppConfig));
+                            Log("  -> Schema valid.");
+                        } 
+                        catch (Exception)
+                        {
+                            Log("  -> Config corrupted or outdated. Resetting to default.");
+                            try { File.Delete(ConfigPath); } catch { }
+                        }
+                    }
+                }
+
                 Log("Starting installation sequence...");
                 await Task.Delay(500);
 
                 Log("Step 1/5: Terminating running instances...");
                 foreach (var p in Process.GetProcessesByName("KeyPulse"))
                 {
-                    if (p.Id != Environment.ProcessId) { try { p.Kill(); } catch { } }
+                    if (p.Id != Environment.ProcessId) { try { p.Kill(); p.WaitForExit(3000); } catch { } }
                 }
                 await Task.Delay(500);
                 Log("  -> Success.");
@@ -145,29 +230,47 @@ namespace KeyPulse
                 var startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Microsoft\Windows\Start Menu\Programs\KeyPulse.lnk");
                 var script = $"""
                     $WshShell = New-Object -ComObject WScript.Shell
-                    $Shortcut = $WshShell.CreateShortcut('{startMenu}')
-                    $Shortcut.TargetPath = '{Program.ExePath}'
-                    $Shortcut.WorkingDirectory = '{Program.InstallDir}'
+                    $Shortcut = $WshShell.CreateShortcut('{startMenu.Replace("'", "''")}')
+                    $Shortcut.TargetPath = '{Program.ExePath.Replace("'", "''")}'
+                    $Shortcut.WorkingDirectory = '{Program.InstallDir.Replace("'", "''")}'
                     $Shortcut.Save()
                     """;
-                var ps = new Process { StartInfo = new ProcessStartInfo("powershell", $"-NoProfile -Command \"{script}\"") { CreateNoWindow = true, UseShellExecute = false } };
+                var encodedScript = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
+                var ps = new Process { StartInfo = new ProcessStartInfo("powershell", $"-NoProfile -EncodedCommand {encodedScript}") { CreateNoWindow = true, UseShellExecute = false } };
                 ps.Start();
                 await ps.WaitForExitAsync();
                 Log("  -> Success.");
 
                 Log("");
-                Log("INSTALLATION COMPLETE. Launching KeyPulse in 2 seconds...");
-                await Task.Delay(2000);
-                Process.Start(new ProcessStartInfo { FileName = Program.ExePath, UseShellExecute = true });
+                Log("INSTALLATION COMPLETE.");
+                
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _headerText.Text = "INSTALLATION SUCCESSFUL";
+                    _headerText.Foreground = Brushes.LightGreen;
+                    _actionButton.Content = "Launch KeyPulse & Close";
+                    _actionButton.IsVisible = true;
+                    _actionButton.Click += (s, ev) =>
+                    {
+                        try { Process.Start(new ProcessStartInfo { FileName = Program.ExePath, UseShellExecute = true }); } catch { }
+                        ((App)Application.Current!).Exit_Clicked(null, null);
+                    };
+                });
             }
             catch (Exception ex)
             {
                 Log($"\nERROR during installation: {ex.Message}");
-                await Task.Delay(5000);
-            }
-            finally
-            {
-                Dispatcher.UIThread.Post(() => ((App)Application.Current!).Exit_Clicked(null, null));
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _headerText.Text = "INSTALLATION FAILED";
+                    _headerText.Foreground = Brushes.Red;
+                    _actionButton.Content = "Close Setup";
+                    _actionButton.IsVisible = true;
+                    _actionButton.Click += (s, ev) =>
+                    {
+                        ((App)Application.Current!).Exit_Clicked(null, null);
+                    };
+                });
             }
         }
 
@@ -181,7 +284,7 @@ namespace KeyPulse
                 Log("Step 1/4: Terminating running instances...");
                 foreach (var p in Process.GetProcessesByName("KeyPulse"))
                 {
-                    if (p.Id != Environment.ProcessId) { try { p.Kill(); } catch { } }
+                    if (p.Id != Environment.ProcessId) { try { p.Kill(); p.WaitForExit(3000); } catch { } }
                 }
                 await Task.Delay(500);
                 Log("  -> Success.");
@@ -205,17 +308,34 @@ namespace KeyPulse
                 Log("  -> Success.");
 
                 Log("");
-                Log("UNINSTALLATION COMPLETE. Exiting in 3 seconds...");
-                await Task.Delay(3000);
+                Log("UNINSTALLATION COMPLETE.");
+                
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _headerText.Text = "UNINSTALLATION SUCCESSFUL";
+                    _headerText.Foreground = Brushes.LightGreen;
+                    _actionButton.Content = "Close Setup";
+                    _actionButton.IsVisible = true;
+                    _actionButton.Click += (s, ev) =>
+                    {
+                        ((App)Application.Current!).Exit_Clicked(null, null);
+                    };
+                });
             }
             catch (Exception ex)
             {
                 Log($"\nERROR during uninstallation: {ex.Message}");
-                await Task.Delay(5000);
-            }
-            finally
-            {
-                Dispatcher.UIThread.Post(() => ((App)Application.Current!).Exit_Clicked(null, null));
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _headerText.Text = "UNINSTALLATION FAILED";
+                    _headerText.Foreground = Brushes.Red;
+                    _actionButton.Content = "Close Setup";
+                    _actionButton.IsVisible = true;
+                    _actionButton.Click += (s, ev) =>
+                    {
+                        ((App)Application.Current!).Exit_Clicked(null, null);
+                    };
+                });
             }
         }
     }

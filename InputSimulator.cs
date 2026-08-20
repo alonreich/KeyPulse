@@ -109,6 +109,9 @@ namespace KeyPulse
             return result;
         }
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GlobalFree(IntPtr hMem);
+
         private static void SetWin32ClipboardText(string text)
         {
             if (!OpenClipboard(IntPtr.Zero)) return;
@@ -126,7 +129,14 @@ namespace KeyPulse
                 {
                     Marshal.Copy(text.ToCharArray(), 0, target, text.Length);
                     GlobalUnlock(hGlobal);
-                    SetClipboardData(CF_UNICODETEXT, hGlobal);
+                    if (SetClipboardData(CF_UNICODETEXT, hGlobal) == IntPtr.Zero)
+                    {
+                        GlobalFree(hGlobal);
+                    }
+                }
+                else
+                {
+                    GlobalFree(hGlobal);
                 }
             }
             CloseClipboard();
@@ -159,7 +169,7 @@ namespace KeyPulse
 
             ThreadPool.QueueUserWorkItem(_ => 
             {
-                Thread.Sleep(300);
+                Thread.Sleep(1500);
                 if (backup != null)
                 {
                     SetWin32ClipboardText(backup);

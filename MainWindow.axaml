@@ -10,9 +10,9 @@
         Title="KeyPulse" Width="600" Height="400" MinWidth="500" MinHeight="300">
     
     <Grid RowDefinitions="Auto,*,Auto" Margin="15">
-        <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto" Margin="0,0,0,15">
-            <TextBox Grid.Column="0" Name="KeyCombo" PlaceholderText="Press keys..." Width="130" IsReadOnly="True" KeyDown="KeyCombo_KeyDown" TextChanged="KeyCombo_TextChanged" Margin="0,0,10,0"/>
-            <ComboBox Grid.Column="1" Name="ActionCombo" SelectedIndex="0" Width="140" Margin="0,0,10,0">
+        <Grid Grid.Row="0" ColumnDefinitions="2*,2*,3*,Auto" Margin="0,0,0,15">
+            <TextBox Grid.Column="0" Name="KeyCombo" PlaceholderText="Press keys..." HorizontalAlignment="Stretch" IsReadOnly="True" KeyDown="KeyCombo_KeyDown" TextChanged="KeyCombo_TextChanged" Margin="0,0,10,0"/>
+            <ComboBox Grid.Column="1" Name="ActionCombo" SelectedIndex="0" HorizontalAlignment="Stretch" Margin="0,0,10,0" SelectionChanged="ActionCombo_SelectionChanged">
                 <ComboBoxItem>Open Folder</ComboBoxItem>
                 <ComboBoxItem>Launch Program</ComboBoxItem>
                 <ComboBoxItem>Browse Chrome</ComboBoxItem>
@@ -20,7 +20,7 @@
                 <ComboBoxItem>Insert Text (Paste)</ComboBoxItem>
             </ComboBox>
             <TextBox Grid.Column="2" Name="TargetText" PlaceholderText="Target (Path/URL/Text)" HorizontalAlignment="Stretch" Margin="0,0,10,0"/>
-            <Button Grid.Column="3" Content="Add" Click="Add_Click" Padding="15,5" />
+            <Button Grid.Column="3" Content="Add" Click="Add_Click" Padding="15,5" Cursor="Hand" />
         </Grid>
         <TextBlock Name="ErrorText" Grid.Row="0" Foreground="#ff4444" Margin="0,35,0,0" IsVisible="False" FontSize="12" />
         
@@ -32,7 +32,7 @@
                             <TextBlock Grid.Column="0" Text="{Binding KeyCombination}" VerticalAlignment="Center" FontWeight="Bold" Foreground="#4da6ff" />
                             <TextBlock Grid.Column="1" Text="{Binding Action}" VerticalAlignment="Center" Foreground="#aaa" />
                             <TextBlock Grid.Column="2" Text="{Binding Target}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
-                            <Button Grid.Column="3" Content="Remove" Click="Remove_Click" Padding="10,3" FontSize="12" />
+                            <Button Grid.Column="3" Content="Remove" Click="Remove_Click" Padding="10,3" FontSize="12" Cursor="Hand" />
                         </Grid>
                     </DataTemplate>
                 </ListBox.ItemTemplate>
@@ -41,7 +41,7 @@
         
         <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,15,0,0">
             <TextBlock Grid.Column="0" Text="KeyPulse Background Service Running (Run as Admin for elevated apps)" ToolTip.Tip="If you wish to trigger hotkeys and type text into Administrator elevated windows, you must run KeyPulse as Administrator." Foreground="#888" VerticalAlignment="Center" FontSize="11" />
-            <Button Grid.Column="1" Content="Settings ⚙" Click="Settings_Click" Padding="15,5" />
+            <Button Grid.Column="1" Content="Settings ⚙" Click="Settings_Click" Padding="15,5" Cursor="Hand" />
         </Grid>
     </Grid>
 </Window>

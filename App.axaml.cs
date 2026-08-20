@@ -15,35 +15,35 @@ public partial class App : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
-        System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "OnFrameworkInitializationCompleted started\n");
+        KeyPulse.Program.LogDebug("OnFrameworkInitializationCompleted started");
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var args = System.Environment.GetCommandLineArgs();
-            System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "Args: " + string.Join(", ", args) + "\n");
+            KeyPulse.Program.LogDebug("Args: " + string.Join(", ", args));
             
             if (System.Linq.Enumerable.Contains(args, "--uninstall"))
             {
                 desktop.MainWindow = new SetupWindow(true);
-                System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "Set SetupWindow(uninstall)\n");
+                KeyPulse.Program.LogDebug("Set SetupWindow(uninstall)");
             }
             else if (System.Linq.Enumerable.Contains(args, "--install-worker"))
             {
                 desktop.MainWindow = new SetupWindow(false);
-                System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "Set SetupWindow(install)\n");
+                KeyPulse.Program.LogDebug("Set SetupWindow(install)");
             }
             else
             {
                 desktop.MainWindow = new MainWindow();
-                System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "Set MainWindow\n");
+                KeyPulse.Program.LogDebug("Set MainWindow");
             }
         }
         else
         {
-            System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "Not IClassicDesktopStyleApplicationLifetime\n");
+            KeyPulse.Program.LogDebug("Not IClassicDesktopStyleApplicationLifetime");
         }
 
         base.OnFrameworkInitializationCompleted();
-        System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "keypulse_debug.txt"), "OnFrameworkInitializationCompleted finished\n");
+        KeyPulse.Program.LogDebug("OnFrameworkInitializationCompleted finished");
     }
 
     public void Settings_Clicked(object? sender, System.EventArgs e)

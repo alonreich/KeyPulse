@@ -24,7 +24,7 @@ namespace KeyPulse
         private static extern bool DestroyWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
-        private static extern sbyte GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+        private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
 
         [DllImport("user32.dll")]
         private static extern bool TranslateMessage(ref MSG lpMsg);
@@ -55,10 +55,12 @@ namespace KeyPulse
 
         private const uint WM_HOTKEY = 0x0312;
         private const uint WM_QUIT = 0x0012;
+        private const uint WM_USER = 0x0400;
         private static IntPtr _hWnd;
         private static Thread? _thread;
         private static Dictionary<int, Action> _actions = new();
         private static int _currentId = 0;
+        private static System.Collections.Concurrent.ConcurrentQueue<Action> _taskQueue = new();
 
         public static void Start()
         {
@@ -81,6 +83,13 @@ namespace KeyPulse
                             });
                         }
                     }
+                    else if (msg.message == WM_USER)
+                    {
+                        while (_taskQueue.TryDequeue(out var task))
+                        {
+                            try { task(); } catch { }
+                        }
+                    }
                     TranslateMessage(ref msg);
                     DispatchMessage(ref msg);
                 }
@@ -90,6 +99,7 @@ namespace KeyPulse
             _thread.IsBackground = true;
             _thread.Start();
             tcs.Wait();
+            tcs.Dispose();
         }
 
         public static void Stop()
@@ -101,26 +111,43 @@ namespace KeyPulse
             }
         }
 
+        private static void RunOnThread(Action action)
+        {
+            if (Thread.CurrentThread == _thread) {
+                action();
+            } else {
+                using var tcs = new ManualResetEventSlim(false);
+                _taskQueue.Enqueue(() => { action(); tcs.Set(); });
+                PostMessage(_hWnd, WM_USER, IntPtr.Zero, IntPtr.Zero);
+                tcs.Wait();
+            }
+        }
+
         public static void Clear()
         {
-            foreach (var id in _actions.Keys)
-            {
-                UnregisterHotKey(_hWnd, id);
-            }
-            _actions.Clear();
-            _currentId = 0;
+            RunOnThread(() => {
+                foreach (var id in _actions.Keys)
+                {
+                    UnregisterHotKey(_hWnd, id);
+                }
+                _actions.Clear();
+                _currentId = 0;
+            });
         }
 
         public static bool Probe(string combo)
         {
             if (!ParseCombo(combo, out uint modifiers, out uint vk)) return false;
             int probeId = 99999;
-            if (RegisterHotKey(_hWnd, probeId, modifiers | 0x4000, vk))
-            {
-                UnregisterHotKey(_hWnd, probeId);
-                return true;
-            }
-            return false;
+            bool success = false;
+            RunOnThread(() => {
+                if (RegisterHotKey(_hWnd, probeId, modifiers | 0x4000, vk))
+                {
+                    UnregisterHotKey(_hWnd, probeId);
+                    success = true;
+                }
+            });
+            return success;
         }
 
         private static bool ParseCombo(string combo, out uint modifiers, out uint vk)
@@ -130,7 +157,7 @@ namespace KeyPulse
 
             if (string.IsNullOrWhiteSpace(combo)) return false;
 
-            var parts = combo.Split('+');
+            var parts = combo.Split('+', StringSplitOptions.RemoveEmptyEntries);
             foreach (var p in parts)
             {
                 var trim = p.Trim().ToLowerInvariant();
@@ -138,6 +165,7 @@ namespace KeyPulse
                 else if (trim == "alt") modifiers |= 0x0001;
                 else if (trim == "shift") modifiers |= 0x0004;
                 else if (trim == "win" || trim == "windows") modifiers |= 0x0008;
+                else if (trim == "oemplus" || trim == "add" || trim == "plus" || trim == "+") vk = 0xBB;
                 else
                 {
                     vk = trim switch
@@ -195,12 +223,15 @@ namespace KeyPulse
             if (!ParseCombo(combo, out uint modifiers, out uint vk)) return false;
 
             _currentId++;
-            if (RegisterHotKey(_hWnd, _currentId, modifiers | 0x4000, vk)) // 0x4000 = MOD_NOREPEAT
-            {
-                _actions[_currentId] = action;
-                return true;
-            }
-            return false;
+            bool success = false;
+            RunOnThread(() => {
+                if (RegisterHotKey(_hWnd, _currentId, modifiers | 0x4000, vk)) // 0x4000 = MOD_NOREPEAT
+                {
+                    _actions[_currentId] = action;
+                    success = true;
+                }
+            });
+            return success;
         }
     }
 }
