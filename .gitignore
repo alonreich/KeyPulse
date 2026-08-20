@@ -482,3 +482,8 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Custom
+compiled/
+test_coreclr/
+test_out/
