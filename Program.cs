@@ -58,6 +58,16 @@ class Program
         {
             LogCrash($"Unhandled Exception: {e.ExceptionObject}");
         };
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) =>
+        {
+            LogCrash($"Unobserved Task Exception: {e.Exception}");
+            e.SetObserved();
+        };
+        Avalonia.Threading.Dispatcher.UIThread.UnhandledException += (s, e) =>
+        {
+            LogCrash($"Dispatcher Unhandled Exception: {e.Exception}");
+            e.Handled = true;
+        };
 
         ExtractNativeLibs();
 

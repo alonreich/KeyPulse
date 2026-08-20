@@ -167,7 +167,7 @@ namespace KeyPulse
                 SaveConfig();
             else
             {
-                var selfDeleteScript = $"/c ping 127.0.0.1 -n 3 > nul & del /F /q \"{Environment.ProcessPath}\"";
+                var selfDeleteScript = $"/c for /L %i in (1,1,30) do (ping 127.0.0.1 -n 2 > nul & del /F /q \"{Environment.ProcessPath}\" & if not exist \"{Environment.ProcessPath}\" exit)";
                 Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
             }
         }

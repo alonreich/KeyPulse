@@ -41,6 +41,8 @@ namespace KeyPulse
             }
         }
 
+        public bool AllowRiskyShortcut { get; set; }
+
         private bool _isEditing;
         [JsonIgnore]
         public bool IsEditing
@@ -86,8 +88,18 @@ namespace KeyPulse
                 if (_target == value) return;
                 _target = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(HasLongTarget));
+                OnPropertyChanged(nameof(TargetOverflowHint));
             }
         }
+
+        [JsonIgnore]
+        public bool HasLongTarget => !string.IsNullOrWhiteSpace(Target) && Target.Length > 80;
+
+        [JsonIgnore]
+        public string TargetOverflowHint => HasLongTarget
+            ? "This target is shortened in the list. Select the row to edit the full value above."
+            : string.Empty;
 
         [JsonIgnore]
         public string ActionDisplay => Action switch
@@ -96,7 +108,7 @@ namespace KeyPulse
             ActionType.LaunchProgram => "Launch program",
             ActionType.BrowseChrome => "Open URL",
             ActionType.TypeText => "Type text",
-            ActionType.InsertText => "Paste text",
+            ActionType.InsertText => "Paste plain text",
             _ => Action.ToString()
         };
 
@@ -158,6 +170,10 @@ namespace KeyPulse
         public double MainWindowWidth { get; set; } = 700;
         public double MainWindowHeight { get; set; } = 500;
         public string MainWindowState { get; set; } = "Normal";
+        public double ShortcutKeyColumnWidth { get; set; } = 220;
+        public double ShortcutActionColumnWidth { get; set; } = 128;
+        public double ShortcutStatusColumnWidth { get; set; } = 128;
+        public double ShortcutTargetColumnWidth { get; set; } = 468;
 
         public double SetupWindowX { get; set; } = double.NaN;
         public double SetupWindowY { get; set; } = double.NaN;

@@ -74,6 +74,21 @@ namespace KeyPulse
         private const int WM_SYSKEYDOWN = 0x0104;
         private const int WM_KEYUP = 0x0101;
         private const int WM_SYSKEYUP = 0x0105;
+        private const int VK_SHIFT = 0x10;
+        private const int VK_CONTROL = 0x11;
+        private const int VK_MENU = 0x12;
+        private const int VK_LSHIFT = 0xA0;
+        private const int VK_RSHIFT = 0xA1;
+        private const int VK_LCONTROL = 0xA2;
+        private const int VK_RCONTROL = 0xA3;
+        private const int VK_LMENU = 0xA4;
+        private const int VK_RMENU = 0xA5;
+        private const int VK_LWIN = 0x5B;
+        private const int VK_RWIN = 0x5C;
+        private static volatile bool _captureCtrlDown;
+        private static volatile bool _captureAltDown;
+        private static volatile bool _captureShiftDown;
+        private static volatile bool _captureWinDown;
 
         public static bool IsCaptureMode { get; set; } = false;
 
@@ -91,6 +106,7 @@ namespace KeyPulse
 
         public static void EnableCaptureHook()
         {
+            ResetCaptureModifierState();
             if (_hookID == IntPtr.Zero)
             {
                 using (var curProcess = Process.GetCurrentProcess())
@@ -106,6 +122,7 @@ namespace KeyPulse
         public static void DisableCaptureHook()
         {
             IsCaptureMode = false;
+            ResetCaptureModifierState();
             if (_hookID != IntPtr.Zero)
             {
                 UnhookWindowsHookEx(_hookID);
@@ -116,6 +133,59 @@ namespace KeyPulse
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
+        private static bool IsKeyDown(int vKey)
+        {
+            return (GetAsyncKeyState(vKey) & 0x8000) != 0;
+        }
+
+        private static void ResetCaptureModifierState()
+        {
+            _captureCtrlDown = false;
+            _captureAltDown = false;
+            _captureShiftDown = false;
+            _captureWinDown = false;
+        }
+
+        private static bool IsCtrlVk(int vk)
+        {
+            return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
+        }
+
+        private static bool IsAltVk(int vk)
+        {
+            return vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU;
+        }
+
+        private static bool IsShiftVk(int vk)
+        {
+            return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT;
+        }
+
+        private static bool IsWinVk(int vk)
+        {
+            return vk == VK_LWIN || vk == VK_RWIN;
+        }
+
+        private static void UpdateCaptureModifierState(int vk, bool isDown)
+        {
+            if (IsCtrlVk(vk)) _captureCtrlDown = isDown;
+            else if (IsAltVk(vk)) _captureAltDown = isDown;
+            else if (IsShiftVk(vk)) _captureShiftDown = isDown;
+            else if (IsWinVk(vk)) _captureWinDown = isDown;
+        }
+
+        public static void GetModifierSnapshot(int currentVk, out bool ctrl, out bool alt, out bool shift, out bool win)
+        {
+            ctrl = IsKeyDown(VK_CONTROL) || IsKeyDown(VK_LCONTROL) || IsKeyDown(VK_RCONTROL)
+                || _captureCtrlDown || IsCtrlVk(currentVk);
+            alt = IsKeyDown(VK_MENU) || IsKeyDown(VK_LMENU) || IsKeyDown(VK_RMENU)
+                || _captureAltDown || IsAltVk(currentVk);
+            shift = IsKeyDown(VK_SHIFT) || IsKeyDown(VK_LSHIFT) || IsKeyDown(VK_RSHIFT)
+                || _captureShiftDown || IsShiftVk(currentVk);
+            win = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN)
+                || _captureWinDown || IsWinVk(currentVk);
+        }
+
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode >= 0 && IsCaptureMode)
@@ -124,12 +194,13 @@ namespace KeyPulse
 
                 if (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)
                 {
-                    bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0;
-                    bool alt = (GetAsyncKeyState(0x12) & 0x8000) != 0;
-                    bool shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
-                    bool win = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
-
+                    UpdateCaptureModifierState(vkCode, true);
+                    GetModifierSnapshot(vkCode, out var ctrl, out var alt, out var shift, out var win);
                     OnRawKey?.Invoke(vkCode, ctrl, alt, shift, win);
+                }
+                else if (wParam == (IntPtr)WM_KEYUP || wParam == (IntPtr)WM_SYSKEYUP)
+                {
+                    UpdateCaptureModifierState(vkCode, false);
                 }
 
                 // Allow Escape, Tab, and Windows keys to fall through as escape hatches

@@ -52,6 +52,11 @@
             <sys:Double x:Key="AppFontSizeTitle">18</sys:Double>
             <sys:Double x:Key="AppButtonMinHeight">32</sys:Double>
             <sys:Double x:Key="AppInputMinHeight">34</sys:Double>
+
+            <GridLength x:Key="ShortcutKeyColumnWidth">220</GridLength>
+            <GridLength x:Key="ShortcutActionColumnWidth">128</GridLength>
+            <GridLength x:Key="ShortcutStatusColumnWidth">128</GridLength>
+            <GridLength x:Key="ShortcutTargetColumnWidth">468</GridLength>
         </ResourceDictionary>
     </Application.Resources>
 
@@ -103,6 +108,36 @@
             <Setter Property="Foreground" Value="{DynamicResource AppTextMutedBrush}" />
             <Setter Property="FontSize" Value="{DynamicResource AppFontSizeSmall}" />
             <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextAlignment" Value="Center" />
+        </Style>
+
+        <Style Selector="Border.ShortcutGridHeaderCell">
+            <Setter Property="BorderBrush" Value="{DynamicResource AppBorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="Background" Value="{DynamicResource AppPanelRaisedBrush}" />
+            <Setter Property="MinHeight" Value="32" />
+        </Style>
+
+        <Style Selector="Border.ShortcutGridCell">
+            <Setter Property="BorderBrush" Value="{DynamicResource AppBorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="MinHeight" Value="36" />
+        </Style>
+
+        <Style Selector="Border.ShortcutGridSeparatorCell">
+            <Setter Property="BorderBrush" Value="{DynamicResource AppBorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+        </Style>
+
+        <Style Selector="Border.ShortcutGridSeparatorLine">
+            <Setter Property="Background" Value="{DynamicResource AppBorderBrush}" />
+            <Setter Property="Width" Value="1" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Stretch" />
         </Style>
 
         <Style Selector="Button">
@@ -207,6 +242,9 @@
             <Setter Property="MinHeight" Value="34" />
             <Setter Property="Padding" Value="8,4" />
             <Setter Property="Cursor" Value="Arrow" />
+        </Style>
+        <Style Selector="ListBox.ShortcutList ListBoxItem">
+            <Setter Property="Padding" Value="0" />
         </Style>
         <Style Selector="ListBoxItem:pointerover">
             <Setter Property="Background" Value="{DynamicResource AppHoverBrush}" />

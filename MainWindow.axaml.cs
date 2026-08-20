@@ -19,6 +19,22 @@ namespace KeyPulse
         private readonly string ConfigPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName, "config.json");
         private readonly bool _startHidden;
         private HotkeyEntry? _editingEntry;
+        private bool _loadingEditorFields;
+        private bool _creatingDuplicate;
+        private string? _duplicateSourceCombo;
+        private bool _showingRiskyShortcutWarning;
+        private string? _approvedNewRiskyCombo;
+        private bool _shortcutColumnResizeActive;
+        private Grid? _shortcutColumnResizeGrid;
+        private string? _shortcutColumnResizeLeftKey;
+        private string? _shortcutColumnResizeRightKey;
+        private double _shortcutColumnResizeStartX;
+        private double _shortcutColumnResizeLeftStart;
+        private double _shortcutColumnResizeRightStart;
+        private double _shortcutColumnResizeLeftMin;
+        private double _shortcutColumnResizeLeftMax;
+        private double _shortcutColumnResizeRightMin;
+        private double _shortcutColumnResizeRightMax;
         private Window? _actionErrorWindow;
         private TextBlock? _actionErrorMessageText;
         private TextBlock? _actionErrorRepeatText;
@@ -36,6 +52,7 @@ namespace KeyPulse
             
             InitializeComponent();
             DataContext = this;
+            WireShortcutColumnSplitters();
             UpdateActionUi();
 
             var keyCombo = this.FindControl<TextBox>("KeyCombo");
@@ -52,7 +69,7 @@ namespace KeyPulse
 
             if (this.FindControl<TextBox>("TargetText") is TextBox targetText)
             {
-                targetText.TextChanged += (s, e) => SetFieldError("TargetText", null);
+                targetText.TextChanged += TargetText_TextChanged;
             }
 
             HotkeyManager.OnRawKey += (vk, ctrl, alt, shift, win) =>
@@ -105,6 +122,7 @@ namespace KeyPulse
             };
 
             LoadConfig();
+            ApplyShortcutColumnResources();
             HotkeyManager.Start();
             var failures = ApplyHotkeys();
             if (failures > 0)
@@ -170,10 +188,201 @@ namespace KeyPulse
             }
         }
 
+        private static double ClampColumnWidth(double value, double fallback, double min, double max)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value) || value <= 0) value = fallback;
+            return Math.Max(min, Math.Min(max, value));
+        }
+
+        private void ApplyShortcutColumnResources()
+        {
+            Resources["ShortcutKeyColumnWidth"] = new GridLength(ClampColumnWidth(_currentConfig.ShortcutKeyColumnWidth, 220, 160, 360));
+            Resources["ShortcutActionColumnWidth"] = new GridLength(ClampColumnWidth(_currentConfig.ShortcutActionColumnWidth, 128, 110, 260));
+            Resources["ShortcutStatusColumnWidth"] = new GridLength(ClampColumnWidth(_currentConfig.ShortcutStatusColumnWidth, 128, 110, 260));
+            Resources["ShortcutTargetColumnWidth"] = new GridLength(ClampColumnWidth(_currentConfig.ShortcutTargetColumnWidth, 468, 180, 1600));
+        }
+
+        private void WireShortcutColumnSplitters()
+        {
+            WireShortcutColumnSplitter("ShortcutKeyColumnSplitter", "ShortcutKeyColumnWidth", "ShortcutActionColumnWidth", 160, 360, 110, 260);
+            WireShortcutColumnSplitter("ShortcutActionColumnSplitter", "ShortcutActionColumnWidth", "ShortcutStatusColumnWidth", 110, 260, 110, 260);
+            WireShortcutColumnSplitter("ShortcutStatusColumnSplitter", "ShortcutStatusColumnWidth", "ShortcutTargetColumnWidth", 110, 260, 180, 1600);
+            WireShortcutColumnEdgeSplitter("ShortcutTargetColumnSplitter", "ShortcutTargetColumnWidth", 180, 1600);
+        }
+
+        private void WireShortcutColumnSplitter(string splitterName, string leftResourceKey, string rightResourceKey, double leftMin, double leftMax, double rightMin, double rightMax)
+        {
+            if (this.FindControl<Border>(splitterName) is not Border splitter) return;
+
+            splitter.PointerPressed += (s, e) =>
+            {
+                if (this.FindControl<Grid>("ShortcutHeaderGrid") is not Grid headerGrid) return;
+
+                CaptureShortcutColumnWidths();
+                _shortcutColumnResizeActive = true;
+                _shortcutColumnResizeGrid = headerGrid;
+                _shortcutColumnResizeLeftKey = leftResourceKey;
+                _shortcutColumnResizeRightKey = rightResourceKey;
+                _shortcutColumnResizeStartX = e.GetPosition(headerGrid).X;
+                _shortcutColumnResizeLeftStart = GetShortcutColumnWidth(leftResourceKey);
+                _shortcutColumnResizeRightStart = GetShortcutColumnWidth(rightResourceKey);
+                _shortcutColumnResizeLeftMin = leftMin;
+                _shortcutColumnResizeLeftMax = leftMax;
+                _shortcutColumnResizeRightMin = rightMin;
+                _shortcutColumnResizeRightMax = rightMax;
+                e.Pointer.Capture(splitter);
+                e.Handled = true;
+            };
+
+            splitter.PointerMoved += (s, e) =>
+            {
+                if (!_shortcutColumnResizeActive || _shortcutColumnResizeGrid == null) return;
+                ResizeShortcutColumns(e.GetPosition(_shortcutColumnResizeGrid).X);
+                e.Handled = true;
+            };
+
+            splitter.PointerReleased += (s, e) =>
+            {
+                if (!_shortcutColumnResizeActive) return;
+                if (_shortcutColumnResizeGrid != null) ResizeShortcutColumns(e.GetPosition(_shortcutColumnResizeGrid).X);
+                EndShortcutColumnResize();
+                e.Pointer.Capture(null);
+                e.Handled = true;
+            };
+
+            splitter.PointerCaptureLost += (s, e) =>
+            {
+                if (_shortcutColumnResizeActive) EndShortcutColumnResize();
+            };
+        }
+
+        private void WireShortcutColumnEdgeSplitter(string splitterName, string leftResourceKey, double leftMin, double leftMax)
+        {
+            if (this.FindControl<Border>(splitterName) is not Border splitter) return;
+
+            splitter.PointerPressed += (s, e) =>
+            {
+                if (this.FindControl<Grid>("ShortcutHeaderGrid") is not Grid headerGrid) return;
+
+                CaptureShortcutColumnWidths();
+                _shortcutColumnResizeActive = true;
+                _shortcutColumnResizeGrid = headerGrid;
+                _shortcutColumnResizeLeftKey = leftResourceKey;
+                _shortcutColumnResizeRightKey = null;
+                _shortcutColumnResizeStartX = e.GetPosition(headerGrid).X;
+                _shortcutColumnResizeLeftStart = GetShortcutColumnWidth(leftResourceKey);
+                _shortcutColumnResizeRightStart = 0;
+                _shortcutColumnResizeLeftMin = leftMin;
+                _shortcutColumnResizeLeftMax = leftMax;
+                _shortcutColumnResizeRightMin = 0;
+                _shortcutColumnResizeRightMax = 0;
+                e.Pointer.Capture(splitter);
+                e.Handled = true;
+            };
+
+            splitter.PointerMoved += (s, e) =>
+            {
+                if (!_shortcutColumnResizeActive || _shortcutColumnResizeGrid == null) return;
+                ResizeShortcutColumns(e.GetPosition(_shortcutColumnResizeGrid).X);
+                e.Handled = true;
+            };
+
+            splitter.PointerReleased += (s, e) =>
+            {
+                if (!_shortcutColumnResizeActive) return;
+                if (_shortcutColumnResizeGrid != null) ResizeShortcutColumns(e.GetPosition(_shortcutColumnResizeGrid).X);
+                EndShortcutColumnResize();
+                e.Pointer.Capture(null);
+                e.Handled = true;
+            };
+
+            splitter.PointerCaptureLost += (s, e) =>
+            {
+                if (_shortcutColumnResizeActive) EndShortcutColumnResize();
+            };
+        }
+
+        private double GetShortcutColumnWidth(string resourceKey)
+        {
+            return resourceKey switch
+            {
+                "ShortcutKeyColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutKeyColumnWidth, 220, 160, 360),
+                "ShortcutActionColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutActionColumnWidth, 128, 110, 260),
+                "ShortcutStatusColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutStatusColumnWidth, 128, 110, 260),
+                "ShortcutTargetColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutTargetColumnWidth, 468, 180, 1600),
+                _ => 120
+            };
+        }
+
+        private void SetShortcutColumnWidth(string resourceKey, double width)
+        {
+            Resources[resourceKey] = new GridLength(width);
+            switch (resourceKey)
+            {
+                case "ShortcutKeyColumnWidth":
+                    _currentConfig.ShortcutKeyColumnWidth = width;
+                    break;
+                case "ShortcutActionColumnWidth":
+                    _currentConfig.ShortcutActionColumnWidth = width;
+                    break;
+                case "ShortcutStatusColumnWidth":
+                    _currentConfig.ShortcutStatusColumnWidth = width;
+                    break;
+                case "ShortcutTargetColumnWidth":
+                    _currentConfig.ShortcutTargetColumnWidth = width;
+                    break;
+            }
+        }
+
+        private void ResizeShortcutColumns(double currentX)
+        {
+            if (_shortcutColumnResizeLeftKey == null) return;
+
+            var rawDelta = currentX - _shortcutColumnResizeStartX;
+            if (_shortcutColumnResizeRightKey == null)
+            {
+                var edgeDelta = Math.Max(_shortcutColumnResizeLeftMin - _shortcutColumnResizeLeftStart, Math.Min(_shortcutColumnResizeLeftMax - _shortcutColumnResizeLeftStart, rawDelta));
+                SetShortcutColumnWidth(_shortcutColumnResizeLeftKey, _shortcutColumnResizeLeftStart + edgeDelta);
+                return;
+            }
+
+            var minDelta = Math.Max(_shortcutColumnResizeLeftMin - _shortcutColumnResizeLeftStart, _shortcutColumnResizeRightStart - _shortcutColumnResizeRightMax);
+            var maxDelta = Math.Min(_shortcutColumnResizeLeftMax - _shortcutColumnResizeLeftStart, _shortcutColumnResizeRightStart - _shortcutColumnResizeRightMin);
+            var delta = Math.Max(minDelta, Math.Min(maxDelta, rawDelta));
+
+            SetShortcutColumnWidth(_shortcutColumnResizeLeftKey, _shortcutColumnResizeLeftStart + delta);
+            SetShortcutColumnWidth(_shortcutColumnResizeRightKey, _shortcutColumnResizeRightStart - delta);
+        }
+
+        private void EndShortcutColumnResize()
+        {
+            _shortcutColumnResizeActive = false;
+            SaveConfig();
+            _shortcutColumnResizeGrid = null;
+            _shortcutColumnResizeLeftKey = null;
+            _shortcutColumnResizeRightKey = null;
+        }
+
+        private void CaptureShortcutColumnWidths()
+        {
+            if (this.FindControl<Grid>("ShortcutHeaderGrid") is not Grid headerGrid) return;
+            var columns = headerGrid.ColumnDefinitions;
+            if (columns.Count < 8) return;
+
+            _currentConfig.ShortcutKeyColumnWidth = ClampColumnWidth(columns[1].ActualWidth, 220, 160, 360);
+            _currentConfig.ShortcutActionColumnWidth = ClampColumnWidth(columns[3].ActualWidth, 128, 110, 260);
+            _currentConfig.ShortcutStatusColumnWidth = ClampColumnWidth(columns[5].ActualWidth, 128, 110, 260);
+            _currentConfig.ShortcutTargetColumnWidth = ClampColumnWidth(columns[7].ActualWidth, 468, 180, 1600);
+        }
+
         private void SaveConfig()
         {
             try
             {
+                if (_shortcutColumnResizeGrid == null)
+                {
+                    CaptureShortcutColumnWidths();
+                }
                 _currentConfig.Hotkeys = new System.Collections.Generic.List<HotkeyEntry>(Hotkeys);
                 if (WindowState != Avalonia.Controls.WindowState.Minimized)
                 {
@@ -201,6 +410,10 @@ namespace KeyPulse
                 MainWindowWidth = source.MainWindowWidth,
                 MainWindowHeight = source.MainWindowHeight,
                 MainWindowState = source.MainWindowState,
+                ShortcutKeyColumnWidth = source.ShortcutKeyColumnWidth,
+                ShortcutActionColumnWidth = source.ShortcutActionColumnWidth,
+                ShortcutStatusColumnWidth = source.ShortcutStatusColumnWidth,
+                ShortcutTargetColumnWidth = source.ShortcutTargetColumnWidth,
                 SetupWindowX = source.SetupWindowX,
                 SetupWindowY = source.SetupWindowY,
                 SetupWindowWidth = source.SetupWindowWidth,
@@ -215,6 +428,7 @@ namespace KeyPulse
             {
                 Id = source.Id,
                 IsEnabled = source.IsEnabled,
+                AllowRiskyShortcut = source.AllowRiskyShortcut,
                 KeyCombination = source.KeyCombination,
                 Action = source.Action,
                 Target = source.Target
@@ -251,7 +465,7 @@ namespace KeyPulse
                     return false;
                 }
 
-                if (!ValidateHotkeyFormat(item.KeyCombination, false, out var hotkeyError))
+                if (!ValidateHotkeyFormat(item.KeyCombination, false, out var hotkeyError, item.AllowRiskyShortcut))
                 {
                     error = $"Shortcut #{i + 1}: {hotkeyError}.";
                     return false;
@@ -288,7 +502,7 @@ namespace KeyPulse
                     continue;
                 }
 
-                if (!ValidateHotkeyFormat(h.KeyCombination, false, out var hotkeyError))
+                if (!ValidateHotkeyFormat(h.KeyCombination, false, out var hotkeyError, h.AllowRiskyShortcut))
                 {
                     h.RegistrationStatus = "Inactive: " + hotkeyError;
                     failures++;
@@ -376,6 +590,73 @@ namespace KeyPulse
             };
         }
 
+        private bool CanUseAsDialogOwner()
+        {
+            return ShowInTaskbar && IsVisible && WindowState != Avalonia.Controls.WindowState.Minimized;
+        }
+
+        private async System.Threading.Tasks.Task ShowDialogOrWindowAsync(Window window)
+        {
+            if (CanUseAsDialogOwner())
+            {
+                try
+                {
+                    await window.ShowDialog(this);
+                    return;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Program.LogCrash($"Owned dialog failed; falling back to unowned window: {ex}");
+                }
+            }
+
+            window.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            var closed = new System.Threading.Tasks.TaskCompletionSource<object?>();
+            void OnClosed(object? sender, EventArgs args) => closed.TrySetResult(null);
+
+            window.Closed += OnClosed;
+            try
+            {
+                window.Show();
+                await closed.Task;
+            }
+            catch (Exception ex)
+            {
+                Program.LogCrash($"Unowned dialog failed: {ex}");
+                closed.TrySetResult(null);
+            }
+            finally
+            {
+                window.Closed -= OnClosed;
+            }
+        }
+
+        private void ShowDialogOrWindow(Window window)
+        {
+            if (CanUseAsDialogOwner())
+            {
+                try
+                {
+                    _ = window.ShowDialog(this);
+                    return;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Program.LogCrash($"Owned dialog failed; falling back to unowned window: {ex}");
+                }
+            }
+
+            try
+            {
+                window.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+                window.Show();
+            }
+            catch (Exception ex)
+            {
+                Program.LogCrash($"Unowned dialog failed: {ex}");
+            }
+        }
+
         private static StackPanel CreateDialogPanel(double spacing = 10)
         {
             return new StackPanel
@@ -389,6 +670,7 @@ namespace KeyPulse
         {
             UpdateActionUi();
             SetFieldError("TargetText", null);
+            ValidateEditorTarget();
         }
 
         private void UpdateActionUi()
@@ -415,7 +697,7 @@ namespace KeyPulse
                     ActionType.LaunchProgram => "Program or script",
                     ActionType.BrowseChrome => "Web URL",
                     ActionType.TypeText => "Text to type",
-                    ActionType.InsertText => "Text to paste",
+                    ActionType.InsertText => "Plain text to paste",
                     _ => "Target"
                 };
             }
@@ -427,8 +709,8 @@ namespace KeyPulse
                     ActionType.OpenFolder => "Choose a local, removable, or network folder.",
                     ActionType.LaunchProgram => "Choose an app or enter a command with arguments.",
                     ActionType.BrowseChrome => "Enter a website address. Missing http/https is added automatically.",
-                    ActionType.TypeText => "Best for short text. KeyPulse simulates typing character by character.",
-                    ActionType.InsertText => "Best for longer snippets. KeyPulse uses the clipboard, then restores it when possible.",
+                    ActionType.TypeText => "For legacy consoles and apps that do not accept paste. KeyPulse simulates keystrokes.",
+                    ActionType.InsertText => "Uses plain-text clipboard paste without formatting, then restores the previous text clipboard when possible.",
                     _ => string.Empty
                 };
             }
@@ -452,7 +734,7 @@ namespace KeyPulse
             return string.Join("+", combo.Split('+', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Trim().ToLowerInvariant()));
         }
 
-        private static bool ValidateHotkeyFormat(string? combo, bool checkAvailability, out string error)
+        private static bool ValidateHotkeyFormat(string? combo, bool checkAvailability, out string error, bool allowRiskyShortcut = false)
         {
             error = string.Empty;
 
@@ -480,7 +762,7 @@ namespace KeyPulse
                 return false;
             }
 
-            if (IsRiskyTypingShortcut(modifiers, vk, out var riskyError))
+            if (!allowRiskyShortcut && IsRiskyTypingShortcut(modifiers, vk, out var riskyError))
             {
                 error = riskyError;
                 return false;
@@ -520,6 +802,95 @@ namespace KeyPulse
             }
 
             return false;
+        }
+
+        private static bool IsRiskyTypingShortcut(string? combo, out string error)
+        {
+            error = string.Empty;
+            if (string.IsNullOrWhiteSpace(combo)) return false;
+            if (!HotkeyManager.TryParseCombo(combo, out var modifiers, out var vk)) return false;
+            return IsRiskyTypingShortcut(modifiers, vk, out error);
+        }
+
+        private bool IsNewRiskyComboApproved(string combo)
+        {
+            return !string.IsNullOrWhiteSpace(_approvedNewRiskyCombo)
+                && string.Equals(_approvedNewRiskyCombo, NormalizeComboKey(combo), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async System.Threading.Tasks.Task<bool> ConfirmRiskyShortcutOverrideAsync(string combo, string reason)
+        {
+            if (_showingRiskyShortcutWarning) return false;
+
+            _showingRiskyShortcutWarning = true;
+            try
+            {
+                var w = CreateAppDialog("Risky Shortcut", 520, 270, 460, 230, WindowStartupLocation.CenterOwner, false);
+                var grid = new Grid
+                {
+                    Margin = new Avalonia.Thickness(20),
+                    RowDefinitions = new Avalonia.Controls.RowDefinitions("Auto,Auto,*,Auto")
+                };
+
+                var title = new TextBlock
+                {
+                    Text = $"Use {combo} anyway?",
+                    Classes = { "SectionTitle" },
+                    Foreground = AppBrush("AppWarningBrush")
+                };
+                Grid.SetRow(title, 0);
+                grid.Children.Add(title);
+
+                var reasonText = new TextBlock
+                {
+                    Text = reason,
+                    TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                    Margin = new Avalonia.Thickness(0, 10, 0, 0)
+                };
+                Grid.SetRow(reasonText, 1);
+                grid.Children.Add(reasonText);
+
+                var details = new TextBlock
+                {
+                    Text = "This kind of shortcut is commonly used by Windows apps for text input, menus, or commands. A global shortcut can steal that key from the app you are using, so normal app behavior may stop working while KeyPulse is running.",
+                    Classes = { "Muted" },
+                    TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                    Margin = new Avalonia.Thickness(0, 8, 0, 12)
+                };
+                Grid.SetRow(details, 2);
+                grid.Children.Add(details);
+
+                var buttons = new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                    Spacing = 8
+                };
+
+                var cancel = new Button { Content = "Choose Different", Classes = { "Secondary" }, MinWidth = 130, TabIndex = 0 };
+                var proceed = new Button { Content = "Use Anyway", Classes = { "Primary" }, MinWidth = 110, TabIndex = 1 };
+                buttons.Children.Add(cancel);
+                buttons.Children.Add(proceed);
+                Grid.SetRow(buttons, 3);
+                grid.Children.Add(buttons);
+
+                var result = false;
+                cancel.Click += (s, e) => w.Close();
+                proceed.Click += (s, e) =>
+                {
+                    result = true;
+                    w.Close();
+                };
+
+                w.Content = grid;
+                w.Opened += (s, e) => cancel.Focus();
+                await ShowDialogOrWindowAsync(w);
+                return result;
+            }
+            finally
+            {
+                _showingRiskyShortcutWarning = false;
+            }
         }
 
         private void SetFieldError(string fieldName, string? message)
@@ -844,6 +1215,7 @@ namespace KeyPulse
         {
             try
             {
+                Program.LogDebug($"Executing shortcut {entry.KeyCombination} ({entry.Action}).");
                 switch (entry.Action)
                 {
                     case ActionType.OpenFolder:
@@ -876,9 +1248,11 @@ namespace KeyPulse
                         }
                         break;
                 }
+                Program.LogDebug($"Shortcut {entry.KeyCombination} completed.");
             }
             catch (Exception ex)
             {
+                Program.LogCrash($"Shortcut action failed ({entry.KeyCombination}, {entry.Action}): {ex}");
                 ShowActionFailure(ex.Message);
             }
         }
@@ -887,50 +1261,57 @@ namespace KeyPulse
         {
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                if (_actionErrorWindow != null)
+                try
                 {
-                    _actionErrorRepeatCount++;
-                    if (_actionErrorMessageText != null) _actionErrorMessageText.Text = message;
-                    if (_actionErrorRepeatText != null) _actionErrorRepeatText.Text = $"Repeated {_actionErrorRepeatCount} times while this warning was open.";
-                    _actionErrorWindow.Activate();
-                    return;
-                }
-
-                _actionErrorRepeatCount = 1;
-                var errWin = CreateAppDialog("KeyPulse Action Failed", 500, 230, 420, 190, WindowStartupLocation.CenterScreen, true, true);
-
-                var sp = CreateDialogPanel(8);
-                sp.Children.Add(new Avalonia.Controls.TextBlock { Text = "Failed to execute shortcut", Foreground = AppBrush("AppDangerBrush"), FontWeight = Avalonia.Media.FontWeight.Bold });
-                _actionErrorMessageText = new Avalonia.Controls.TextBlock { Text = message, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
-                _actionErrorRepeatText = new Avalonia.Controls.TextBlock { Text = string.Empty, Classes = { "Muted" }, FontSize = 12 };
-                sp.Children.Add(_actionErrorMessageText);
-                sp.Children.Add(_actionErrorRepeatText);
-                var closeButton = new Avalonia.Controls.Button
-                {
-                    Content = "Close",
-                    Classes = { "Secondary" },
-                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
-                    MinWidth = 90,
-                    Margin = new Avalonia.Thickness(0, 8, 0, 0)
-                };
-                closeButton.Click += (s, e) => errWin.Close();
-                sp.Children.Add(closeButton);
-
-                errWin.Content = sp;
-                errWin.Closed += (s, e) =>
-                {
-                    if (ReferenceEquals(_actionErrorWindow, errWin))
+                    if (_actionErrorWindow != null)
                     {
-                        _actionErrorWindow = null;
-                        _actionErrorMessageText = null;
-                        _actionErrorRepeatText = null;
-                        _actionErrorRepeatCount = 0;
+                        _actionErrorRepeatCount++;
+                        if (_actionErrorMessageText != null) _actionErrorMessageText.Text = message;
+                        if (_actionErrorRepeatText != null) _actionErrorRepeatText.Text = $"Repeated {_actionErrorRepeatCount} times while this warning was open.";
+                        _actionErrorWindow.Activate();
+                        return;
                     }
-                };
 
-                _actionErrorWindow = errWin;
-                errWin.Opened += (s, e) => closeButton.Focus();
-                errWin.Show();
+                    _actionErrorRepeatCount = 1;
+                    var errWin = CreateAppDialog("KeyPulse Action Failed", 500, 230, 420, 190, WindowStartupLocation.CenterScreen, true, true);
+
+                    var sp = CreateDialogPanel(8);
+                    sp.Children.Add(new Avalonia.Controls.TextBlock { Text = "Failed to execute shortcut", Foreground = AppBrush("AppDangerBrush"), FontWeight = Avalonia.Media.FontWeight.Bold });
+                    _actionErrorMessageText = new Avalonia.Controls.TextBlock { Text = message, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
+                    _actionErrorRepeatText = new Avalonia.Controls.TextBlock { Text = string.Empty, Classes = { "Muted" }, FontSize = 12 };
+                    sp.Children.Add(_actionErrorMessageText);
+                    sp.Children.Add(_actionErrorRepeatText);
+                    var closeButton = new Avalonia.Controls.Button
+                    {
+                        Content = "Close",
+                        Classes = { "Secondary" },
+                        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                        MinWidth = 90,
+                        Margin = new Avalonia.Thickness(0, 8, 0, 0)
+                    };
+                    closeButton.Click += (s, e) => errWin.Close();
+                    sp.Children.Add(closeButton);
+
+                    errWin.Content = sp;
+                    errWin.Closed += (s, e) =>
+                    {
+                        if (ReferenceEquals(_actionErrorWindow, errWin))
+                        {
+                            _actionErrorWindow = null;
+                            _actionErrorMessageText = null;
+                            _actionErrorRepeatText = null;
+                            _actionErrorRepeatCount = 0;
+                        }
+                    };
+
+                    _actionErrorWindow = errWin;
+                    errWin.Opened += (s, e) => closeButton.Focus();
+                    errWin.Show();
+                }
+                catch (Exception ex)
+                {
+                    Program.LogCrash($"Failed to show shortcut action error: {ex}");
+                }
             });
         }
 
@@ -938,6 +1319,7 @@ namespace KeyPulse
         {
             var tb = sender as TextBox;
             if (tb == null) return;
+            if (_loadingEditorFields) return;
 
             if (string.IsNullOrWhiteSpace(tb.Text))
             {
@@ -951,7 +1333,8 @@ namespace KeyPulse
                 return;
             }
 
-            if (!ValidateHotkeyFormat(tb.Text, _editingEntry == null, out var validationError))
+            var allowRiskyShortcut = _editingEntry?.AllowRiskyShortcut == true || IsNewRiskyComboApproved(tb.Text);
+            if (!ValidateHotkeyFormat(tb.Text, _editingEntry == null, out var validationError, allowRiskyShortcut))
             {
                 SetFieldError("KeyCombo", validationError);
             }
@@ -961,7 +1344,108 @@ namespace KeyPulse
             }
         }
 
-        public void Add_Click(object? sender, RoutedEventArgs e)
+        private void TargetText_TextChanged(object? sender, TextChangedEventArgs e)
+        {
+            ValidateEditorTarget();
+        }
+
+        private void ValidateEditorTarget()
+        {
+            if (_loadingEditorFields) return;
+            if (_editingEntry == null && !_creatingDuplicate)
+            {
+                SetFieldError("TargetText", null);
+                return;
+            }
+
+            var actionType = GetSelectedAction();
+            var target = this.FindControl<TextBox>("TargetText")?.Text;
+            if (!ValidateTarget(actionType, target, out _, out var targetError))
+            {
+                SetFieldError("TargetText", targetError);
+            }
+            else
+            {
+                SetFieldError("TargetText", null);
+            }
+        }
+
+        private async System.Threading.Tasks.Task CommitSelectedEditorChangeAsync()
+        {
+            if (_loadingEditorFields || _editingEntry == null) return;
+
+            var keyText = this.FindControl<TextBox>("KeyCombo")?.Text?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(keyText) || keyText.EndsWith("+", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var actionCombo = this.FindControl<ComboBox>("ActionCombo");
+            if (actionCombo == null || actionCombo.SelectedIndex < 0 || actionCombo.SelectedIndex > (int)ActionType.InsertText)
+            {
+                return;
+            }
+
+            if (!await EnsureRiskyShortcutApprovedAsync(keyText))
+            {
+                return;
+            }
+
+            if (!ValidateHotkeyFormat(keyText, false, out _, _editingEntry.AllowRiskyShortcut))
+            {
+                return;
+            }
+
+            _editingEntry.KeyCombination = keyText;
+            _editingEntry.Action = (ActionType)actionCombo.SelectedIndex;
+            _editingEntry.Target = this.FindControl<TextBox>("TargetText")?.Text ?? string.Empty;
+
+            ApplyHotkeys();
+            SaveConfig();
+            UpdateEditorModeText();
+        }
+
+        private async System.Threading.Tasks.Task<bool> EnsureRiskyShortcutApprovedAsync(string combo)
+        {
+            if (_loadingEditorFields) return true;
+            if (!IsRiskyTypingShortcut(combo, out var riskyReason))
+            {
+                if (_editingEntry != null) _editingEntry.AllowRiskyShortcut = false;
+                else _approvedNewRiskyCombo = null;
+                return true;
+            }
+
+            if (_editingEntry?.AllowRiskyShortcut == true) return true;
+            if (_editingEntry == null && IsNewRiskyComboApproved(combo)) return true;
+
+            if (await ConfirmRiskyShortcutOverrideAsync(combo, riskyReason))
+            {
+                if (_editingEntry != null) _editingEntry.AllowRiskyShortcut = true;
+                else _approvedNewRiskyCombo = NormalizeComboKey(combo);
+                SetFieldError("KeyCombo", null);
+                return true;
+            }
+
+            _loadingEditorFields = true;
+            try
+            {
+                if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo)
+                {
+                    keyCombo.Text = _editingEntry?.KeyCombination ?? string.Empty;
+                    keyCombo.Focus();
+                }
+            }
+            finally
+            {
+                _loadingEditorFields = false;
+            }
+
+            if (_editingEntry == null) _approvedNewRiskyCombo = null;
+            SetFieldError("KeyCombo", "Choose a different shortcut");
+            return false;
+        }
+
+        public async void Add_Click(object? sender, RoutedEventArgs e)
         {
             Program.PlaySound("click");
             ClearFieldErrors();
@@ -970,6 +1454,13 @@ namespace KeyPulse
             var target = this.FindControl<TextBox>("TargetText")?.Text;
             var isEditing = _editingEntry != null;
 
+            if (isEditing)
+            {
+                await CommitSelectedEditorChangeAsync();
+                ResetEditor();
+                return;
+            }
+
             if (actionCombo == null || actionCombo.SelectedIndex < 0)
             {
                 SetFieldError("TargetText", "Choose an action");
@@ -977,7 +1468,25 @@ namespace KeyPulse
                 return;
             }
 
-            if (!ValidateHotkeyFormat(combo, !isEditing, out var hotkeyError))
+            var allowRiskyShortcut = !string.IsNullOrWhiteSpace(combo) && IsNewRiskyComboApproved(combo);
+            if (!ValidateHotkeyFormat(combo, !isEditing, out var hotkeyError, allowRiskyShortcut))
+            {
+                if (!IsRiskyTypingShortcut(combo, out _))
+                {
+                    SetFieldError("KeyCombo", hotkeyError);
+                    Program.PlaySound("error");
+                    return;
+                }
+            }
+
+            if (combo == null || !await EnsureRiskyShortcutApprovedAsync(combo))
+            {
+                Program.PlaySound("error");
+                return;
+            }
+
+            allowRiskyShortcut = IsNewRiskyComboApproved(combo);
+            if (!ValidateHotkeyFormat(combo, !isEditing, out hotkeyError, allowRiskyShortcut))
             {
                 SetFieldError("KeyCombo", hotkeyError);
                 Program.PlaySound("error");
@@ -999,35 +1508,13 @@ namespace KeyPulse
                 return;
             }
 
-            if (_editingEntry != null)
-            {
-                var previous = CaptureHotkeyState(_editingEntry);
-                _editingEntry.KeyCombination = combo!;
-                _editingEntry.Action = actionType;
-                _editingEntry.Target = normalizedTarget;
-
-                ApplyHotkeys();
-                if (_editingEntry.IsEnabled && _editingEntry.RegistrationStatus != "Active")
-                {
-                    RestoreHotkeyState(_editingEntry, previous);
-                    ApplyHotkeys();
-                    SetFieldError("KeyCombo", "Shortcut could not be registered");
-                    Program.PlaySound("error");
-                    return;
-                }
-
-                SaveConfig();
-                ClearFieldErrors();
-                ResetEditor();
-                return;
-            }
-
             var entry = new HotkeyEntry
             {
                 KeyCombination = combo!,
                 Action = actionType,
                 Target = normalizedTarget,
-                IsEnabled = true
+                IsEnabled = true,
+                AllowRiskyShortcut = allowRiskyShortcut
             };
 
             Hotkeys.Add(entry);
@@ -1044,46 +1531,104 @@ namespace KeyPulse
 
             SaveConfig();
             ClearFieldErrors();
-
-            if (this.FindControl<TextBox>("KeyCombo") is TextBox t) t.Text = "";
-            if (this.FindControl<TextBox>("TargetText") is TextBox tg) tg.Text = "";
+            _creatingDuplicate = false;
+            _duplicateSourceCombo = null;
+            SelectHotkeyEntry(entry);
         }
 
-        private readonly record struct HotkeyState(string KeyCombination, ActionType Action, string Target, bool IsEnabled);
-
-        private static HotkeyState CaptureHotkeyState(HotkeyEntry entry)
+        public void HotkeyList_SelectionChanged(object? sender, SelectionChangedEventArgs e)
         {
-            return new HotkeyState(entry.KeyCombination, entry.Action, entry.Target, entry.IsEnabled);
+            if (_loadingEditorFields) return;
+
+            if (sender is ListBox list && list.SelectedItem is HotkeyEntry entry)
+            {
+                BeginEditingEntry(entry);
+            }
+            else
+            {
+                ResetEditor();
+            }
         }
 
-        private static void RestoreHotkeyState(HotkeyEntry entry, HotkeyState state)
+        private void SelectHotkeyEntry(HotkeyEntry entry)
         {
-            entry.KeyCombination = state.KeyCombination;
-            entry.Action = state.Action;
-            entry.Target = state.Target;
-            entry.IsEnabled = state.IsEnabled;
+            if (this.FindControl<ListBox>("HotkeyList") is ListBox list && !ReferenceEquals(list.SelectedItem, entry))
+            {
+                list.SelectedItem = entry;
+                return;
+            }
+
+            BeginEditingEntry(entry);
         }
 
-        public void Edit_Click(object? sender, RoutedEventArgs e)
+        private void BeginEditingEntry(HotkeyEntry entry)
         {
-            if (sender is not Button btn || btn.DataContext is not HotkeyEntry entry) return;
+            _creatingDuplicate = false;
+            _duplicateSourceCombo = null;
+            ClearRowEditingExcept(entry);
 
-            if (_editingEntry != null) _editingEntry.IsEditing = false;
             _editingEntry = entry;
             entry.IsEditing = true;
-            if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = entry.KeyCombination;
-            if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)entry.Action;
-            if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = entry.Target;
 
-            if (this.FindControl<Button>("AddButton") is Button addButton) addButton.Content = "Save";
-            if (this.FindControl<Button>("CancelEditButton") is Button cancelButton) cancelButton.IsVisible = true;
-            if (this.FindControl<TextBlock>("EditorModeText") is TextBlock editText)
+            _loadingEditorFields = true;
+            try
             {
-                editText.Text = $"Editing {entry.KeyCombination} - {entry.ActionDisplay}";
-                editText.IsVisible = true;
+                if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = entry.KeyCombination;
+                if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)entry.Action;
+                if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = entry.Target;
+                
+                if (entry.RegistrationStatus.StartsWith("Inactive:", StringComparison.OrdinalIgnoreCase))
+                {
+                    SetFieldError("KeyCombo", entry.RegistrationStatus.Substring("Inactive:".Length).Trim());
+                }
+                else
+                {
+                    ClearFieldErrors();
+                }
             }
+            finally
+            {
+                _loadingEditorFields = false;
+            }
+
+            if (this.FindControl<Button>("AddButton") is Button addButton)
+            {
+                addButton.Content = "Save";
+                addButton.IsVisible = true;
+            }
+            if (this.FindControl<Button>("CancelEditButton") is Button cancelButton)
+            {
+                cancelButton.Content = "Cancel";
+                cancelButton.IsVisible = true;
+            }
+
+            UpdateActionUi();
+            UpdateEditorModeText();
             ClearFieldErrors();
-            this.FindControl<TextBox>("KeyCombo")?.Focus();
+        }
+
+        private void UpdateEditorModeText()
+        {
+            if (this.FindControl<TextBlock>("EditorModeText") is not TextBlock editText) return;
+
+            if (_creatingDuplicate)
+            {
+                editText.Text = string.IsNullOrWhiteSpace(_duplicateSourceCombo)
+                    ? "Duplicating shortcut. Choose a new non-conflicting shortcut, then add it."
+                    : $"Duplicating {_duplicateSourceCombo}. Choose a new non-conflicting shortcut, then add it.";
+                editText.IsVisible = true;
+                return;
+            }
+
+            if (_editingEntry == null)
+            {
+                editText.Text = string.Empty;
+                editText.IsVisible = false;
+                return;
+            }
+
+            editText.Text = $"Editing {_editingEntry.KeyCombination} - {_editingEntry.ActionDisplay}. Changes save automatically.";
+            editText.IsVisible = true;
         }
 
         public void CancelEdit_Click(object? sender, RoutedEventArgs e)
@@ -1093,19 +1638,46 @@ namespace KeyPulse
 
         private void ResetEditor()
         {
-            if (_editingEntry != null) _editingEntry.IsEditing = false;
+            ClearRowEditingExcept();
             _editingEntry = null;
-            if (this.FindControl<Button>("AddButton") is Button addButton) addButton.Content = "Add";
-            if (this.FindControl<Button>("CancelEditButton") is Button cancelButton) cancelButton.IsVisible = false;
-            if (this.FindControl<TextBlock>("EditorModeText") is TextBlock editText)
+            _creatingDuplicate = false;
+            _duplicateSourceCombo = null;
+
+            _loadingEditorFields = true;
+            try
             {
-                editText.Text = string.Empty;
-                editText.IsVisible = false;
+                if (this.FindControl<ListBox>("HotkeyList") is ListBox list) list.SelectedItem = null;
+                if (this.FindControl<Button>("AddButton") is Button addButton)
+                {
+                    addButton.Content = "Add";
+                    addButton.IsVisible = true;
+                }
+                if (this.FindControl<Button>("CancelEditButton") is Button cancelButton)
+                {
+                    cancelButton.Content = "Cancel";
+                    cancelButton.IsVisible = false;
+                }
+                if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = "";
+                if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = 0;
+                if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = "";
             }
-            if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = "";
-            if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = "";
+            finally
+            {
+                _loadingEditorFields = false;
+            }
+
+            UpdateActionUi();
+            UpdateEditorModeText();
             ClearFieldErrors();
             this.FindControl<TextBox>("KeyCombo")?.Focus();
+        }
+
+        private void ClearRowEditingExcept(HotkeyEntry? keep = null)
+        {
+            foreach (var entry in Hotkeys)
+            {
+                if (!ReferenceEquals(entry, keep)) entry.IsEditing = false;
+            }
         }
 
         public void Enabled_Click(object? sender, RoutedEventArgs e)
@@ -1124,11 +1696,51 @@ namespace KeyPulse
             if (sender is Button btn && btn.DataContext is HotkeyEntry entry)
             {
                 if (!await ConfirmRemoveAsync(entry)) return;
-                if (ReferenceEquals(_editingEntry, entry)) ResetEditor();
+                if (ReferenceEquals(_editingEntry, entry) || (_creatingDuplicate && entry.IsEditing)) ResetEditor();
                 Hotkeys.Remove(entry);
                 SaveConfig();
                 ApplyHotkeys();
             }
+        }
+
+        public void Duplicate_Click(object? sender, RoutedEventArgs e)
+        {
+            Program.PlaySound("click");
+            if (sender is not Button btn || btn.DataContext is not HotkeyEntry source) return;
+
+            ClearFieldErrors();
+            ClearRowEditingExcept(source);
+            source.IsEditing = true;
+            _editingEntry = null;
+            _creatingDuplicate = true;
+            _duplicateSourceCombo = source.KeyCombination;
+            _approvedNewRiskyCombo = null;
+
+            _loadingEditorFields = true;
+            try
+            {
+                if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = string.Empty;
+                if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)source.Action;
+                if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = source.Target;
+                if (this.FindControl<Button>("AddButton") is Button addButton)
+                {
+                    addButton.Content = "Add Duplicate";
+                    addButton.IsVisible = true;
+                }
+                if (this.FindControl<Button>("CancelEditButton") is Button cancelButton)
+                {
+                    cancelButton.Content = "Cancel";
+                    cancelButton.IsVisible = true;
+                }
+            }
+            finally
+            {
+                _loadingEditorFields = false;
+            }
+
+            UpdateActionUi();
+            UpdateEditorModeText();
+            if (this.FindControl<TextBox>("KeyCombo") is TextBox shortcutBox) shortcutBox.Focus();
         }
 
         private async System.Threading.Tasks.Task<bool> ConfirmRemoveAsync(HotkeyEntry entry)
@@ -1192,8 +1804,7 @@ namespace KeyPulse
 
             w.Content = grid;
             w.Opened += (s, e) => cancel.Focus();
-            if (this.IsVisible) await w.ShowDialog(this);
-            else w.Show();
+            await ShowDialogOrWindowAsync(w);
             return result;
         }
 
@@ -1201,12 +1812,25 @@ namespace KeyPulse
         {
             e.Handled = true;
 
+            var currentVk = e.Key switch
+            {
+                Avalonia.Input.Key.LeftCtrl => 0xA2,
+                Avalonia.Input.Key.RightCtrl => 0xA3,
+                Avalonia.Input.Key.LeftAlt => 0xA4,
+                Avalonia.Input.Key.RightAlt => 0xA5,
+                Avalonia.Input.Key.LeftShift => 0xA0,
+                Avalonia.Input.Key.RightShift => 0xA1,
+                Avalonia.Input.Key.LWin => 0x5B,
+                Avalonia.Input.Key.RWin => 0x5C,
+                _ => 0
+            };
+            HotkeyManager.GetModifierSnapshot(currentVk, out var rawCtrl, out var rawAlt, out var rawShift, out var rawWin);
             var mods = e.KeyModifiers;
             var parts = new System.Collections.Generic.List<string>();
-            if (mods.HasFlag(Avalonia.Input.KeyModifiers.Control)) parts.Add("Ctrl");
-            if (mods.HasFlag(Avalonia.Input.KeyModifiers.Alt)) parts.Add("Alt");
-            if (mods.HasFlag(Avalonia.Input.KeyModifiers.Shift)) parts.Add("Shift");
-            if (mods.HasFlag(Avalonia.Input.KeyModifiers.Meta)) parts.Add("Win");
+            if (rawCtrl || mods.HasFlag(Avalonia.Input.KeyModifiers.Control)) parts.Add("Ctrl");
+            if (rawAlt || mods.HasFlag(Avalonia.Input.KeyModifiers.Alt)) parts.Add("Alt");
+            if (rawShift || mods.HasFlag(Avalonia.Input.KeyModifiers.Shift)) parts.Add("Shift");
+            if (rawWin || mods.HasFlag(Avalonia.Input.KeyModifiers.Meta)) parts.Add("Win");
             
             bool isModifierOnly = (e.Key == Avalonia.Input.Key.LeftCtrl || e.Key == Avalonia.Input.Key.RightCtrl ||
                 e.Key == Avalonia.Input.Key.LeftAlt || e.Key == Avalonia.Input.Key.RightAlt ||
@@ -1419,7 +2043,7 @@ namespace KeyPulse
                 VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
             };
             w.Opened += (s, ev) => chk.Focus();
-            if (this.IsVisible) { w.ShowDialog(this); } else { w.Show(); }
+            ShowDialogOrWindow(w);
         }
 
         protected override void OnClosing(Avalonia.Controls.WindowClosingEventArgs e)
