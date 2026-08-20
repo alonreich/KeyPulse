@@ -24,6 +24,15 @@ exit /b %RC%
 shift
 setlocal enabledelayedexpansion
 cd /d "."
+set "DO_PUBLISH=1"
+
+:parse_args
+if "%~1"=="" goto args_parsed
+if /I "%~1"=="--no-publish" set "DO_PUBLISH=0"
+shift
+goto parse_args
+
+:args_parsed
 
 set "PROJECT_FILE=KeyPulse.csproj"
 set "PROJECT_EXE=KeyPulse.exe"
@@ -114,16 +123,10 @@ if not defined LOCALHASH (
   echo [PUBLISH] STOPPED: could not fingerprint the freshly built exe.
   exit /b 1
 )
-for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "Get-Date -Format yyyy.MM.dd"`) do set "TAG=v%%D"
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "Get-Date -Format yyyy.MM.dd.HHmmss"`) do set "TAG=v%%D"
 echo [PUBLISH] 4/7 Built exe fingerprint + tag !TAG! ready.        [OK]
 
-set "REMOVED=0"
-for /f "usebackq delims=" %%T in (`gh release list --repo !REPO! --json tagName --jq ".[].tagName" 2^>nul`) do (
-  echo [PUBLISH]     removing previous release %%T
-  gh release delete %%T --repo !REPO! --cleanup-tag --yes >nul 2>&1
-  set /a REMOVED+=1
-)
-echo [PUBLISH] 5/7 Previous releases removed: !REMOVED!                    [OK]
+echo [PUBLISH] 5/7 Previous releases retained.                         [OK]
 
 gh release create !TAG! "%OUTPUT_DIR%\%OUTPUT_EXE%" --repo !REPO! --title "KeyPulse !TAG!" --notes "Automated NativeAOT release published by build.cmd on !TAG!. SHA256 !LOCALHASH!" --latest >nul 2>&1
 if errorlevel 1 (
@@ -143,7 +146,7 @@ echo [PUBLISH] 7/7 Published asset hash matches the built exe.          [OK]
 
 echo.
 echo ###########################################################
-echo SUCCESS: release !TAG! is live and is the only release.
+echo SUCCESS: release !TAG! is live and marked latest.
 echo Download: https://github.com/!REPO!/releases/latest/download/%OUTPUT_EXE%
 echo ###########################################################
 exit /b 0

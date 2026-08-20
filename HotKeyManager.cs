@@ -56,11 +56,93 @@ namespace KeyPulse
         private const uint WM_HOTKEY = 0x0312;
         private const uint WM_QUIT = 0x0012;
         private const uint WM_USER = 0x0400;
+        public const uint ModAlt = 0x0001;
+        public const uint ModCtrl = 0x0002;
+        public const uint ModShift = 0x0004;
+        public const uint ModWin = 0x0008;
         private static IntPtr _hWnd;
         private static Thread? _thread;
         private static Dictionary<int, Action> _actions = new();
         private static int _currentId = 0;
         private static System.Collections.Concurrent.ConcurrentQueue<Action> _taskQueue = new();
+
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private static LowLevelKeyboardProc _proc = HookCallback;
+        private static IntPtr _hookID = IntPtr.Zero;
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_SYSKEYDOWN = 0x0104;
+        private const int WM_KEYUP = 0x0101;
+        private const int WM_SYSKEYUP = 0x0105;
+
+        public static bool IsCaptureMode { get; set; } = false;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        public static Action<int, bool, bool, bool, bool>? OnRawKey;
+
+        public static void EnableCaptureHook()
+        {
+            if (_hookID == IntPtr.Zero)
+            {
+                using (var curProcess = Process.GetCurrentProcess())
+                using (var curModule = curProcess.MainModule)
+                {
+                    if (curModule != null)
+                        _hookID = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
+                }
+            }
+            IsCaptureMode = true;
+        }
+
+        public static void DisableCaptureHook()
+        {
+            IsCaptureMode = false;
+            if (_hookID != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_hookID);
+                _hookID = IntPtr.Zero;
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && IsCaptureMode)
+            {
+                int vkCode = Marshal.ReadInt32(lParam);
+
+                if (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)
+                {
+                    bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0;
+                    bool alt = (GetAsyncKeyState(0x12) & 0x8000) != 0;
+                    bool shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
+                    bool win = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
+
+                    OnRawKey?.Invoke(vkCode, ctrl, alt, shift, win);
+                }
+
+                // Allow Escape, Tab, and Windows keys to fall through as escape hatches
+                if (vkCode == 0x1B || vkCode == 0x09 || vkCode == 0x5B || vkCode == 0x5C)
+                {
+                    return CallNextHookEx(_hookID, nCode, wParam, lParam);
+                }
+
+                // Aggressively swallow all other keys during capture mode to prevent OS hijacking
+                return (IntPtr)1;
+            }
+            return CallNextHookEx(_hookID, nCode, wParam, lParam);
+        }
 
         public static void Start()
         {
@@ -120,13 +202,14 @@ namespace KeyPulse
 
         private static void RunOnThread(Action action)
         {
+            if (_hWnd == IntPtr.Zero) return;
             if (Thread.CurrentThread == _thread) {
                 action();
             } else {
                 using var tcs = new ManualResetEventSlim(false);
                 _taskQueue.Enqueue(() => { action(); tcs.Set(); });
                 PostMessage(_hWnd, WM_USER, IntPtr.Zero, IntPtr.Zero);
-                tcs.Wait();
+                tcs.Wait(2000);
             }
         }
 
@@ -168,10 +251,10 @@ namespace KeyPulse
             foreach (var p in parts)
             {
                 var trim = p.Trim().ToLowerInvariant();
-                if (trim == "ctrl" || trim == "control") modifiers |= 0x0002;
-                else if (trim == "alt") modifiers |= 0x0001;
-                else if (trim == "shift") modifiers |= 0x0004;
-                else if (trim == "win" || trim == "windows") modifiers |= 0x0008;
+                if (trim == "ctrl" || trim == "control") modifiers |= ModCtrl;
+                else if (trim == "alt") modifiers |= ModAlt;
+                else if (trim == "shift") modifiers |= ModShift;
+                else if (trim == "win" || trim == "windows") modifiers |= ModWin;
                 else if (trim == "oemplus" || trim == "add" || trim == "plus" || trim == "+") vk = 0xBB;
                 else
                 {
@@ -229,6 +312,26 @@ namespace KeyPulse
             }
 
             return vk != 0;
+        }
+
+        public static bool TryParseCombo(string combo, out uint modifiers, out uint vk)
+        {
+            return ParseCombo(combo, out modifiers, out vk);
+        }
+
+        public static bool IsTypingKeyWithoutModifier(string combo)
+        {
+            if (!ParseCombo(combo, out uint modifiers, out uint vk)) return false;
+            return modifiers == 0 && IsTypingVirtualKey(vk);
+        }
+
+        public static bool IsTypingVirtualKey(uint vk)
+        {
+            return (vk >= 'A' && vk <= 'Z')
+                || (vk >= '0' && vk <= '9')
+                || vk == 0x20
+                || (vk >= 0xBA && vk <= 0xC0)
+                || (vk >= 0xDB && vk <= 0xDE);
         }
 
         public static bool Register(string combo, Action action)

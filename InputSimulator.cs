@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -6,7 +7,7 @@ namespace KeyPulse
 {
     public static class InputSimulator
     {
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -46,16 +47,56 @@ namespace KeyPulse
         private const ushort VK_CONTROL = 0x11;
         private const ushort VK_V = 0x56;
 
-        public static void TypeText(string text)
+        public static bool TypeText(string text, out string error)
         {
-            if (string.IsNullOrEmpty(text)) return;
-            var inputs = new INPUT[text.Length * 2];
+            error = string.Empty;
+            if (string.IsNullOrEmpty(text)) return true;
+            var inputsList = new System.Collections.Generic.List<INPUT>();
+
+            bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            bool lwin = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+            bool rwin = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+
+            if (shift) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_SHIFT, dwFlags = KEYEVENTF_KEYUP } } });
+            if (alt) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_MENU, dwFlags = KEYEVENTF_KEYUP } } });
+            if (lwin) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_LWIN, dwFlags = KEYEVENTF_KEYUP } } });
+            if (rwin) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_RWIN, dwFlags = KEYEVENTF_KEYUP } } });
+            if (ctrl) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = KEYEVENTF_KEYUP } } });
+
             for (int i = 0; i < text.Length; i++)
             {
-                inputs[i * 2] = new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = KEYEVENTF_UNICODE } } };
-                inputs[i * 2 + 1] = new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } } };
+                if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                {
+                    inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = KEYEVENTF_UNICODE } } });
+                    inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i + 1], dwFlags = KEYEVENTF_UNICODE } } });
+                    inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } } });
+                    inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i + 1], dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } } });
+                    i++;
+                }
+                else
+                {
+                    inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = KEYEVENTF_UNICODE } } });
+                    inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } } });
+                }
             }
-            SendInput((uint)inputs.Length, inputs, INPUT.Size);
+
+            if (shift && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_SHIFT, dwFlags = 0 } } });
+            if (alt && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_MENU, dwFlags = 0 } } });
+            if (lwin && (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_LWIN, dwFlags = 0 } } });
+            if (rwin && (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_RWIN, dwFlags = 0 } } });
+            if (ctrl && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = 0 } } });
+
+            var inputs = inputsList.ToArray();
+            var sent = SendInput((uint)inputs.Length, inputs, INPUT.Size);
+            if (sent != inputs.Length)
+            {
+                error = $"Windows accepted {sent} of {inputs.Length} text input events.";
+                return false;
+            }
+
+            return true;
         }
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -83,16 +124,22 @@ namespace KeyPulse
         private const uint CF_UNICODETEXT = 13;
         private const uint GMEM_MOVABLE = 0x0002;
         private const uint GMEM_ZEROINIT = 0x0040;
+        private const ulong MaxClipboardBackupBytes = 64UL * 1024 * 1024;
 
         private const ushort VK_SHIFT = 0x10;
         private const ushort VK_MENU = 0x12;
         private const ushort VK_LWIN = 0x5B;
         private const ushort VK_RWIN = 0x5C;
 
+        private sealed class ClipboardBackup
+        {
+            public Dictionary<uint, byte[]> Formats { get; } = new();
+        }
+
         private static string? GetWin32ClipboardText()
         {
             if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return null;
-            if (!OpenClipboard(IntPtr.Zero)) return null;
+            if (!SafeOpenClipboard()) return null;
             
             string? result = null;
             IntPtr hGlobal = GetClipboardData(CF_UNICODETEXT);
@@ -109,80 +156,228 @@ namespace KeyPulse
             return result;
         }
 
+        [DllImport("kernel32.dll")]
+        private static extern UIntPtr GlobalSize(IntPtr hMem);
+
+        [DllImport("user32.dll")]
+        private static extern uint EnumClipboardFormats(uint format);
+
+        private static bool SafeOpenClipboard()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                if (OpenClipboard(IntPtr.Zero)) return true;
+                Thread.Sleep(10);
+            }
+            return false;
+        }
+
+        private static bool TryBackupClipboardAll(out ClipboardBackup backup)
+        {
+            backup = new ClipboardBackup();
+            if (!SafeOpenClipboard()) return false;
+
+            try
+            {
+                ulong totalBytes = 0;
+                uint format = 0;
+                while ((format = EnumClipboardFormats(format)) != 0)
+                {
+                    IntPtr hData = GetClipboardData(format);
+                    if (hData == IntPtr.Zero) return false;
+
+                    ulong size = GlobalSize(hData).ToUInt64();
+                    if (size == 0 || size > int.MaxValue || totalBytes + size > MaxClipboardBackupBytes)
+                    {
+                        return false;
+                    }
+
+                    IntPtr source = GlobalLock(hData);
+                    if (source == IntPtr.Zero) return false;
+
+                    try
+                    {
+                        var buffer = new byte[(int)size];
+                        Marshal.Copy(source, buffer, 0, buffer.Length);
+                        backup.Formats[format] = buffer;
+                        totalBytes += size;
+                    }
+                    finally
+                    {
+                        GlobalUnlock(hData);
+                    }
+                }
+
+                return true;
+            }
+            finally
+            {
+                CloseClipboard();
+            }
+        }
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GlobalFree(IntPtr hMem);
 
-        private static void SetWin32ClipboardText(string text)
+        private static bool SetWin32ClipboardText(string text)
         {
-            if (!OpenClipboard(IntPtr.Zero)) return;
-            EmptyClipboard();
-            if (string.IsNullOrEmpty(text)) 
+            if (!SafeOpenClipboard()) return false;
+
+            try
+            {
+                if (!EmptyClipboard()) return false;
+                if (string.IsNullOrEmpty(text)) return true;
+
+                IntPtr hGlobal = GlobalAlloc(GMEM_MOVABLE | GMEM_ZEROINIT, (UIntPtr)((text.Length + 1) * 2));
+                if (hGlobal == IntPtr.Zero) return false;
+
+                IntPtr target = GlobalLock(hGlobal);
+                if (target == IntPtr.Zero)
+                {
+                    GlobalFree(hGlobal);
+                    return false;
+                }
+
+                Marshal.Copy(text.ToCharArray(), 0, target, text.Length);
+                GlobalUnlock(hGlobal);
+
+                if (SetClipboardData(CF_UNICODETEXT, hGlobal) == IntPtr.Zero)
+                {
+                    GlobalFree(hGlobal);
+                    return false;
+                }
+
+                return true;
+            }
+            finally
             {
                 CloseClipboard();
-                return;
             }
-            IntPtr hGlobal = GlobalAlloc(GMEM_MOVABLE | GMEM_ZEROINIT, (UIntPtr)((text.Length + 1) * 2));
-            if (hGlobal != IntPtr.Zero)
+        }
+
+        private static void RestoreClipboardAll(ClipboardBackup backup)
+        {
+            if (!SafeOpenClipboard()) return;
+
+            try
             {
-                IntPtr target = GlobalLock(hGlobal);
-                if (target != IntPtr.Zero)
+                EmptyClipboard();
+                foreach (var kvp in backup.Formats)
                 {
-                    Marshal.Copy(text.ToCharArray(), 0, target, text.Length);
+                    IntPtr hGlobal = GlobalAlloc(GMEM_MOVABLE | GMEM_ZEROINIT, (UIntPtr)kvp.Value.Length);
+                    if (hGlobal == IntPtr.Zero) continue;
+
+                    IntPtr target = GlobalLock(hGlobal);
+                    if (target == IntPtr.Zero)
+                    {
+                        GlobalFree(hGlobal);
+                        continue;
+                    }
+
+                    Marshal.Copy(kvp.Value, 0, target, kvp.Value.Length);
                     GlobalUnlock(hGlobal);
-                    if (SetClipboardData(CF_UNICODETEXT, hGlobal) == IntPtr.Zero)
+                    if (SetClipboardData(kvp.Key, hGlobal) == IntPtr.Zero)
                     {
                         GlobalFree(hGlobal);
                     }
                 }
-                else
-                {
-                    GlobalFree(hGlobal);
-                }
             }
-            CloseClipboard();
+            finally
+            {
+                CloseClipboard();
+            }
         }
 
-        public static void InsertText(string text)
+        private static bool ClipboardContainsText(string text)
         {
+            if (!SafeOpenClipboard()) return false;
+
+            try
+            {
+                IntPtr hGlobal = GetClipboardData(CF_UNICODETEXT);
+                if (hGlobal == IntPtr.Zero) return false;
+
+                IntPtr source = GlobalLock(hGlobal);
+                if (source == IntPtr.Zero) return false;
+
+                try
+                {
+                    string? currentClip = Marshal.PtrToStringUni(source);
+                    return currentClip == text;
+                }
+                finally
+                {
+                    GlobalUnlock(hGlobal);
+                }
+            }
+            finally
+            {
+                CloseClipboard();
+            }
+        }
+
+        public static bool InsertText(string text, out string error)
+        {
+            error = string.Empty;
             Thread.Sleep(200); 
 
-            var backup = GetWin32ClipboardText();
-            SetWin32ClipboardText(text);
+            if (!TryBackupClipboardAll(out var backup))
+            {
+                return TypeText(text, out error);
+            }
+
+            if (!SetWin32ClipboardText(text))
+            {
+                RestoreClipboardAll(backup);
+                if (TypeText(text, out error)) return true;
+                error = "Clipboard setup failed, and fallback typing also failed: " + error;
+                return false;
+            }
             
             Thread.Sleep(50);
             
             var inputsList = new System.Collections.Generic.List<INPUT>();
 
-            if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_SHIFT, dwFlags = KEYEVENTF_KEYUP } } });
-            if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_MENU, dwFlags = KEYEVENTF_KEYUP } } });
-            if ((GetAsyncKeyState(VK_LWIN) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_LWIN, dwFlags = KEYEVENTF_KEYUP } } });
-            if ((GetAsyncKeyState(VK_RWIN) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_RWIN, dwFlags = KEYEVENTF_KEYUP } } });
-            if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = KEYEVENTF_KEYUP } } });
+            bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            bool lwin = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0;
+            bool rwin = (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+            bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+
+            if (shift) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_SHIFT, dwFlags = KEYEVENTF_KEYUP } } });
+            if (alt) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_MENU, dwFlags = KEYEVENTF_KEYUP } } });
+            if (lwin) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_LWIN, dwFlags = KEYEVENTF_KEYUP } } });
+            if (rwin) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_RWIN, dwFlags = KEYEVENTF_KEYUP } } });
+            if (ctrl) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = KEYEVENTF_KEYUP } } });
 
             inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = 0 } } });
             inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_V, dwFlags = 0 } } });
             inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_V, dwFlags = KEYEVENTF_KEYUP } } });
             inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = KEYEVENTF_KEYUP } } });
             
-            var inputs = inputsList.ToArray();
-            SendInput((uint)inputs.Length, inputs, INPUT.Size);
+            if (shift && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_SHIFT, dwFlags = 0 } } });
+            if (alt && (GetAsyncKeyState(VK_MENU) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_MENU, dwFlags = 0 } } });
+            if (lwin && (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_LWIN, dwFlags = 0 } } });
+            if (rwin && (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_RWIN, dwFlags = 0 } } });
+            if (ctrl && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) inputsList.Add(new INPUT { type = INPUT_KEYBOARD, U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_CONTROL, dwFlags = 0 } } });
 
-            ThreadPool.QueueUserWorkItem(_ => 
+            var inputs = inputsList.ToArray();
+            var sent = SendInput((uint)inputs.Length, inputs, INPUT.Size);
+            if (sent != inputs.Length)
             {
-                Thread.Sleep(1500);
-                if (backup != null)
-                {
-                    SetWin32ClipboardText(backup);
-                }
-                else
-                {
-                    if (OpenClipboard(IntPtr.Zero))
-                    {
-                        EmptyClipboard();
-                        CloseClipboard();
-                    }
-                }
-            });
+                RestoreClipboardAll(backup);
+                error = $"Windows accepted {sent} of {inputs.Length} paste input events.";
+                return false;
+            }
+
+            Thread.Sleep(1500);
+
+            if (ClipboardContainsText(text))
+            {
+                RestoreClipboardAll(backup);
+            }
+
+            return true;
         }
     }
 }

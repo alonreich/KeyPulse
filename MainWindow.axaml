@@ -3,99 +3,237 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:KeyPulse"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        mc:Ignorable="d"
+        d:DesignWidth="900"
+        d:DesignHeight="560"
         x:Class="KeyPulse.MainWindow"
         x:DataType="local:MainWindow"
         Icon="avares://KeyPulse/KeyPulse.ico"
-        Title="KeyPulse" Background="#1e293b" Width="600" Height="400" MinWidth="500" MinHeight="300">
-    
-        <Window.Styles>
-                <Style Selector="Button">
-            <Setter Property="MinHeight" Value="24"/>
-            <Setter Property="Padding" Value="8,2"/>
-            <Setter Property="Background" Value="#334155"/>
-            <Setter Property="Foreground" Value="#ffffff"/>
-            <Setter Property="BorderBrush" Value="#475569"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="CornerRadius" Value="6"/>
-            <Setter Property="Transitions">
-                <Transitions>
-                    <BrushTransition Property="Background" Duration="0:0:0.1"/>
-                </Transitions>
-            </Setter>
-        </Style>
-        <Style Selector="Button:pointerover /template/ ContentPresenter">
-            <Setter Property="Background" Value="#475569"/>
-            <Setter Property="BorderBrush" Value="#60A5FA"/>
-        </Style>
-        <Style Selector="Button:pressed /template/ ContentPresenter">
-            <Setter Property="Background" Value="#60A5FA"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
-        </Style>
-                <Style Selector="TextBox">
-            <Setter Property="MinHeight" Value="24"/>
-            <Setter Property="Padding" Value="6,2"/>
-            <Setter Property="Background" Value="#1e293b"/>
-            <Setter Property="Foreground" Value="#ffffff"/>
-            <Setter Property="BorderBrush" Value="#475569"/>
-            <Setter Property="CornerRadius" Value="6"/>
-        </Style>
-        <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
-            <Setter Property="BorderBrush" Value="#60A5FA"/>
-        </Style>
-                <Style Selector="ComboBox">
-            <Setter Property="MinHeight" Value="24"/>
-            <Setter Property="Padding" Value="6,2"/>
-            <Setter Property="Background" Value="#1e293b"/>
-            <Setter Property="Foreground" Value="#ffffff"/>
-            <Setter Property="BorderBrush" Value="#475569"/>
-            <Setter Property="CornerRadius" Value="6"/>
-        </Style>
-        <Style Selector="ComboBox:pointerover /template/ Border#PART_Background">
-            <Setter Property="BorderBrush" Value="#60A5FA"/>
-        </Style>
-            <Style Selector="ListBoxItem">
-            <Setter Property="MinHeight" Value="24"/>
-            <Setter Property="Padding" Value="4,2"/>
-        </Style>
-    </Window.Styles>
-    <Grid RowDefinitions="Auto,*,Auto" Margin="15">
-        <Grid Grid.Row="0" ColumnDefinitions="2*,2*,3*,Auto" Margin="0,0,0,10">
-            <TextBox Grid.Column="0" Name="KeyCombo" PlaceholderText="Press keys..." HorizontalAlignment="Stretch" IsReadOnly="True" KeyDown="KeyCombo_KeyDown" TextChanged="KeyCombo_TextChanged" Margin="0,0,10,0"/>
-            <ComboBox Grid.Column="1" Name="ActionCombo" SelectedIndex="0" HorizontalAlignment="Stretch" Margin="0,0,10,0" SelectionChanged="ActionCombo_SelectionChanged">
-                <ComboBoxItem>Open Folder</ComboBoxItem>
-                <ComboBoxItem>Launch Program</ComboBoxItem>
-                <ComboBoxItem>Browse Chrome</ComboBoxItem>
-                <ComboBoxItem>Type Text</ComboBoxItem>
-                <ComboBoxItem>Insert Text (Paste)</ComboBoxItem>
-            </ComboBox>
-            <TextBox Grid.Column="2" Name="TargetText" PlaceholderText="Target (Path/URL/Text)" HorizontalAlignment="Stretch" Margin="0,0,10,0"/>
-            <Button Grid.Column="3" Content="Add" Click="Add_Click" Padding="10,2" Cursor="Hand" />
-        </Grid>
-        <TextBlock Name="ErrorText" Grid.Row="0" Foreground="#ff4444" Margin="0,35,0,0" IsVisible="False" FontSize="12" />
-        
-        <Border Grid.Row="1" BorderBrush="#475569" BorderThickness="1" CornerRadius="4">
-            <ListBox ItemsSource="{Binding Hotkeys}" Background="#1e293b">
-                <ListBox.ItemTemplate>
-                    <DataTemplate x:DataType="local:HotkeyEntry">
-                        <Grid ColumnDefinitions="130, 140, *, Auto" Margin="0,1">
-                            <TextBlock Grid.Column="0" Text="{Binding KeyCombination}" VerticalAlignment="Center" FontWeight="Bold" Foreground="#4da6ff" />
-                            <TextBlock Grid.Column="1" Text="{Binding Action}" VerticalAlignment="Center" Foreground="#b6c2d0" />
-                            <TextBlock Grid.Column="2" Text="{Binding Target}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,10,0"/>
-                            <Button Grid.Column="3" Content="Remove" Click="Remove_Click" Padding="6,2" FontSize="12" Cursor="Hand" />
-                        </Grid>
-                    </DataTemplate>
-                </ListBox.ItemTemplate>
-            </ListBox>
+        Title="KeyPulse"
+        Width="860"
+        Height="560"
+        MinWidth="640"
+        MinHeight="460">
+
+    <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="16">
+        <TextBlock Grid.Row="0"
+                   Text="Shortcuts"
+                   Classes="SectionTitle"
+                   Margin="0,0,0,10" />
+
+        <Border Grid.Row="1"
+                Classes="Panel"
+                Margin="0,0,0,12">
+            <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                  ColumnDefinitions="*,*,Auto,Auto">
+                <TextBlock Grid.Row="0"
+                           Grid.Column="0"
+                           Text="Shortcut"
+                           Classes="Label"
+                           Margin="0,0,8,4" />
+                <TextBlock Grid.Row="0"
+                           Grid.Column="1"
+                           Text="Action"
+                           Classes="Label"
+                           Margin="0,0,8,4" />
+
+                <TextBox Grid.Row="1"
+                         Grid.Column="0"
+                         Name="KeyCombo"
+                         PlaceholderText="Press keys..."
+                         HorizontalAlignment="Stretch"
+                         IsReadOnly="True"
+                         KeyDown="KeyCombo_KeyDown"
+                         TextChanged="KeyCombo_TextChanged"
+                         TabIndex="0"
+                         Margin="0,0,8,0" />
+                <ComboBox Grid.Row="1"
+                          Grid.Column="1"
+                          Name="ActionCombo"
+                          SelectedIndex="0"
+                          HorizontalAlignment="Stretch"
+                          TabIndex="1"
+                          Margin="0,0,8,0">
+                    <ComboBoxItem>Open Folder</ComboBoxItem>
+                    <ComboBoxItem>Launch Program</ComboBoxItem>
+                    <ComboBoxItem>Open URL</ComboBoxItem>
+                    <ComboBoxItem>Type Text</ComboBoxItem>
+                    <ComboBoxItem>Insert Text (Paste)</ComboBoxItem>
+                </ComboBox>
+                <Button Grid.Row="1"
+                        Grid.Column="2"
+                        Name="AddButton"
+                        Content="Add"
+                        Classes="Primary"
+                        Click="Add_Click"
+                        Margin="0,0,8,0"
+                        TabIndex="4"
+                        MinWidth="96" />
+                <Button Grid.Row="1"
+                        Grid.Column="3"
+                        Name="CancelEditButton"
+                        Content="Cancel"
+                        Classes="Secondary"
+                        Click="CancelEdit_Click"
+                        IsVisible="False"
+                        TabIndex="5"
+                        MinWidth="86" />
+
+                <StackPanel Grid.Row="2"
+                            Grid.ColumnSpan="4"
+                            Margin="0,4,0,0">
+                    <TextBlock Name="EditorModeText"
+                               Classes="EditModeText"
+                               IsVisible="False"
+                               TextWrapping="Wrap" />
+                    <TextBlock Name="ShortcutErrorText"
+                               Classes="ErrorText"
+                               IsVisible="False" />
+                </StackPanel>
+
+                <TextBlock Grid.Row="3"
+                           Grid.ColumnSpan="4"
+                           Name="TargetLabel"
+                           Text="Folder path"
+                           Classes="Label"
+                           Margin="0,10,0,4" />
+
+                <Grid Grid.Row="4"
+                      Grid.ColumnSpan="4"
+                      ColumnDefinitions="*,Auto">
+                    <TextBox Grid.Column="0"
+                             Name="TargetText"
+                             PlaceholderText="Select a folder, app, URL, or text"
+                             HorizontalAlignment="Stretch"
+                             AcceptsReturn="False"
+                             TextWrapping="NoWrap"
+                             TabIndex="2"
+                             Margin="0,0,8,0" />
+                    <Button Grid.Column="1"
+                            Name="BrowseBtn"
+                            Content="Browse"
+                            Classes="Secondary"
+                            Click="Browse_Click"
+                            TabIndex="3"
+                            MinWidth="92"
+                            ToolTip.Tip="Choose a file or folder" />
+                </Grid>
+
+                <TextBlock Grid.Row="5"
+                           Grid.ColumnSpan="4"
+                           Name="TargetErrorText"
+                           Classes="ErrorText"
+                           IsVisible="False"
+                           Margin="0,4,0,0" />
+                <TextBlock Grid.Row="6"
+                           Grid.ColumnSpan="4"
+                           Name="TargetHintText"
+                           Classes="Muted"
+                           FontSize="11"
+                           TextWrapping="Wrap"
+                           Margin="0,6,0,0" />
+            </Grid>
         </Border>
-        
-        <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,15,0,0">
-            <TextBlock Grid.Column="0" Text="KeyPulse Background Service Running (Run as Admin for elevated apps)" ToolTip.Tip="If you wish to trigger hotkeys and type text into Administrator elevated windows, you must run KeyPulse as Administrator." Foreground="#b6c2d0" VerticalAlignment="Center" FontSize="11" />
-            <Button Grid.Column="1" Content="Settings ⚙" Click="Settings_Click" Padding="10,2" Cursor="Hand" />
+
+        <Border Grid.Row="2"
+                Classes="Panel"
+                Padding="0">
+            <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Disabled">
+            <Grid RowDefinitions="Auto,*"
+                  MinWidth="760">
+                <Grid Grid.Row="0"
+                      ColumnDefinitions="64,128,128,128,*,Auto,Auto"
+                      Margin="12,10,12,6">
+                    <TextBlock Grid.Column="0" Text="Enabled" Classes="ListHeader" HorizontalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="Shortcut" Classes="ListHeader" />
+                    <TextBlock Grid.Column="2" Text="Action" Classes="ListHeader" />
+                    <TextBlock Grid.Column="3" Text="Status" Classes="ListHeader" />
+                    <TextBlock Grid.Column="4" Text="Target" Classes="ListHeader" />
+                    <TextBlock Grid.Column="5" Text="Edit" Classes="ListHeader" HorizontalAlignment="Right" />
+                    <TextBlock Grid.Column="6" Text="Remove" Classes="ListHeader" HorizontalAlignment="Right" />
+                </Grid>
+
+                <ListBox Grid.Row="1"
+                         ItemsSource="{Binding Hotkeys}">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate x:DataType="local:HotkeyEntry">
+                            <Border Background="{Binding RowBackground}"
+                                    CornerRadius="6">
+                                <Grid ColumnDefinitions="64,128,128,128,*,Auto,Auto">
+                                    <CheckBox Grid.Column="0"
+                                              IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Click="Enabled_Click"
+                                              TabIndex="0"
+                                              ToolTip.Tip="Enable or disable this shortcut" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding KeyCombination}"
+                                               VerticalAlignment="Center"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource AppAccentBrush}"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip.Tip="{Binding KeyCombination}" />
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding ActionDisplay}"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource AppTextPrimaryBrush}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Column="3"
+                                               Text="{Binding RegistrationStatus}"
+                                               VerticalAlignment="Center"
+                                               Foreground="{Binding RegistrationBrush}"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip.Tip="{Binding RegistrationStatus}" />
+                                    <TextBlock Grid.Column="4"
+                                               Text="{Binding Target}"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,10,0"
+                                               ToolTip.Tip="{Binding Target}" />
+                                    <Button Grid.Column="5"
+                                            Content="Edit"
+                                            Classes="Secondary"
+                                            Click="Edit_Click"
+                                            MinWidth="72"
+                                            Margin="0,0,8,0"
+                                            FontSize="12"
+                                            TabIndex="1" />
+                                    <Button Grid.Column="6"
+                                            Content="Remove"
+                                            Classes="Danger"
+                                            Click="Remove_Click"
+                                            MinWidth="86"
+                                            FontSize="12"
+                                            TabIndex="2" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+            </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="3"
+              ColumnDefinitions="*,Auto"
+              Margin="0,12,0,0">
+            <TextBlock Grid.Column="0"
+                       Name="ServiceStatusText"
+                       Text="KeyPulse background service running. Run as administrator to trigger shortcuts inside elevated apps."
+                       ToolTip.Tip="If you wish to trigger hotkeys and type text into Administrator elevated windows, run KeyPulse as Administrator."
+                       Foreground="{DynamicResource AppTextMutedBrush}"
+                       VerticalAlignment="Center"
+                       FontSize="11"
+                       TextTrimming="CharacterEllipsis"
+                       Margin="0,0,12,0" />
+            <Button Grid.Column="1"
+                    Content="Settings"
+                    Classes="Secondary"
+                    Click="Settings_Click"
+                    TabIndex="6"
+                    MinWidth="98" />
         </Grid>
     </Grid>
 </Window>
-
-
-
-
