@@ -34,6 +34,23 @@ goto parse_args
 
 :args_parsed
 
+REM ---------------------------------------------------------------------------
+REM ISSUE_15: stamp the build with a real version. Every release used to report
+REM 1.0.0.0, so a user could not tell which build they were running and nothing
+REM could compare it against the latest release. Computed once here so the exe,
+REM the Add/Remove Programs entry and the git tag all say the same thing.
+REM Each part must stay under 65535 for a Windows assembly version: HHmm does,
+REM HHmmss does not.
+REM ---------------------------------------------------------------------------
+set "BUILD_VERSION="
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "Get-Date -Format yyyy.MM.dd.HHmm"`) do set "BUILD_VERSION=%%V"
+if not defined BUILD_VERSION (
+  echo ERROR: could not compute a build version.
+  exit /b 1
+)
+set "TAG=v!BUILD_VERSION!"
+echo Build version: !BUILD_VERSION!  ^(tag !TAG!^)
+
 set "PROJECT_FILE=KeyPulse.csproj"
 set "PROJECT_EXE=KeyPulse.exe"
 set "OUTPUT_EXE=KeyPulse.exe"
@@ -123,10 +140,41 @@ if not defined LOCALHASH (
   echo [PUBLISH] STOPPED: could not fingerprint the freshly built exe.
   exit /b 1
 )
-for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "Get-Date -Format yyyy.MM.dd.HHmmss"`) do set "TAG=v%%D"
+if not defined TAG (
+  echo [PUBLISH] STOPPED: no build tag was computed.
+  exit /b 1
+)
 echo [PUBLISH] 4/7 Built exe fingerprint + tag !TAG! ready.        [OK]
 
-echo [PUBLISH] 5/7 Previous releases retained.                         [OK]
+REM ---------------------------------------------------------------------------
+REM ISSUE_18: every build replaces what is published, and the script now says so
+REM truthfully. It used to print "Previous releases retained." while
+REM project_structure.txt - the file that calls itself the source of truth -
+REM claimed all previous releases were purged. Claim and behaviour now match:
+REM every remote release, every remote tag and every local tag is removed, then
+REM this build becomes the only one on the repository.
+REM ---------------------------------------------------------------------------
+set /a PURGED=0
+for /f "usebackq delims=" %%T in (`gh release list --repo !REPO! --limit 200 --json tagName --jq ".[].tagName" 2^>nul`) do (
+  gh release delete "%%T" --repo !REPO! --yes --cleanup-tag >nul 2>&1
+  set /a PURGED+=1
+)
+
+REM Any tag that survived the release removal, on the remote and locally.
+git fetch --tags --prune --prune-tags >nul 2>&1
+for /f "usebackq delims=" %%T in (`git tag --list 2^>nul`) do (
+  git push origin --delete "%%T" >nul 2>&1
+  git tag -d "%%T" >nul 2>&1
+)
+
+REM Confirm the slate really is clean before publishing onto it.
+set "SURVIVORS="
+for /f "usebackq delims=" %%T in (`gh release list --repo !REPO! --limit 200 --json tagName --jq ".[].tagName" 2^>nul`) do set "SURVIVORS=!SURVIVORS! %%T"
+if defined SURVIVORS (
+  echo [PUBLISH] STOPPED: these releases could not be removed:!SURVIVORS!
+  exit /b 1
+)
+echo [PUBLISH] 5/7 Removed !PURGED! previous release^(s^) and all tags. [OK]
 
 gh release create !TAG! "%OUTPUT_DIR%\%OUTPUT_EXE%" --repo !REPO! --title "KeyPulse !TAG!" --notes "Automated NativeAOT release published by build.cmd on !TAG!. SHA256 !LOCALHASH!" --latest >nul 2>&1
 if errorlevel 1 (
@@ -160,7 +208,7 @@ if exist "%STAGING_DIR%" rd /s /q "%STAGING_DIR%"
 if exist "%FINAL_DIR%" rd /s /q "%FINAL_DIR%"
 
 echo [NativeAOT] 2. Publishing standalone installer...
-dotnet publish "%PROJECT_FILE%" -c Release -r win-x64 %PUBLISH_BASE_ARGS% %PUBLISH_AOT_ARGS% -o "%FINAL_DIR%" %DOTNET_LOG_ARGS%
+dotnet publish "%PROJECT_FILE%" -c Release -r win-x64 %PUBLISH_BASE_ARGS% %PUBLISH_AOT_ARGS% -p:Version=!BUILD_VERSION! -o "%FINAL_DIR%" %DOTNET_LOG_ARGS%
 if errorlevel 1 exit /b 1
 
 echo [NativeAOT] 3. Moving final EXE to compiled folder...

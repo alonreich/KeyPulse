@@ -35,6 +35,12 @@ namespace KeyPulse
         [DllImport("user32.dll")]
         private static extern void PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
         {
@@ -60,6 +66,7 @@ namespace KeyPulse
         public const uint ModCtrl = 0x0002;
         public const uint ModShift = 0x0004;
         public const uint ModWin = 0x0008;
+        private const uint ModNoRepeat = 0x4000;
         private static IntPtr _hWnd;
         private static Thread? _thread;
         private static Dictionary<int, Action> _actions = new();
@@ -90,7 +97,12 @@ namespace KeyPulse
         private static volatile bool _captureShiftDown;
         private static volatile bool _captureWinDown;
 
+        private static readonly uint CurrentProcessId = (uint)Environment.ProcessId;
+
         public static bool IsCaptureMode { get; set; } = false;
+
+        /// <summary>Last Win32 error seen by a failed RegisterHotKey call.</summary>
+        public static int LastRegisterError { get; private set; }
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -186,9 +198,48 @@ namespace KeyPulse
                 || _captureWinDown || IsWinVk(currentVk);
         }
 
+        /// <summary>
+        /// ISSUE_1: the capture hook must only ever swallow keys while a KeyPulse window is the
+        /// foreground window. Previously it kept eating the whole machine's keyboard as soon as the
+        /// shortcut box held focus, including after the user alt-tabbed to another application.
+        /// </summary>
+        private static bool IsKeyPulseForeground()
+        {
+            var hWnd = GetForegroundWindow();
+            if (hWnd == IntPtr.Zero) return false;
+
+            GetWindowThreadProcessId(hWnd, out var processId);
+            return processId == CurrentProcessId;
+        }
+
+        // KBDLLHOOKSTRUCT layout: vkCode(0) scanCode(4) flags(8) time(12) dwExtraInfo(16).
+        private const int HookExtraInfoOffset = 16;
+
+        /// <summary>
+        /// ISSUE_14: keystrokes KeyPulse injects itself carry InputSimulator.InjectionTag in
+        /// dwExtraInfo, and are ignored here. Without this the capture hook can read back the very
+        /// keys InputSimulator is sending and record them as if the user had pressed them.
+        ///
+        /// This deliberately tests OUR tag and not Windows' generic LLKHF_INJECTED flag: remote
+        /// desktop sessions, virtual machines and some laptop function-key drivers deliver ordinary
+        /// user keystrokes with that flag set, and treating those as ours would stop the shortcut
+        /// box from recording anything at all in exactly those environments.
+        /// </summary>
+        private static bool IsOwnInjectedEvent(IntPtr lParam)
+        {
+            try
+            {
+                return Marshal.ReadIntPtr(lParam, HookExtraInfoOffset) == InputSimulator.InjectionTag;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0 && IsCaptureMode)
+            if (nCode >= 0 && IsCaptureMode && !IsOwnInjectedEvent(lParam) && IsKeyPulseForeground())
             {
                 int vkCode = Marshal.ReadInt32(lParam);
 
@@ -209,14 +260,17 @@ namespace KeyPulse
                     return CallNextHookEx(_hookID, nCode, wParam, lParam);
                 }
 
-                // Aggressively swallow all other keys during capture mode to prevent OS hijacking
+                // Swallow the rest so Windows does not act on the combination being recorded.
                 return (IntPtr)1;
             }
+
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
         }
 
         public static void Start()
         {
+            if (_thread != null) return;
+
             var tcs = new ManualResetEventSlim(false);
             _thread = new Thread(() =>
             {
@@ -254,6 +308,7 @@ namespace KeyPulse
                     DispatchMessage(ref msg);
                 }
                 DestroyWindow(_hWnd);
+                _hWnd = IntPtr.Zero;
             });
             _thread.SetApartmentState(ApartmentState.STA);
             _thread.IsBackground = true;
@@ -267,23 +322,39 @@ namespace KeyPulse
             if (_hWnd != IntPtr.Zero)
             {
                 PostMessage(_hWnd, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
-                _thread?.Join();
+                _thread?.Join(2000);
+                _thread = null;
             }
         }
 
-        private static void RunOnThread(Action action)
+        private static bool RunOnThread(Action action)
         {
-            if (_hWnd == IntPtr.Zero) return;
-            if (Thread.CurrentThread == _thread) {
-                action();
-            } else {
-                using var tcs = new ManualResetEventSlim(false);
-                _taskQueue.Enqueue(() => { action(); tcs.Set(); });
-                PostMessage(_hWnd, WM_USER, IntPtr.Zero, IntPtr.Zero);
-                tcs.Wait(2000);
+            if (_hWnd == IntPtr.Zero)
+            {
+                Program.LogDebug("HotkeyManager.RunOnThread called before the message window existed.");
+                return false;
             }
+
+            if (Thread.CurrentThread == _thread)
+            {
+                action();
+                return true;
+            }
+
+            using var tcs = new ManualResetEventSlim(false);
+            _taskQueue.Enqueue(() => { action(); tcs.Set(); });
+            PostMessage(_hWnd, WM_USER, IntPtr.Zero, IntPtr.Zero);
+            return tcs.Wait(5000);
         }
 
+        private static Dictionary<int, (uint modifiers, uint vk)> _activeCombos = new();
+
+        /// <summary>
+        /// Releases every hotkey. Used at shutdown only. Do NOT call this to apply an edit: ISSUE_5
+        /// was exactly that - every add, edit, toggle and 30-second retry unregistered the user's
+        /// whole set and re-registered it, leaving a window in which no shortcut worked at all.
+        /// Use Unregister(id) / Register(...) for individual rows instead.
+        /// </summary>
         public static void Clear()
         {
             RunOnThread(() => {
@@ -292,23 +363,253 @@ namespace KeyPulse
                     UnregisterHotKey(_hWnd, id);
                 }
                 _actions.Clear();
-                _currentId = 0;
+                _activeCombos.Clear();
+                // _currentId is deliberately NOT reset: ids are never reused, so a hotkey message
+                // still in flight can never be delivered to a different shortcut's action.
+            });
+        }
+
+        /// <summary>Releases a single hotkey previously handed out by Register.</summary>
+        public static void Unregister(int hotkeyId)
+        {
+            if (hotkeyId <= 0) return;
+
+            RunOnThread(() =>
+            {
+                if (!_actions.ContainsKey(hotkeyId) && !_activeCombos.ContainsKey(hotkeyId)) return;
+                UnregisterHotKey(_hWnd, hotkeyId);
+                _actions.Remove(hotkeyId);
+                _activeCombos.Remove(hotkeyId);
             });
         }
 
         public static bool Probe(string combo)
         {
             if (!ParseCombo(combo, out uint modifiers, out uint vk)) return false;
-            int probeId = 99999;
+
             bool success = false;
-            RunOnThread(() => {
-                if (RegisterHotKey(_hWnd, probeId, modifiers | 0x4000, vk))
+            var completed = RunOnThread(() => {
+                // If we already own this combo, return success
+                foreach (var active in _activeCombos.Values)
                 {
-                    UnregisterHotKey(_hWnd, probeId);
-                    success = true;
+                    if (active.modifiers == modifiers && active.vk == vk)
+                    {
+                        success = true;
+                        return;
+                    }
+                }
+
+                success = TestComboAvailableOnHotkeyThread(modifiers, vk);
+            });
+
+            return completed && success;
+        }
+
+        private const int ProbeHotkeyId = 99999;
+
+        /// <summary>Must only be called on the hotkey message thread.</summary>
+        private static bool TestComboAvailableOnHotkeyThread(uint modifiers, uint vk)
+        {
+            if (RegisterHotKey(_hWnd, ProbeHotkeyId, modifiers | ModNoRepeat, vk))
+            {
+                UnregisterHotKey(_hWnd, ProbeHotkeyId);
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// ISSUE_20: when a combination is taken, offer the nearest free alternative instead of a
+        /// dead-end "Conflict" message.
+        /// </summary>
+        public static string? SuggestAlternative(string combo)
+        {
+            if (!ParseCombo(combo, out uint modifiers, out uint vk)) return null;
+
+            uint[] extras = { ModShift, ModCtrl, ModAlt, ModWin };
+            string? suggestion = null;
+
+            RunOnThread(() =>
+            {
+                foreach (var extra in extras)
+                {
+                    if ((modifiers & extra) != 0) continue;
+                    var candidate = modifiers | extra;
+                    if (IsComboOwnedByUs(candidate, vk)) continue;
+                    if (TestComboAvailableOnHotkeyThread(candidate, vk))
+                    {
+                        suggestion = DescribeCombo(candidate, vk);
+                        return;
+                    }
+                }
+
+                foreach (var first in extras)
+                {
+                    if ((modifiers & first) != 0) continue;
+                    foreach (var second in extras)
+                    {
+                        if (second == first) continue;
+                        if ((modifiers & second) != 0) continue;
+                        var candidate = modifiers | first | second;
+                        if (IsComboOwnedByUs(candidate, vk)) continue;
+                        if (TestComboAvailableOnHotkeyThread(candidate, vk))
+                        {
+                            suggestion = DescribeCombo(candidate, vk);
+                            return;
+                        }
+                    }
                 }
             });
-            return success;
+
+            return suggestion;
+        }
+
+        private static bool IsComboOwnedByUs(uint modifiers, uint vk)
+        {
+            foreach (var active in _activeCombos.Values)
+            {
+                if (active.modifiers == modifiers && active.vk == vk) return true;
+            }
+            return false;
+        }
+
+        public static string DescribeCombo(uint modifiers, uint vk)
+        {
+            var parts = new List<string>();
+            if ((modifiers & ModCtrl) != 0) parts.Add("Ctrl");
+            if ((modifiers & ModAlt) != 0) parts.Add("Alt");
+            if ((modifiers & ModShift) != 0) parts.Add("Shift");
+            if ((modifiers & ModWin) != 0) parts.Add("Win");
+            parts.Add(VirtualKeyToName(vk));
+            return string.Join("+", parts);
+        }
+
+        // ------------------------------------------------------------------
+        // ISSUE_13: ONE key-name table for the whole application.
+        //
+        // There used to be three: this file's switch, a second switch in MainWindow's raw-key
+        // handler, and Avalonia's own Key enum names written straight into the box by the fallback
+        // capture path. They disagreed. The worst case was the numeric keypad: "Add" parsed to
+        // 0xBB - the "=" key next to Backspace - so the shortcut the user tested was not the
+        // shortcut that got registered. Everything now round-trips through these two dictionaries.
+        // ------------------------------------------------------------------
+
+        private static readonly (uint Vk, string Name)[] CanonicalKeyNames =
+        {
+            (0x0D, "Enter"), (0x20, "Space"), (0x1B, "Escape"), (0x09, "Tab"), (0x08, "Back"),
+            (0x2E, "Delete"), (0x2D, "Insert"), (0x24, "Home"), (0x23, "End"),
+            (0x21, "PageUp"), (0x22, "PageDown"),
+            (0x26, "Up"), (0x28, "Down"), (0x25, "Left"), (0x27, "Right"),
+            (0x14, "CapsLock"), (0x90, "NumLock"), (0x91, "ScrollLock"),
+            (0x2C, "PrintScreen"), (0x13, "Pause"), (0x5D, "Apps"),
+
+            (0x70, "F1"), (0x71, "F2"), (0x72, "F3"), (0x73, "F4"), (0x74, "F5"), (0x75, "F6"),
+            (0x76, "F7"), (0x77, "F8"), (0x78, "F9"), (0x79, "F10"), (0x7A, "F11"), (0x7B, "F12"),
+            (0x7C, "F13"), (0x7D, "F14"), (0x7E, "F15"), (0x7F, "F16"), (0x80, "F17"), (0x81, "F18"),
+            (0x82, "F19"), (0x83, "F20"), (0x84, "F21"), (0x85, "F22"), (0x86, "F23"), (0x87, "F24"),
+
+            // The numeric keypad is a different set of physical keys from the number row and the
+            // punctuation row. Keeping them distinct is the whole point of this table.
+            (0x60, "NumPad0"), (0x61, "NumPad1"), (0x62, "NumPad2"), (0x63, "NumPad3"),
+            (0x64, "NumPad4"), (0x65, "NumPad5"), (0x66, "NumPad6"), (0x67, "NumPad7"),
+            (0x68, "NumPad8"), (0x69, "NumPad9"),
+            (0x6A, "NumPadMultiply"), (0x6B, "NumPadAdd"), (0x6C, "NumPadSeparator"),
+            (0x6D, "NumPadSubtract"), (0x6E, "NumPadDecimal"), (0x6F, "NumPadDivide"),
+
+            (0xBA, "OemSemicolon"), (0xBB, "OemPlus"), (0xBC, "OemComma"), (0xBD, "OemMinus"),
+            (0xBE, "OemPeriod"), (0xBF, "OemQuestion"), (0xC0, "OemTilde"),
+            (0xDB, "OemOpenBrackets"), (0xDC, "OemPipe"), (0xDD, "OemCloseBrackets"),
+            (0xDE, "OemQuotes"), (0xDF, "Oem8"), (0xE2, "OemBackslash"),
+
+            (0xB0, "MediaNextTrack"), (0xB1, "MediaPreviousTrack"), (0xB2, "MediaStop"),
+            (0xB3, "MediaPlayPause"),
+            (0xAD, "VolumeMute"), (0xAE, "VolumeDown"), (0xAF, "VolumeUp"),
+
+            (0xA6, "BrowserBack"), (0xA7, "BrowserForward"), (0xA8, "BrowserRefresh"),
+            (0xA9, "BrowserStop"), (0xAA, "BrowserSearch"), (0xAB, "BrowserFavorites"),
+            (0xAC, "BrowserHome")
+        };
+
+        /// <summary>Spellings accepted on input but never produced on output.</summary>
+        private static readonly (string Alias, uint Vk)[] KeyNameAliases =
+        {
+            ("return", 0x0D), ("spacebar", 0x20), ("esc", 0x1B), ("backspace", 0x08),
+            ("del", 0x2E), ("ins", 0x2D), ("pgup", 0x21), ("pgdn", 0x22), ("prtsc", 0x2C),
+            ("menu", 0x5D), ("contextmenu", 0x5D), ("capital", 0x14), ("snapshot", 0x2C),
+
+            // Row "+" (shift-equals). Distinct from the keypad's plus, which is 0x6B.
+            ("plus", 0xBB), ("+", 0xBB), ("equals", 0xBB), ("oemquotes", 0xDE),
+            ("oem3", 0xC0), ("oem1", 0xBA), ("oem2", 0xBF), ("oem4", 0xDB), ("oem5", 0xDC),
+            ("oem6", 0xDD), ("oem7", 0xDE), ("oem102", 0xE2),
+
+            // Keypad spellings, including the Avalonia Key enum names.
+            ("add", 0x6B), ("numpadplus", 0x6B), ("numpadadd", 0x6B),
+            ("subtract", 0x6D), ("numpadminus", 0x6D), ("numpadsubtract", 0x6D),
+            ("multiply", 0x6A), ("numpadmultiply", 0x6A),
+            ("divide", 0x6F), ("numpaddivide", 0x6F),
+            ("decimal", 0x6E), ("numpaddecimal", 0x6E), ("separator", 0x6C),
+
+            ("playpause", 0xB3), ("play", 0xB3), ("medianexttrack", 0xB0),
+            ("mediaprevioustrack", 0xB1), ("mediastop", 0xB2)
+        };
+
+        private static readonly Dictionary<uint, string> VkToNameMap = BuildVkToNameMap();
+        private static readonly Dictionary<string, uint> NameToVkMap = BuildNameToVkMap();
+
+        private static Dictionary<uint, string> BuildVkToNameMap()
+        {
+            var map = new Dictionary<uint, string>();
+            foreach (var (vk, name) in CanonicalKeyNames) map[vk] = name;
+            return map;
+        }
+
+        private static Dictionary<string, uint> BuildNameToVkMap()
+        {
+            var map = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (vk, name) in CanonicalKeyNames) map[name] = vk;
+            foreach (var (alias, vk) in KeyNameAliases) map[alias] = vk;
+
+            // Avalonia writes the number row as D0..D9; accept that spelling too.
+            for (uint digit = 0; digit <= 9; digit++) map["D" + digit] = 0x30 + digit;
+            return map;
+        }
+
+        /// <summary>Inverse of the name table used by ParseCombo, so round-tripping is stable.</summary>
+        public static string VirtualKeyToName(uint vk)
+        {
+            if (VkToNameMap.TryGetValue(vk, out var name)) return name;
+
+            if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9'))
+            {
+                return ((char)vk).ToString();
+            }
+
+            // Never invent a spelling we cannot read back. "VK123" always parses again.
+            return "VK" + vk;
+        }
+
+        /// <summary>Resolves one non-modifier token to a virtual key, or 0 when unknown.</summary>
+        public static uint NameToVirtualKey(string token)
+        {
+            var trimmed = (token ?? string.Empty).Trim();
+            if (trimmed.Length == 0) return 0;
+
+            if (NameToVkMap.TryGetValue(trimmed, out var mapped)) return mapped;
+
+            if (trimmed.Length == 1)
+            {
+                var c = char.ToUpperInvariant(trimmed[0]);
+                if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return c;
+            }
+
+            if (trimmed.StartsWith("VK", StringComparison.OrdinalIgnoreCase)
+                && uint.TryParse(trimmed.AsSpan(2), out var raw) && raw > 0 && raw <= 0xFF)
+            {
+                return raw;
+            }
+
+            return 0;
         }
 
         private static bool ParseCombo(string combo, out uint modifiers, out uint vk)
@@ -318,67 +619,27 @@ namespace KeyPulse
 
             if (string.IsNullOrWhiteSpace(combo)) return false;
 
-            var parts = combo.Split('+', StringSplitOptions.RemoveEmptyEntries);
+            // "Ctrl++" means Ctrl plus the "+" key: keep an empty tail as a literal "+" token.
+            var raw = combo.Split('+');
+            var parts = new List<string>();
+            for (var i = 0; i < raw.Length; i++)
+            {
+                var token = raw[i].Trim();
+                if (token.Length > 0) { parts.Add(token); continue; }
+                if (i > 0 && i == raw.Length - 1) parts.Add("+");
+            }
+
             foreach (var p in parts)
             {
-                var trim = p.Trim().ToLowerInvariant();
+                var trim = p.ToLowerInvariant();
                 if (trim == "ctrl" || trim == "control") modifiers |= ModCtrl;
                 else if (trim == "alt") modifiers |= ModAlt;
                 else if (trim == "shift") modifiers |= ModShift;
-                else if (trim == "win" || trim == "windows") modifiers |= ModWin;
-                else if (trim == "oemplus" || trim == "add" || trim == "plus" || trim == "+") vk = 0xBB;
+                else if (trim == "win" || trim == "windows" || trim == "meta") modifiers |= ModWin;
                 else
                 {
-                    vk = trim switch
-                    {
-                        "return" => 0x0D,
-                        "enter" => 0x0D,
-                        "space" => 0x20,
-                        "spacebar" => 0x20,
-                        "up" => 0x26,
-                        "down" => 0x28,
-                        "left" => 0x25,
-                        "right" => 0x27,
-                        "escape" => 0x1B,
-                        "tab" => 0x09,
-                        "back" => 0x08,
-                        "delete" => 0x2E,
-                        "insert" => 0x2D,
-                        "home" => 0x24,
-                        "end" => 0x23,
-                        "pageup" => 0x21,
-                        "pagedown" => 0x22,
-                        "oemplus" => 0xBB,
-                        "oemcomma" => 0xBC,
-                        "oemminus" => 0xBD,
-                        "oemperiod" => 0xBE,
-                        "oemtilde" => 0xC0,
-                        "oemquestion" => 0xBF,
-                        "oemquotes" => 0xDE,
-                        "oempipe" => 0xDC,
-                        "oemopenbrackets" => 0xDB,
-                        "oemclosebrackets" => 0xDD,
-                        "oemsemicolon" => 0xBA,
-                        "mediaplaypause" => 0xB3,
-                        "playpause" => 0xB3,
-                        "play" => 0xB3,
-                        "volumemute" => 0xAD,
-                        "volumedown" => 0xAE,
-                        "volumeup" => 0xAF,
-                        _ => (uint)0
-                    };
-
-                    if (vk == 0)
-                    {
-                        if (p.Trim().Length == 1)
-                        {
-                            vk = (uint)p.Trim().ToUpperInvariant()[0];
-                        }
-                        else if (Enum.TryParse<ConsoleKey>(p.Trim(), true, out var key))
-                        {
-                            vk = (uint)key;
-                        }
-                    }
+                    var resolved = NameToVirtualKey(p);
+                    if (resolved != 0) vk = resolved;
                 }
             }
 
@@ -405,21 +666,48 @@ namespace KeyPulse
                 || (vk >= 0xDB && vk <= 0xDE);
         }
 
-        public static bool Register(string combo, Action action)
+        public static bool Register(string combo, Action action) => Register(combo, action, out _);
+
+        /// <summary>
+        /// Takes out one hotkey and returns the id that owns it, so the caller can release exactly
+        /// that one later without disturbing any other shortcut. ISSUE_5.
+        /// </summary>
+        public static bool Register(string combo, Action action, out int hotkeyId)
         {
+            hotkeyId = 0;
             if (!ParseCombo(combo, out uint modifiers, out uint vk)) return false;
 
-            _currentId++;
             bool success = false;
-            RunOnThread(() => {
-                if (RegisterHotKey(_hWnd, _currentId, modifiers | 0x4000, vk)) // 0x4000 = MOD_NOREPEAT
+            int lastError = 0;
+            int assignedId = 0;
+
+            var completed = RunOnThread(() => {
+                var id = ++_currentId;
+                if (RegisterHotKey(_hWnd, id, modifiers | ModNoRepeat, vk))
                 {
-                    _actions[_currentId] = action;
+                    _actions[id] = action;
+                    _activeCombos[id] = (modifiers, vk);
+                    assignedId = id;
                     success = true;
                 }
+                else
+                {
+                    lastError = Marshal.GetLastWin32Error();
+                }
             });
-            return success;
+
+            LastRegisterError = success ? 0 : lastError;
+
+            // Report success on `success`, not on `completed`. If the message thread took the
+            // hotkey but the 5-second wait expired, reporting failure would orphan a registration
+            // nothing could ever release.
+            if (success)
+            {
+                hotkeyId = assignedId;
+                return true;
+            }
+
+            return completed && success;
         }
     }
 }
-

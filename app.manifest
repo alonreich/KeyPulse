@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <!-- This manifest is used on Windows only.
        Don't remove it as it might cause problems with window transparency and embedded controls.
@@ -15,4 +15,15 @@
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
     </application>
   </compatibility>
+
+  <!-- ISSUE_16: without this, Windows bitmap-stretches the whole window on any display running at
+       125%/150% scaling or on 4K, which is why text and icons looked soft. PerMonitorV2 also makes
+       the window re-render sharply when it is dragged between monitors with different DPI. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
 </assembly>

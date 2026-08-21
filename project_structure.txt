@@ -12,38 +12,108 @@
 
 ### Boot / Initialization (`Program.cs` & `App.axaml.cs`)
 1. Executable is launched. `Program.cs` intercepts the startup arguments.
-2. **Native Asset Unpacking**: Due to NativeAOT stripping C++ dependencies, `ExtractNativeLibs()` manually dumps `libSkiaSharp.dll`, `av_libglesv2.dll`, and `libHarfBuzzSharp.dll` from the assembly's embedded resources into the executing directory instantly before Avalonia boots.
-3. **Lifecycle Hooks**:
-   - If `--uninstall` is passed, it copies itself to `%TEMP%\KeyPulse_Uninstaller.exe` and restarts. The temp instance boots Avalonia and opens `SetupWindow(isUninstall: true)`.
-   - If `--install-worker` is passed, it boots Avalonia and opens `SetupWindow(isUninstall: false)`.
-   - If run normally outside of its installation directory (`%LOCALAPPDATA%\Programs\KeyPulse`), it dynamically copies itself to `%TEMP%` and relaunches with `--install-worker` to trigger the installation pipeline.
-   - If run normally from its installation directory, it launches the standard `MainWindow`.
+2. **Mutex Protection**: Checks a **session-local** `Local\KeyPulse_SingleInstance` mutex (NOT `Global\` - a Global mutex owned by another Windows user threw an unhandled access-denied exception and blocked second users/RDP sessions). Mutex creation is wrapped in try/catch and never prevents launch. A duplicate launch **signals the running instance to show its window** and exits silently; the Win32 message box is only shown if that signal could not be delivered.
+3. **Native Asset Unpacking**: Due to NativeAOT stripping C++ dependencies, `ExtractNativeLibs()` manually dumps `libSkiaSharp.dll`, `av_libglesv2.dll`, and `libHarfBuzzSharp.dll` from the assembly's embedded resources into `%LOCALAPPDATA%\Programs\KeyPulse\runtime` before Avalonia boots. Each file is verified **by SHA-256 content hash**, never by length: a same-length but corrupted library used to be accepted forever and crashed the app on every launch with no explanation. The folder is inside the install directory on purpose - `%TEMP%` is writable by every other process running as this user, and `SetDllDirectory` points Windows at this folder.
+4. **Lifecycle Hooks**:
+   - If `--uninstall` is passed, it copies itself to `%TEMP%\KeyPulse_Uninstaller.exe` and restarts.
+   - If run normally outside of its strict `%LOCALAPPDATA%\Programs\KeyPulse` boundary, it dynamically copies itself to `%TEMP%` and relaunches with `--install-worker` to trigger the installation pipeline.
+5. **Versioning**: `build.cmd` stamps `yyyy.MM.dd.HHmm` into the exe via `-p:Version=`. `Program.AppVersion` reads it back with `FileVersionInfo` (no reflection, so NativeAOT-safe). Settings shows it and `UpdateChecker` can compare it against the GitHub releases API on demand.
+6. **Startup Launcher**: If enabled, `Program.SetStartup` writes a minimal `boot.vbs` that launches KeyPulse **once** and exits. The old WMI 60-second watchdog loop was removed: it resurrected the app after a deliberate user Exit.
+7. **Single startup authority**: `Program.IsStartupEnabled()` / `Program.SetStartup()` are the ONLY places that decide startup state. They transparently handle BOTH the `Run` registry key and the elevated `KeyPulse_AdminTask` logon task, so the two launchers can never both fire and elevating/de-elevating cannot silently lose the setting.
+8. **Elevation**: `--setup-admin-task` and `--remove-admin-task` check the `schtasks` exit code and verify the resulting task state. A failed elevation changes nothing and tells the user. `Program.TryRemoveAdminTask` verifies removal and is used by the uninstaller.
 
 ### Installation & Setup UI (`SetupWindow.cs`)
-- An Avalonia `Window` bypassing the main app logic to provide verbose terminal-like logging (using `Consolas` font) during lifecycle events.
-- **Install Flow**: Kills existing instances -> Creates `%LOCALAPPDATA%` directory -> Copies binary -> Writes Registry keys for `appwiz.cpl` (Add/Remove Programs) -> Calls PowerShell COM object to create Start Menu `.lnk` shortcut -> Cold boots the installed app.
-- **Uninstall Flow**: Kills instances -> Purges directory -> Purges `appwiz.cpl` and `Run` startup registry keys -> Purges Start Menu shortcuts -> Self-terminates.
+- An Avalonia `Window` bypassing the main app logic to provide verbose terminal-like logging during lifecycle events.
+- **Install Flow**: Cleans legacy temp logs/folders (including `%TEMP%\KeyPulse_NativeLibs` and `%LOCALAPPDATA%\KeyPulse`) -> Scours and deletes any old junk installs from `C:\Program Files` and `C:\Program Files (x86)` -> Sends a graceful `WM_CLOSE` to any running instances (falling back to a brutal `Kill()` only if they hang) -> Provisions `%LOCALAPPDATA%` directory -> Copies binary -> Writes a COMPLETE set of Registry keys for `appwiz.cpl` (`DisplayVersion`, `InstallLocation`, `InstallDate`, `EstimatedSize`, `QuietUninstallString`, `URLInfoAbout`, `HelpLink` - not just a name and an uninstall string) -> Instantly builds Start Menu/Desktop shortcuts using native C# COM Interop (`IShellLink`) -> Upgrades `boot.vbs` syntax if startup was previously enabled.
+- **Uninstall Flow**: Identical graceful process termination -> **Verified removal of the `KeyPulse_AdminTask` scheduled task** (`Program.TryRemoveAdminTask`, which re-queries the task and reports a manual command if it survives) -> Purges ALL app binaries (including the `runtime` subfolder), the entire `%APPDATA%\KeyPulse` settings folder (config **and** logs), the legacy `%LOCALAPPDATA%\KeyPulse` log folder, legacy `Program Files` debris, `%TEMP%` native lib pollution, registry keys, and shortcuts -> Self-terminates via cmd background ping.
 
 ### Configuration & State UI (`MainWindow.axaml` & `.cs`)
 - **Dynamic Capture**: The `TextBox` for hotkeys uses a `KeyDown` hook (`KeyCombo_KeyDown`) to intercept and record physical modifier+key combinations instantly.
-- **Validation**: When text changes, it calls `HotkeyManager.Probe()` to ensure the key isn't claimed by the OS (colors Red if conflicting).
-- **Settings Dialog**: Uses Avalonia's `StorageProvider` to backup (`export`) and restore (`import`) the `config.json` payload. During restoration, every single imported hotkey is immediately live-probed against the OS's `RegisterHotKey` pool to detect and warn about external collisions.
-- **Window Persistence**: `MainWindow` dimensions (`X`, `Y`, `Width`, `Height`, `WindowState`) are continuously tracked.
-- **Tray Daemonization**: `OnClosing` is intercepted. Unless `App.IsExiting` is explicitly `true` (via the Tray menu), `e.Cancel = true` fires and `this.Hide()` is called, burying the app into the System Tray.
+- **Validation**: When text changes, it calls `HotkeyManager.Probe()` to ensure the key isn't claimed by the OS (colors Red if conflicting). On conflict, `HotkeyManager.SuggestAlternative()` probes nearby combinations and offers a free one.
+- **Search & Sort**: The `ListBox` binds to `VisibleHotkeys`, a filtered/sorted projection of the master `Hotkeys` collection. `RefreshVisibleHotkeys()` must be called after ANY mutation of `Hotkeys`.
+- **Registration resilience**: `ApplyHotkeys()` validates only the *shape* of a target (`ValidateTargetShape`). Reachability (`IsTargetAvailableNow`) only sets a `Waiting` status; it never unregisters. A 30-second `DispatcherTimer` retries `Waiting`/`Conflict` rows so they self-heal.
+- **Incremental registration (CRITICAL)**: `ApplyHotkeys()` **reconciles**, it does not rebuild. It compares each row's `RegisteredCombo` against its current combination and touches only what changed, via `HotkeyManager.Register(combo, action, out id)` / `HotkeyManager.Unregister(id)`. It must NEVER call `HotkeyManager.Clear()`: doing so released every hotkey the user owned on every add, edit, toggle, removal and 30-second retry, and any press landing in that gap was silently lost. `Clear()` is for shutdown only. A row leaving the list must have `ReleaseRegistration` called on it before removal.
+- **Conflict suggestions are cached**: `SuggestAlternative` costs up to sixteen blocking register/unregister round trips. `HotkeyEntry.SuggestedForCombo` stops the retry timer recomputing it every 30 seconds forever.
+- **Backup / Restore**: owned entirely by `BackupService.cs`. See its own section below.
+- **Theme**: `App.ApplyTheme()` applies `AppConfig.Theme` (System / Light / Dark). `App.axaml` no longer pins `RequestedThemeVariant`.
+- **Hidden targets**: the list binds `TargetDisplay` and `TargetTooltip`, NEVER `Target`. When `IsTargetObfuscated` is set the row renders a mask under a radius-12 blur, the tool tip says "Hidden", and `MatchesSearch` skips the value. Binding `Target` there - with the secret also sitting in the tool tip - meant one second of hovering, or one search, defeated the whole feature.
+- **The shortcut table (`ShortcutHeaderGrid` + the ListBox item template)**: the header and the rows
+  are two SEPARATE grids whose `ColumnDefinitions` lists must be kept identical. Column order is
+  `0 Status, 1 sep, 2 Shortcut, 3 sep, 4 Action, 5 sep, 6 Target, 7 sep, 8 Actions`. Every resizable
+  column binds to its own `{DynamicResource}`; the Actions column is a FIXED
+  `ShortcutActionsColumnWidth` (178 = two 78px buttons + 6px gap + 8px cell padding each side) and
+  must never be `Auto` - with two separate grids, `Auto` measured the word "Actions" in the header
+  and the buttons in the rows, so the heading did not sit over its own column. Each splitter resizes
+  the two columns it physically sits between, and `CaptureShortcutColumnWidths` reads indices
+  0/2/4/6 into their matching settings.
+- **Key names**: `HotkeyManager` owns the ONLY key-name table (`CanonicalKeyNames` / `KeyNameAliases`). `MainWindow.MapAvaloniaKeyToVirtualKey` is the single bridge from Avalonia's `Key` enum. Never write `Key.ToString()` into the shortcut box: `Add` (the keypad plus) used to parse as `0xBB`, the `=` key, so the shortcut the user tested was not the one that got registered.
+- **Non-activating notices**: `ShowActionMessage` and the typing-progress window set `ShowActivated = false` and never call `Activate()`. A shortcut failing mid-sentence must not pull the keyboard out of the app the user is typing in.
+- **Elevation restarts**: `RelaunchWithPrivilegeChange` saves BEFORE starting the elevated process and only exits if that process actually started. The old code called `Environment.Exit(0)` unconditionally, which skipped `OnClosing` and lost every unsaved edit - including when the user declined the UAC prompt.
+- **schtasks is a process**: `Program.GetAdminTaskState()` caches its answer and `Program.InvalidateAdminTaskState()` must be called after every `/Create`, `/Change` or `/Delete`. Settings loads the startup state on a background task. Never query it synchronously on the UI thread.
 
 ### Hotkey Interception (`HotKeyManager.cs`)
-- Due to Avalonia's UI thread constraints and cross-platform architecture, relying on Avalonia for global hooks is impossible.
 - **Background Win32 Loop**: Spawns a dedicated background thread utilizing `CreateWindowEx(HWND_MESSAGE)` to construct a hidden Win32 message-only window.
 - **Native Intercepts**: Uses `RegisterHotKey` and `UnregisterHotKey`. Traps `WM_HOTKEY` events globally across the OS, translating the integer ID back into a C# `Action` callback.
-- **Probe Functionality**: Dynamically registers and immediately unregisters a dummy ID to determine OS-level availability of a key combination.
+- **Probe Functionality**: Dynamically checks combinations against an internal `_activeCombos` tracker. If KeyPulse already owns the hotkey, it successfully greenlights it. Otherwise, it tests OS-level availability by registering/unregistering a dummy ID.
+- **Capture Hook (CRITICAL)**: `HookCallback` swallows keystrokes ONLY while `IsCaptureMode` **AND** a KeyPulse window is the foreground window (`IsKeyPulseForeground()`). Without that second condition the hook ate the entire machine's keyboard whenever the shortcut box held focus. `MainWindow` additionally disables the hook on `Deactivated`. Never remove either guard.
 
 ### Automation Engine (`InputSimulator.cs`)
 - Handles execution of user actions.
-- **Win32 `SendInput`**: Injects hardware-level keystrokes array-by-array for the `TypeText` action.
-- **Win32 Clipboard Hooking**: `InsertText` utilizes `OpenClipboard` and `SetClipboardData` directly. Avalonia's built-in clipboard is purposefully abandoned to prevent `Dispatcher.UIThread` deadlocks when triggered asynchronously from the background hotkey thread. It injects the payload and simulates a `Ctrl+V`.
+- **Win32 `SendInput`**: Injects real hardware **scan codes** (`KEYEVENTF_SCANCODE` with `wVk = 0`) for the `TypeText` action, in batches. Virtual-key-only injection was invisible to games, RDP sessions and VMs, so the shortcut appeared to do nothing at all. Every injected event carries `InputSimulator.InjectionTag` in `dwExtraInfo` so the capture hook can recognise and ignore KeyPulse's own output.
+- **Keyboard layout (CRITICAL)**: `GetTargetKeyboardLayout()` asks the FOREGROUND window's thread which layout it uses. `GetKeyboardLayout(0)` answers for KeyPulse's own thread and produced scrambled text whenever the target app was on a different layout. Never go back to `GetKeyboardLayout(0)`.
+- **Typing speed**: `InputSimulator.CharacterDelayMs` mirrors `AppConfig.TypingDelayMs` (Fast 1 / Normal 6 / Compatible 18 ms) and characters are sent in batches. The old fixed 12 ms sleep after every character locked the keyboard for over half a minute on a 3,000-character snippet, with no setting to change it. Runs are single-flight (`IsTyping` gate), cancellable (Esc or `CancelTyping()`), and raise `TypingStarted` / `TypingProgressChanged` / `TypingFinished` so the UI can show a non-activating progress window.
+- **Clipboard Injection**: `InsertText` enumerates clipboard formats but only backs up **HGLOBAL (moveable memory) formats**. GDI-handle formats (`CF_BITMAP`, `CF_PALETTE`, `CF_METAFILEPICT`, `CF_ENHMETAFILE`, the `CF_GDIOBJ*` range) are NOT memory blocks; byte-copying them destroyed the user's clipboard. They are skipped and reported to the user via the `warning` out-parameter. `CF_DIB`, `CF_DIBV5` and `CF_HDROP` ARE memory and survive intact.
+- **Paste timing**: after `Ctrl+V`, `WaitForClipboardToBeConsumed()` polls `GetOpenClipboardWindow()` until a foreign process has opened and closed the clipboard (2.5 s cap) before restoring. The previous fixed 500 ms sleep pasted stale content on slow/remote targets.
+- Avalonia's built-in clipboard is purposefully abandoned to prevent `Dispatcher.UIThread` deadlocks.
 
-### Data Persistence (`Models.cs`)
+### Backup & Restore (`BackupService.cs`)
+Everything that can refuse, warn or roll back lives in `BackupService` so the UI cannot skip a check.
+The rule it exists to enforce: **a file replaces the user's shortcuts only after it has proved what it
+is, proved it is undamaged, and been read end to end.** Nothing is touched before all three hold.
+
+- **File format v2**: a readable `BackupEnvelope` (FileType, FormatVersion, CreatedUtc,
+  CreatedByVersion, Encryption, KDF parameters, `PayloadSha256`) wrapping a base64 `BackupPayload`.
+  The envelope stays readable on purpose so the file can identify itself, be dated, and be recognised
+  as encrypted BEFORE anyone is asked for a passphrase.
+- **Encryption at rest (optional, offered on every export)**: AES-256-GCM, key from
+  PBKDF2-SHA256 with a random 16-byte salt and 300,000 iterations, 12-byte nonce, 16-byte tag,
+  AAD `"KeyPulseBackup.v2"`. Both the derivation and the write run on a background thread. There is
+  no recovery path for a forgotten passphrase and the UI says so.
+- **Integrity**: `PayloadSha256` is checked BEFORE the payload is parsed, so a bit-flip or a
+  truncation can never reach the shortcut list. `Write` also reads the finished file back and
+  re-decrypts it - a backup that cannot be read again is not a backup.
+- **Atomic write**: to `<path>.writing`, then `File.Move(overwrite)`. A failure part-way through
+  cannot leave a half-written file where a good backup used to be.
+- **What travels**: every shortcut (including its per-shortcut `IsTargetObfuscated` blur flag),
+  the browser/sound/theme/typing-speed/sort preferences, `HasSeenTrayHint`, and the full window
+  layout - main, Settings and Setup geometry plus all four column widths.
+- **What deliberately does NOT travel**: `AppConfig.LaunchOnBoot`. Whether KeyPulse starts with
+  Windows is a property of the machine (a registry value or a scheduled task), and silently turning
+  it on because a backup from another PC had it on would be an unpleasant surprise. Restore says so.
+- **Targets are exported in plain form inside the payload**, on purpose: on disk they are DPAPI-bound
+  to this Windows account (see below), so a protected copy could never be restored anywhere else -
+  which is the one case backups exist for. Protection for the FILE is the passphrase.
+- **Geometry is validated against the CURRENT machine** (`ApplyRestoredWindowLayout`): sizes are
+  clamped to the working area, a position is used only when it lands on a monitor that is actually
+  attached, and `Minimized` is never restored. A position from a three-monitor desk would otherwise
+  open the window somewhere the user cannot reach, which looks exactly like the app failing to start.
+- **Corruption vs. machine differences**: `ValidatePayload` refuses the WHOLE file for structural
+  damage (an action code outside `ActionType`, a null row, a failed checksum) and imports-and-flags
+  anything that is merely different about this PC (keys already taken, a missing folder, a
+  combination this build cannot parse). Rejecting a file for the second kind is what made restore
+  useless on a new PC.
+- **Backwards compatibility**: every backup taken by an earlier build is a raw copy of `config.json`.
+  `Inspect` recognises those, decrypts their legacy `ENC:` targets, and upgrades them. The guard that
+  keeps this from reopening the old data-loss hole is a `JsonDocument` shape check: a `"Hotkeys"`
+  array must be PRESENT IN THE FILE. A deserializer's default empty list is never good enough.
+- **Rollback**: `ConfigStore.SaveRollbackCopy("before-restore")` writes a dated copy first (five kept)
+  and the path is reported to the user. Any exception during import restores the previous snapshot;
+  if the rollback itself fails, the message names the file to rename by hand.
+
+### Data Persistence (`Models.cs`, `ConfigStore.cs`, `CryptoHelper.cs`)
 - State is managed via the `AppConfig` class, stored at `%APPDATA%\KeyPulse\config.json`.
+- **Target protection**: `CryptoHelper` uses **DPAPI (`ProtectedData`, CurrentUser scope)** with a fixed entropy string and writes a `DPAPI:` prefix. The old `ENC:` AES format, whose key and IV were hard-coded in the executable, is still READ for migration and never written again. `TryUnprotect` returns **false** on failure and the row is flagged `TargetUnreadable`; it must NEVER return the cipher text, which is how a shortcut's target silently became the literal string `ENC:8Kd2...`.
+- **`ConfigStore` is the ONLY reader/writer of that file.** It writes atomically (temp + `File.Replace`), and on a damaged/unreadable file it **renames the file aside** as `config.damaged-<timestamp>.json` and reports the problem. Nothing in this codebase may `File.Delete` or blind-overwrite the config: doing so is how every shortcut used to vanish silently.
 - Holds an array of `HotkeyEntry` objects (Combo, ActionType, Target string) alongside UI bounds.
 - **Serialization Constraint**: As the app is `NativeAOT`, reflection-based JSON serialization is forbidden. `JsonSerializerContext` source generators (`AppConfigJsonContext`) are strictly enforced.
 
@@ -51,10 +121,54 @@
 - Acts as the deterministic compiler and GitHub release orchestrator.
 - **Phase 1 (Compile)**: Purges previous artifacts -> Confirms `link.exe` / C++ Build Tools exist -> Triggers `dotnet publish -p:PublishAot=true` targeting `win-x64`.
 - **Phase 2 (Validation)**: Assets the singular `KeyPulse.exe` payload was generated cleanly without lingering debug debris.
-- **Phase 3 (Publish)**: Validates GitHub CLI (`gh`) authentication -> Computes `SHA256` of the `.exe` -> Purges all previous remote releases -> Generates a `vYYYY.MM.DD` tag -> Pushes release via `gh release create` -> Validates the remote asset checksum matches the local artifact exactly.
+- **Phase 0 (Version)**: `BUILD_VERSION` = `yyyy.MM.dd.HHmm`, passed to `dotnet publish` as `-p:Version=` and reused as the git tag. Every part must stay under 65535, which is why the tag is not second-accurate.
+- **Phase 3 (Publish)**: Validates GitHub CLI (`gh`) authentication -> Computes `SHA256` of the `.exe` -> **Deletes every previous remote release, every remote tag and every local tag, and refuses to continue if any survive** -> Publishes the `vYYYY.MM.DD.HHmm` tag computed in Phase 0 -> Pushes release via `gh release create --latest` -> Validates the remote asset checksum matches the local artifact exactly.
+
+> [!IMPORTANT]
+> Each build REPLACES what is published. There is exactly one release and one tag on the repository at any time: the newest build. This paragraph and `:PUBLISH_RELEASE` in `build.cmd` must always agree - they did not, and the mismatch is what made this file untrustworthy.
 
 ## 4. AGENT DIRECTIVES & GUIDELINES
 - **NEVER use reflection**: This is a NativeAOT app. Use Source Generators for JSON, Regex, or interop.
 - **NEVER break the self-installer**: The `IsRunningFromInstallPath()` mechanic in `Program.cs` is critical.
 - **NEVER mix UI Threads**: Callbacks from `HotKeyManager` execute on a raw background thread. Any modification to Avalonia UI elements during a hotkey trigger MUST be wrapped in `Dispatcher.UIThread.Post(() => { ... })`.
+- **NEVER let the capture hook run without the foreground guard** (see Hotkey Interception above).
+- **NEVER unregister a hotkey because its target is offline.** Reachability belongs to execution time, not registration time.
+- **NEVER delete or blind-overwrite `config.json`.** Route every read/write through `ConfigStore`.
+- **NEVER report success from `schtasks` without checking the exit code and re-querying the task.**
+- **NEVER call `HotkeyManager.Clear()` to apply an edit.** Reconcile per row (see Registration resilience).
+- **NEVER bind `Target` in the shortcut list, and never put it in a tool tip.** Use `TargetDisplay` / `TargetTooltip`.
+- **NEVER return cipher text from a failed decrypt.** Flag `TargetUnreadable` and tell the user.
+- **NEVER accept a restore file lacking the `KeyPulseBackup` header** (or, for a legacy file, a real `"Hotkeys"` array present in the json), and never restore without confirming first and writing a rollback copy.
+- **NEVER parse a backup payload before its checksum has been verified.**
+- **NEVER restore a window position without checking it lands on a monitor attached to this PC.**
+- **NEVER give the Actions column `Width="Auto"`, and never let the header grid and the row template drift apart.**
+- **NEVER read both `schtasks` output streams sequentially.** Drain them concurrently or the process deadlocks.
+- **NEVER call `Environment.Exit` before `SaveConfig`.** `OnClosing` does not run on a hard exit.
+- **NEVER verify an extracted native library by file length.** Hash it.
+- **NEVER write `Avalonia.Input.Key.ToString()` into the shortcut box.** Map it to a virtual key first.
+- **NEVER show a shortcut-failure notice with focus.** `ShowActivated = false`, no `Activate()`.
+- **The app manifest declares PerMonitorV2 DPI awareness.** Do not remove it; the UI becomes bitmap-stretched and blurry.
 - **Windows Only**: Do not attempt to introduce Linux/macOS cross-platform polyfills. The app's architecture explicitly leverages Windows-only DLLs (`user32.dll`, `kernel32.dll`).
+
+## 5. FILE SYSTEM PATHS & LEGACY CLEANUP DIRECTIVES
+> [!IMPORTANT]
+> **AI AGENT DIRECTIVE:** DO NOT delete or overwrite this section. If you change a path used by this application, you MUST move the old path to the "Legacy / Deprecated Paths" list and add the new path to the "Active Paths" list. The application installer and uninstaller (`SetupWindow.cs`) MUST always take full responsibility for explicitly targeting and permanently deleting all legacy paths to maintain a pristine user environment.
+
+### Active Paths (Currently in Use)
+- **Installation Directory:** `%LOCALAPPDATA%\Programs\KeyPulse`
+- **Application Binary:** `%LOCALAPPDATA%\Programs\KeyPulse\KeyPulse.exe`
+- **Native Runtime Libraries:** `%LOCALAPPDATA%\Programs\KeyPulse\runtime` (SHA-256 verified on every launch; removed with the install directory on uninstall)
+- **Configuration & State:** `%APPDATA%\KeyPulse\config.json`
+- **Diagnostic Logs:** `%APPDATA%\KeyPulse\logs\keypulse_debug.txt` and `keypulse_crash.txt` (plus `.old` rollovers). Deliberately inside `%APPDATA%\KeyPulse` so the uninstaller's existing purge of that folder takes them with it.
+- **Restore Rollback Copies:** `%APPDATA%\KeyPulse\config.before-restore-*.json` (five most recent kept; removed with the whole folder on uninstall)
+- **Startup Launcher Script:** `%LOCALAPPDATA%\Programs\KeyPulse\boot.vbs` (single launch, no watchdog loop)
+- **Quarantined Config Backups:** `%APPDATA%\KeyPulse\config.damaged-*.json` (created only when the live config cannot be parsed; removed with the whole `%APPDATA%\KeyPulse` folder on uninstall)
+
+### Legacy / Deprecated Paths (Must be cleaned up by Installer/Uninstaller)
+- `C:\Program Files\KeyPulse` (Abandoned global install directory)
+- `C:\Program Files (x86)\KeyPulse` (Abandoned global install directory)
+- `%TEMP%\KeyPulse_NativeLibs` (Legacy temporary native library extraction folder, superseded by the `runtime` subfolder)
+- `%TEMP%\KeyPulse_Runtime` (Fallback extraction folder, used only when the install directory is not writable)
+- `%LOCALAPPDATA%\KeyPulse` (Legacy log folder holding `keypulse_debug.txt` / `keypulse_crash.txt`. No uninstaller ever removed it, so a record of every shortcut the user pressed survived uninstalling. Both the installer and the uninstaller now delete it.)
+- `%TEMP%\KeyPulse*.exe` (Legacy temporary execution binaries)
+- `%TEMP%\keypulse_*.txt` (Legacy temporary installer log files)

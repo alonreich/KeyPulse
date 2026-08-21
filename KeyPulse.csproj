@@ -8,6 +8,17 @@
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>KeyPulse.ico</ApplicationIcon>
+
+    <!-- ISSUE_15: every build used to report 1.0.0.0, so nobody could tell which one they had.
+         build.cmd overrides this with -p:Version=yyyy.MM.dd.HHmm; the value here is only the
+         fallback for a plain "dotnet build" from an editor. Keep every part <= 65534. -->
+    <Version Condition="'$(Version)' == ''">2026.8.21.0</Version>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <Product>KeyPulse</Product>
+    <Company>Alon</Company>
+    <AssemblyTitle>KeyPulse</AssemblyTitle>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,6 +35,9 @@
       <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
     </PackageReference>
     <PackageReference Include="System.Windows.Extensions" Version="10.0.11" />
+    <!-- ISSUE_3: DPAPI, so targets are protected with a key tied to the Windows account instead of
+         one hard-coded into the executable. NativeAOT-safe. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Assets\click.wav" />

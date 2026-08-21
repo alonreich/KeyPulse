@@ -4,8 +4,9 @@
              xmlns:collections="using:System.Collections"
              xmlns:local="clr-namespace:KeyPulse"
              x:Class="KeyPulse.App"
-             x:DataType="local:App"
-             RequestedThemeVariant="Dark">
+             x:DataType="local:App">
+    <!-- ISSUE_21: the theme is no longer hard-pinned to Dark. It follows Windows by default and is
+         overridden at startup from AppConfig.Theme (System / Light / Dark). -->
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.ThemeDictionaries>
@@ -41,8 +42,8 @@
             <SolidColorBrush x:Key="AppSuccessBrush" Color="#22c55e" />
             <SolidColorBrush x:Key="AppSuccessSoftBrush" Color="#86efac" />
             <SolidColorBrush x:Key="AppWarningBrush" Color="#f59e0b" />
-            <SolidColorBrush x:Key="AppDangerBrush" Color="#dc2626" />
-            <SolidColorBrush x:Key="AppDangerHoverBrush" Color="#b91c1c" />
+            <SolidColorBrush x:Key="AppDangerBrush" Color="#991b1b" />
+            <SolidColorBrush x:Key="AppDangerHoverBrush" Color="#7f1d1d" />
             <SolidColorBrush x:Key="AppOnAccentTextBrush" Color="#ffffff" />
             <SolidColorBrush x:Key="AppDisabledForegroundBrush" Color="#94a3b8" />
             <SolidColorBrush x:Key="AppDisabledBackgroundBrush" Color="#334155" />
@@ -67,6 +68,10 @@
             <Setter Property="Background" Value="{DynamicResource AppSurfaceBrush}" />
             <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
             <Setter Property="FontSize" Value="{DynamicResource AppFontSizeBase}" />
+        </Style>
+
+        <Style Selector="ScrollViewer">
+            <Setter Property="AllowAutoHide" Value="False" />
         </Style>
 
         <Style Selector="Border.Panel">
@@ -100,6 +105,13 @@
 
         <Style Selector="TextBlock.ErrorText">
             <Setter Property="Foreground" Value="{DynamicResource AppDangerBrush}" />
+            <Setter Property="FontSize" Value="{DynamicResource AppFontSizeSmall}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <!-- ISSUE_8: a target that is merely unavailable right now is a warning, not an error. -->
+        <Style Selector="TextBlock.WarningText">
+            <Setter Property="Foreground" Value="{DynamicResource AppWarningBrush}" />
             <Setter Property="FontSize" Value="{DynamicResource AppFontSizeSmall}" />
             <Setter Property="TextWrapping" Value="Wrap" />
         </Style>
@@ -296,9 +308,9 @@
             <TrayIcon Icon="avares://KeyPulse/KeyPulse.ico" ToolTipText="KeyPulse" Clicked="OpenKeybinds_Clicked">
                 <TrayIcon.Menu>
                     <NativeMenu>
-                        <NativeMenuItem Header="Open Keybinds" Click="OpenKeybinds_Clicked" />
+                        <NativeMenuItem Header="Open KeyPulse" Click="OpenKeybinds_Clicked" />
                         <NativeMenuItem Header="Settings" Click="OpenSettings_Clicked" />
-                        <NativeMenuItem Header="Exit" Click="Exit_Clicked" />
+                        <NativeMenuItem Header="Exit KeyPulse" Click="Exit_Clicked" />
                     </NativeMenu>
                 </TrayIcon.Menu>
             </TrayIcon>

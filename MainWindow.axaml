@@ -16,12 +16,7 @@
         MinHeight="460">
 
     <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="16">
-        <TextBlock Grid.Row="0"
-                   Text="Shortcuts"
-                   Classes="SectionTitle"
-                   Margin="0,0,0,10" />
-
-        <Border Grid.Row="1"
+        <Border Grid.Row="0"
                 Classes="Panel"
                 Margin="0,0,0,12">
             <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
@@ -40,7 +35,7 @@
                 <TextBox Grid.Row="1"
                          Grid.Column="0"
                          Name="KeyCombo"
-                         PlaceholderText="Press keys..."
+                         PlaceholderText="Click here, then press your keys"
                          HorizontalAlignment="Stretch"
                          IsReadOnly="True"
                          KeyDown="KeyCombo_KeyDown"
@@ -54,11 +49,11 @@
                           HorizontalAlignment="Stretch"
                           TabIndex="1"
                           Margin="0,0,8,0">
-                    <ComboBoxItem>Open Folder</ComboBoxItem>
-                    <ComboBoxItem>Launch Program</ComboBoxItem>
-                    <ComboBoxItem>Open URL</ComboBoxItem>
-                    <ComboBoxItem>Type Text (Legacy)</ComboBoxItem>
-                    <ComboBoxItem>Paste Plain Text</ComboBoxItem>
+                    <ComboBoxItem>Open a folder</ComboBoxItem>
+                    <ComboBoxItem>Launch a program</ComboBoxItem>
+                    <ComboBoxItem>Open a web link</ComboBoxItem>
+                    <ComboBoxItem>Type text (one key at a time)</ComboBoxItem>
+                    <ComboBoxItem>Paste text (instant)</ComboBoxItem>
                 </ComboBox>
                 <Button Grid.Row="1"
                         Grid.Column="2"
@@ -89,6 +84,10 @@
                     <TextBlock Name="ShortcutErrorText"
                                Classes="ErrorText"
                                IsVisible="False" />
+                    <TextBlock Name="ShortcutWarningText"
+                               Classes="WarningText"
+                               IsVisible="False"
+                               TextWrapping="Wrap" />
                 </StackPanel>
 
                 <TextBlock Grid.Row="3"
@@ -100,31 +99,61 @@
 
                 <Grid Grid.Row="4"
                       Grid.ColumnSpan="4"
-                      ColumnDefinitions="*,Auto">
+                      ColumnDefinitions="*,Auto,Auto,Auto">
+                    <!-- ISSUE_17: no fixed Height. The old code computed one in C# from a guess that
+                         a line holds ~40 characters regardless of the window's real width, capped at
+                         15 lines, and re-applied it on every keystroke. Layout measures it properly
+                         now, and it scrolls once it reaches MaxHeight. -->
                     <TextBox Grid.Column="0"
                              Name="TargetText"
                              PlaceholderText="Select a folder, app, URL, or text"
                              HorizontalAlignment="Stretch"
-                             AcceptsReturn="False"
-                             TextWrapping="NoWrap"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap"
+                             MinHeight="34"
+                             MaxHeight="180"
+                             VerticalContentAlignment="Top"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
                              TabIndex="2"
                              Margin="0,0,8,0" />
-                    <Button Grid.Column="1"
+                    <CheckBox Grid.Column="1"
+                              Name="ObfuscateCheck"
+                              Content="Blur/Obfuscate"
+                              ToolTip.Tip="Blur the target text in the list to hide passwords or sensitive data"
+                              Margin="0,0,8,0"
+                              VerticalAlignment="Center"
+                              TabIndex="3" />
+                    <Button Grid.Column="2"
+                            Name="ExpandTargetBtn"
+                            Content="Expand"
+                            Classes="Secondary"
+                            Click="ExpandTarget_Click"
+                            IsVisible="False"
+                            TabIndex="4"
+                            MinWidth="88"
+                            Margin="0,0,8,0"
+                            ToolTip.Tip="Open this text in a larger, resizable editor" />
+                    <Button Grid.Column="3"
                             Name="BrowseBtn"
                             Content="Browse"
                             Classes="Secondary"
                             Click="Browse_Click"
-                            TabIndex="3"
+                            TabIndex="5"
                             MinWidth="92"
                             ToolTip.Tip="Choose a file or folder" />
                 </Grid>
 
-                <TextBlock Grid.Row="5"
-                           Grid.ColumnSpan="4"
-                           Name="TargetErrorText"
-                           Classes="ErrorText"
-                           IsVisible="False"
-                           Margin="0,4,0,0" />
+                <StackPanel Grid.Row="5"
+                            Grid.ColumnSpan="4"
+                            Margin="0,4,0,0">
+                    <TextBlock Name="TargetErrorText"
+                               Classes="ErrorText"
+                               IsVisible="False" />
+                    <TextBlock Name="TargetWarningText"
+                               Classes="WarningText"
+                               IsVisible="False"
+                               TextWrapping="Wrap" />
+                </StackPanel>
                 <TextBlock Grid.Row="6"
                            Grid.ColumnSpan="4"
                            Name="TargetHintText"
@@ -135,58 +164,57 @@
             </Grid>
         </Border>
 
+        <TextBox Grid.Row="1"
+                 Name="SearchBox"
+                 HorizontalAlignment="Stretch"
+                 Margin="0,0,0,12"
+                 PlaceholderText="Search shortcuts..."
+                 TextChanged="SearchBox_TextChanged"
+                 TabIndex="7"
+                 ToolTip.Tip="Filter by shortcut keys, action, target or status" />
+
         <Border Grid.Row="2"
                 Classes="Panel"
                 Padding="0">
             <Grid RowDefinitions="Auto,*"
                   Margin="12,10,12,6">
+                <!-- ISSUE_23: this table was mis-wired end to end.
+                     * The Action column was a hard-coded Width="200" that no resource bound to, so
+                       ShortcutActionColumnWidth was a setting nothing read.
+                     * The separator between Action and Target was wired to resize the STATUS column,
+                       at the opposite end of the table.
+                     * ShortcutStatusColumnSplitter did not exist in the markup at all, so that wiring
+                       call silently did nothing.
+                     * The Actions column was Width="Auto" in both grids, and because the header and
+                       the rows are two SEPARATE grids, "Auto" measured the ~50px word "Actions" in
+                       one and the ~162px pair of buttons in the other. That is why the heading did
+                       not sit over its buttons.
+                     Every column now has one resource, one splitter between it and its neighbour, and
+                     an identical definition in the header grid and the row template below. The two
+                     lists MUST be kept byte-for-byte identical. -->
                 <Grid Grid.Row="0"
                       Name="ShortcutHeaderGrid">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="64" />
-                        <ColumnDefinition Width="{DynamicResource ShortcutKeyColumnWidth}" MinWidth="160" MaxWidth="360" />
-                        <ColumnDefinition Width="6" />
-                        <ColumnDefinition Width="{DynamicResource ShortcutActionColumnWidth}" MinWidth="110" MaxWidth="260" />
-                        <ColumnDefinition Width="6" />
                         <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="110" MaxWidth="260" />
+                        <ColumnDefinition Width="6" />
+                        <ColumnDefinition Width="{DynamicResource ShortcutKeyColumnWidth}" MinWidth="130" MaxWidth="300" />
+                        <ColumnDefinition Width="6" />
+                        <ColumnDefinition Width="{DynamicResource ShortcutActionColumnWidth}" MinWidth="120" MaxWidth="280" />
                         <ColumnDefinition Width="6" />
                         <ColumnDefinition Width="{DynamicResource ShortcutTargetColumnWidth}" MinWidth="180" MaxWidth="1600" />
                         <ColumnDefinition Width="6" />
-                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="{DynamicResource ShortcutActionsColumnWidth}" />
                     </Grid.ColumnDefinitions>
-                    <Border Grid.Column="0" Classes="ShortcutGridHeaderCell">
-                        <TextBlock Text="Enabled" Classes="ListHeader" HorizontalAlignment="Center" />
+
+                    <Border Grid.Column="0" Classes="ShortcutGridHeaderCell"
+                            Name="ShortcutStatusHeader"
+                            Tag="Status"
+                            Cursor="Hand"
+                            PointerPressed="ShortcutHeader_Pressed"
+                            ToolTip.Tip="Click to sort by status">
+                        <TextBlock Name="ShortcutStatusHeaderText" Text="Status" Classes="ListHeader" />
                     </Border>
-                    <Border Grid.Column="1" Classes="ShortcutGridHeaderCell">
-                        <TextBlock Text="Shortcut" Classes="ListHeader" />
-                    </Border>
-                    <Grid Grid.Column="2">
-                        <Border Classes="ShortcutGridSeparatorCell" />
-                        <Border Classes="ShortcutGridSeparatorLine" />
-                        <Border Name="ShortcutKeyColumnSplitter"
-                                Background="Transparent"
-                                Cursor="SizeWestEast"
-                                ToolTip.Tip="Drag to resize columns"
-                                HorizontalAlignment="Stretch"
-                                VerticalAlignment="Stretch" />
-                    </Grid>
-                    <Border Grid.Column="3" Classes="ShortcutGridHeaderCell">
-                        <TextBlock Text="Action" Classes="ListHeader" />
-                    </Border>
-                    <Grid Grid.Column="4">
-                        <Border Classes="ShortcutGridSeparatorCell" />
-                        <Border Classes="ShortcutGridSeparatorLine" />
-                        <Border Name="ShortcutActionColumnSplitter"
-                                Background="Transparent"
-                                Cursor="SizeWestEast"
-                                ToolTip.Tip="Drag to resize columns"
-                                HorizontalAlignment="Stretch"
-                                VerticalAlignment="Stretch" />
-                    </Grid>
-                    <Border Grid.Column="5" Classes="ShortcutGridHeaderCell">
-                        <TextBlock Text="Status" Classes="ListHeader" />
-                    </Border>
-                    <Grid Grid.Column="6">
+                    <Grid Grid.Column="1">
                         <Border Classes="ShortcutGridSeparatorCell" />
                         <Border Classes="ShortcutGridSeparatorLine" />
                         <Border Name="ShortcutStatusColumnSplitter"
@@ -196,167 +224,303 @@
                                 HorizontalAlignment="Stretch"
                                 VerticalAlignment="Stretch" />
                     </Grid>
-                    <Border Grid.Column="7" Classes="ShortcutGridHeaderCell">
-                        <TextBlock Text="Target" Classes="ListHeader" />
+
+                    <!-- Click a header to sort. -->
+                    <Border Grid.Column="2" Classes="ShortcutGridHeaderCell"
+                            Name="ShortcutKeyHeader"
+                            Tag="Shortcut"
+                            Cursor="Hand"
+                            PointerPressed="ShortcutHeader_Pressed"
+                            ToolTip.Tip="Click to sort by shortcut">
+                        <TextBlock Name="ShortcutKeyHeaderText" Text="Shortcut" Classes="ListHeader" />
                     </Border>
-                    <Grid Grid.Column="8">
+                    <Grid Grid.Column="3">
+                        <Border Classes="ShortcutGridSeparatorCell" />
+                        <Border Classes="ShortcutGridSeparatorLine" />
+                        <Border Name="ShortcutKeyColumnSplitter"
+                                Background="Transparent"
+                                Cursor="SizeWestEast"
+                                ToolTip.Tip="Drag to resize columns"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch" />
+                    </Grid>
+
+                    <Border Grid.Column="4" Classes="ShortcutGridHeaderCell"
+                            Name="ShortcutActionHeader"
+                            Tag="Action"
+                            Cursor="Hand"
+                            PointerPressed="ShortcutHeader_Pressed"
+                            ToolTip.Tip="Click to sort by action">
+                        <TextBlock Name="ShortcutActionHeaderText" Text="Action" Classes="ListHeader" />
+                    </Border>
+                    <Grid Grid.Column="5">
+                        <Border Classes="ShortcutGridSeparatorCell" />
+                        <Border Classes="ShortcutGridSeparatorLine" />
+                        <Border Name="ShortcutActionColumnSplitter"
+                                Background="Transparent"
+                                Cursor="SizeWestEast"
+                                ToolTip.Tip="Drag to resize columns"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch" />
+                    </Grid>
+
+                    <Border Grid.Column="6" Classes="ShortcutGridHeaderCell"
+                            Name="ShortcutTargetHeader"
+                            Tag="Target"
+                            Cursor="Hand"
+                            PointerPressed="ShortcutHeader_Pressed"
+                            ToolTip.Tip="Click to sort by target">
+                        <TextBlock Name="ShortcutTargetHeaderText" Text="Target" Classes="ListHeader" />
+                    </Border>
+                    <Grid Grid.Column="7">
                         <Border Classes="ShortcutGridSeparatorCell" />
                         <Border Classes="ShortcutGridSeparatorLine" />
                         <Border Name="ShortcutTargetColumnSplitter"
                                 Background="Transparent"
                                 Cursor="SizeWestEast"
-                                ToolTip.Tip="Drag to resize target column"
+                                ToolTip.Tip="Drag to resize the target column"
                                 HorizontalAlignment="Stretch"
                                 VerticalAlignment="Stretch" />
                     </Grid>
-                    <Border Grid.Column="9" Classes="ShortcutGridHeaderCell">
+
+                    <Border Grid.Column="8" Classes="ShortcutGridHeaderCell">
                         <TextBlock Text="Actions" Classes="ListHeader" />
                     </Border>
                 </Grid>
 
-                <ListBox Grid.Row="1"
-                         Name="HotkeyList"
-                         Classes="ShortcutList"
-                         SelectionChanged="HotkeyList_SelectionChanged"
-                         ItemsSource="{Binding Hotkeys}">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate x:DataType="local:HotkeyEntry">
-                            <Border Background="{Binding RowBackground}"
-                                    CornerRadius="0">
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="64" />
-                                        <ColumnDefinition Width="{DynamicResource ShortcutKeyColumnWidth}" MinWidth="160" MaxWidth="360" />
-                                        <ColumnDefinition Width="6" />
-                                        <ColumnDefinition Width="{DynamicResource ShortcutActionColumnWidth}" MinWidth="110" MaxWidth="260" />
-                                        <ColumnDefinition Width="6" />
-                                        <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="110" MaxWidth="260" />
-                                        <ColumnDefinition Width="6" />
-                                        <ColumnDefinition Width="{DynamicResource ShortcutTargetColumnWidth}" MinWidth="180" MaxWidth="1600" />
-                                        <ColumnDefinition Width="6" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <Border Grid.Column="0" Classes="ShortcutGridCell">
-                                        <CheckBox IsChecked="{Binding IsEnabled, Mode=TwoWay}"
-                                                  HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"
-                                                  Click="Enabled_Click"
-                                                  TabIndex="0"
-                                                  ToolTip.Tip="Enable or disable this shortcut" />
-                                    </Border>
-                                    <Border Grid.Column="1" Classes="ShortcutGridCell">
-                                        <TextBlock Text="{Binding KeyCombination}"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
-                                                   TextAlignment="Center"
-                                                   FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource AppAccentBrush}"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   ToolTip.Tip="{Binding KeyCombination}" />
-                                    </Border>
-                                    <Grid Grid.Column="2">
-                                        <Border Classes="ShortcutGridSeparatorCell" />
-                                        <Border Classes="ShortcutGridSeparatorLine" />
-                                    </Grid>
-                                    <Border Grid.Column="3" Classes="ShortcutGridCell">
-                                        <TextBlock Text="{Binding ActionDisplay}"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
-                                                   TextAlignment="Center"
-                                                   Foreground="{DynamicResource AppTextPrimaryBrush}"
-                                                   TextTrimming="CharacterEllipsis" />
-                                    </Border>
-                                    <Grid Grid.Column="4">
-                                        <Border Classes="ShortcutGridSeparatorCell" />
-                                        <Border Classes="ShortcutGridSeparatorLine" />
-                                    </Grid>
-                                    <Border Grid.Column="5" Classes="ShortcutGridCell">
-                                        <TextBlock Text="{Binding RegistrationStatus}"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
-                                                   TextAlignment="Center"
-                                                   Foreground="{Binding RegistrationBrush}"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   ToolTip.Tip="{Binding RegistrationStatus}" />
-                                    </Border>
-                                    <Grid Grid.Column="6">
-                                        <Border Classes="ShortcutGridSeparatorCell" />
-                                        <Border Classes="ShortcutGridSeparatorLine" />
-                                    </Grid>
-                                    <Border Grid.Column="7" Classes="ShortcutGridCell">
-                                        <Grid ColumnDefinitions="*,Auto"
-                                              HorizontalAlignment="Stretch">
-                                            <TextBlock Grid.Column="0"
-                                                   Text="{Binding Target}"
-                                                   VerticalAlignment="Center"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   ToolTip.Tip="{Binding Target}" />
-                                            <TextBlock Grid.Column="1"
-                                                       Text="..."
-                                                       Classes="Muted"
-                                                       IsVisible="{Binding HasLongTarget}"
-                                                       VerticalAlignment="Center"
-                                                       Margin="4,0,0,0"
-                                                       ToolTip.Tip="{Binding TargetOverflowHint}" />
+                <Grid Grid.Row="1" Name="HotkeyListContainer">
+                    <ListBox Name="HotkeyList"
+                             Classes="ShortcutList"
+                             SelectionChanged="HotkeyList_SelectionChanged"
+                             ItemsSource="{Binding VisibleHotkeys}"
+                             ScrollViewer.ScrollChanged="HotkeyList_ScrollChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="local:HotkeyEntry">
+                                <Border Background="{Binding RowBackground}"
+                                        CornerRadius="0">
+                                    <Grid>
+                                        <!-- Must stay identical to ShortcutHeaderGrid above. -->
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="110" MaxWidth="260" />
+                                            <ColumnDefinition Width="6" />
+                                            <ColumnDefinition Width="{DynamicResource ShortcutKeyColumnWidth}" MinWidth="130" MaxWidth="300" />
+                                            <ColumnDefinition Width="6" />
+                                            <ColumnDefinition Width="{DynamicResource ShortcutActionColumnWidth}" MinWidth="120" MaxWidth="280" />
+                                            <ColumnDefinition Width="6" />
+                                            <ColumnDefinition Width="{DynamicResource ShortcutTargetColumnWidth}" MinWidth="180" MaxWidth="1600" />
+                                            <ColumnDefinition Width="6" />
+                                            <ColumnDefinition Width="{DynamicResource ShortcutActionsColumnWidth}" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Grid.Column="0" Classes="ShortcutGridCell">
+                                            <Button Content="{Binding RegistrationStatus}"
+                                                    HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center"
+                                                    HorizontalContentAlignment="Center"
+                                                    Click="Enabled_Click"
+                                                    TabIndex="0"
+                                                    Width="85"
+                                                    MinWidth="85"
+                                                    Height="24"
+                                                    MinHeight="24"
+                                                    Padding="4,2"
+                                                    FontSize="11"
+                                                    ToolTip.Tip="{Binding StatusTooltip}"
+                                                    Background="{Binding StatusButtonBackground}"
+                                                    Foreground="{Binding StatusButtonForeground}"
+                                                    Cursor="Hand" />
+                                        </Border>
+                                        <Grid Grid.Column="1">
+                                            <Border Classes="ShortcutGridSeparatorCell" />
+                                            <Border Classes="ShortcutGridSeparatorLine" />
                                         </Grid>
-                                    </Border>
-                                    <Grid Grid.Column="8">
-                                        <Border Classes="ShortcutGridSeparatorCell" />
-                                        <Border Classes="ShortcutGridSeparatorLine" />
+                                        <Border Grid.Column="2" Classes="ShortcutGridCell">
+                                            <TextBlock Text="{Binding KeyCombination}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       TextAlignment="Center"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource AppAccentBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       ToolTip.Tip="{Binding KeyCombination}" />
+                                        </Border>
+                                        <Grid Grid.Column="3">
+                                            <Border Classes="ShortcutGridSeparatorCell" />
+                                            <Border Classes="ShortcutGridSeparatorLine" />
+                                        </Grid>
+                                        <Border Grid.Column="4" Classes="ShortcutGridCell">
+                                            <TextBlock Text="{Binding ActionDisplay}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       TextAlignment="Center"
+                                                       Foreground="{DynamicResource AppTextPrimaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </Border>
+                                        <Grid Grid.Column="5">
+                                            <Border Classes="ShortcutGridSeparatorCell" />
+                                            <Border Classes="ShortcutGridSeparatorLine" />
+                                        </Grid>
+                                        <Border Grid.Column="6" Classes="ShortcutGridCell">
+                                            <Grid ColumnDefinitions="*,Auto"
+                                                  HorizontalAlignment="Stretch">
+                                                <!-- ISSUE_2: TargetDisplay is a mask when the row is
+                                                     hidden, and TargetTooltip never carries the real
+                                                     value. Binding Target here, with the secret also
+                                                     sitting in the tool tip, meant one second of
+                                                     hovering defeated the whole feature. The blur is
+                                                     stronger too, so the row reads as concealed. -->
+                                                <TextBlock Grid.Column="0"
+                                                       Text="{Binding TargetDisplay}"
+                                                       Foreground="{Binding TargetDisplayBrush}"
+                                                       VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       ToolTip.Tip="{Binding TargetTooltip}">
+                                                    <TextBlock.Effect>
+                                                        <BlurEffect Radius="{Binding TargetBlurRadius}" />
+                                                    </TextBlock.Effect>
+                                                </TextBlock>
+                                                <TextBlock Grid.Column="1"
+                                                           Text="..."
+                                                           Classes="Muted"
+                                                           IsVisible="{Binding HasLongTarget}"
+                                                           VerticalAlignment="Center"
+                                                           Margin="4,0,0,0"
+                                                           ToolTip.Tip="{Binding TargetOverflowHint}" />
+                                            </Grid>
+                                        </Border>
+                                        <Grid Grid.Column="7">
+                                            <Border Classes="ShortcutGridSeparatorCell" />
+                                            <Border Classes="ShortcutGridSeparatorLine" />
+                                        </Grid>
+                                        <Border Grid.Column="8" Classes="ShortcutGridCell">
+                                            <StackPanel Orientation="Horizontal"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        Spacing="6">
+                                                <Button Content="REMOVE"
+                                                        Classes="Danger"
+                                                        Click="Remove_Click"
+                                                        Width="78"
+                                                        MinWidth="78"
+                                                        Height="24"
+                                                        MinHeight="24"
+                                                        Padding="4,2"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        FontSize="8.5"
+                                                        TabIndex="1"
+                                                        ToolTip.Tip="Delete this shortcut" />
+                                                <Button Classes="Secondary"
+                                                        Click="Duplicate_Click"
+                                                        Width="78"
+                                                        MinWidth="78"
+                                                        Height="24"
+                                                        MinHeight="24"
+                                                        Padding="4,2"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        FontSize="8.5"
+                                                        TabIndex="2"
+                                                        ToolTip.Tip="Copy this shortcut's action to a new key combination">
+                                                    <StackPanel Orientation="Horizontal"
+                                                                HorizontalAlignment="Center"
+                                                                VerticalAlignment="Center"
+                                                                Spacing="3">
+                                                        <TextBlock Text="&#x29C9;"
+                                                                   FontSize="9"
+                                                                   VerticalAlignment="Center" />
+                                                        <TextBlock Text="DUPLICATE"
+                                                                   VerticalAlignment="Center" />
+                                                    </StackPanel>
+                                                </Button>
+                                            </StackPanel>
+                                        </Border>
                                     </Grid>
-                                    <Border Grid.Column="9" Classes="ShortcutGridCell">
-                                        <StackPanel Orientation="Horizontal"
-                                                    HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"
-                                                    Spacing="6">
-                                            <Button Content="REMOVE"
-                                                    Classes="Danger"
-                                                    Click="Remove_Click"
-                                                    Width="78"
-                                                    MinWidth="78"
-                                                    Height="24"
-                                                    MinHeight="24"
-                                                    Padding="4,2"
-                                                    HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"
-                                                    FontSize="8.5"
-                                                    TabIndex="1" />
-                                            <Button Classes="Secondary"
-                                                    Click="Duplicate_Click"
-                                                    Width="78"
-                                                    MinWidth="78"
-                                                    Height="24"
-                                                    MinHeight="24"
-                                                    Padding="4,2"
-                                                    HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"
-                                                    FontSize="8.5"
-                                                    TabIndex="2"
-                                                    IsVisible="{Binding IsEditing}"
-                                                    ToolTip.Tip="Duplicate this shortcut">
-                                                <StackPanel Orientation="Horizontal"
-                                                            HorizontalAlignment="Center"
-                                                            VerticalAlignment="Center"
-                                                            Spacing="3">
-                                                    <TextBlock Text="⧉"
-                                                               FontSize="9"
-                                                               VerticalAlignment="Center" />
-                                                    <TextBlock Text="DUPLICATE"
-                                                               VerticalAlignment="Center" />
-                                                </StackPanel>
-                                            </Button>
-                                        </StackPanel>
-                                    </Border>
-                                </Grid>
-                            </Border>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <Border Name="ScrollFadeTop" Height="40" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="1" Color="#00000000"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <TextBlock Text="&#x25B2; &#x25B2; &#x25B2;" HorizontalAlignment="Center" VerticalAlignment="Top" FontSize="10" Foreground="#A0ffffff" Margin="0,4,0,0"/>
+                    </Border>
+                    <Border Name="ScrollFadeBottom" Height="40" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
+                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="1" Color="#00000000"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <TextBlock Text="&#x25BC; &#x25BC; &#x25BC;" HorizontalAlignment="Center" VerticalAlignment="Bottom" FontSize="10" Foreground="#A0ffffff" Margin="0,0,0,4"/>
+                    </Border>
+                    <Border Name="ScrollFadeLeft" Width="40" HorizontalAlignment="Left" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="1" Color="#00000000"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <TextBlock Text="&#x25C0; &#x25C0;" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="10" Foreground="#A0ffffff" Margin="4,0,0,0">
+                            <TextBlock.RenderTransform>
+                                <RotateTransform Angle="-90"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Border>
+                    <Border Name="ScrollFadeRight" Width="40" HorizontalAlignment="Right" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="100%,0%" EndPoint="0%,0%">
+                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="1" Color="#00000000"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                        <TextBlock Text="&#x25B6; &#x25B6;" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="10" Foreground="#A0ffffff" Margin="0,0,4,0">
+                            <TextBlock.RenderTransform>
+                                <RotateTransform Angle="90"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Border>
+
+                    <!-- ISSUE_22: a first-run user used to see a blank grey rectangle. -->
+                    <Border Name="EmptyStatePanel"
+                            IsVisible="False"
+                            IsHitTestVisible="True"
+                            Background="Transparent"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Stretch">
+                        <StackPanel HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    MaxWidth="460"
+                                    Spacing="8">
+                            <TextBlock Name="EmptyStateTitle"
+                                       Text="No shortcuts yet"
+                                       Classes="SectionTitle"
+                                       HorizontalAlignment="Center"
+                                       TextAlignment="Center" />
+                            <TextBlock Name="EmptyStateBody"
+                                       Text="Click the shortcut box above, press the keys you want (for example Ctrl + Alt + D), pick what should happen, then press Add."
+                                       Classes="Muted"
+                                       TextWrapping="Wrap"
+                                       TextAlignment="Center" />
+                            <Button Name="EmptyStateExampleButton"
+                                    Content="Add an example shortcut"
+                                    Classes="Primary"
+                                    HorizontalAlignment="Center"
+                                    Click="AddExample_Click"
+                                    Margin="0,6,0,0"
+                                    ToolTip.Tip="Creates a ready-made shortcut that opens your Downloads folder" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
             </Grid>
         </Border>
 
         <Grid Grid.Row="3"
-              ColumnDefinitions="*,Auto"
+              ColumnDefinitions="*,Auto,*"
               Margin="0,12,0,0">
             <TextBlock Grid.Column="0"
                        Name="ServiceStatusText"
@@ -367,11 +531,20 @@
                        FontSize="11"
                        TextTrimming="CharacterEllipsis"
                        Margin="0,0,12,0" />
-            <Button Grid.Column="1"
+            <TextBlock Grid.Column="1"
+                       Name="ShortcutCountText"
+                       Classes="Muted"
+                       FontSize="11"
+                       VerticalAlignment="Center"
+                       HorizontalAlignment="Center"
+                       Margin="10,0,10,0"
+                       TextTrimming="CharacterEllipsis" />
+            <Button Grid.Column="2"
                     Content="Settings"
                     Classes="Secondary"
                     Click="Settings_Click"
                     TabIndex="6"
+                    HorizontalAlignment="Right"
                     MinWidth="98" />
         </Grid>
     </Grid>
