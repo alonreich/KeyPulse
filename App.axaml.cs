@@ -80,10 +80,34 @@ public partial class App : Application
                 var mw = new MainWindow(startHidden);
                 if (startHidden) HiddenWindow = mw;
                 desktop.MainWindow = mw;
+
+                // ISSUE_12: the installer asks a running KeyPulse to shut down through this event.
+                // A window close request is deliberately ignored by MainWindow (it hides instead),
+                // so this is the one "please exit now" channel the app actually honours.
+                Program.StartExitRequestListener(() =>
+                {
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() => Exit_Clicked(null, System.EventArgs.Empty));
+                });
+
                 Program.StartOpenWindowRequestListener(() =>
                 {
-                    Avalonia.Threading.Dispatcher.UIThread.Post(() => OpenKeybinds_Clicked(null, System.EventArgs.Empty));
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        OpenKeybinds_Clicked(null, System.EventArgs.Empty);
+                        // ISSUE_19: if Explorer's "Add to KeyPulse" staged a target for us, load it
+                        // into the editor now that the window is coming forward.
+                        mw.ConsumeStagedAdd();
+                    });
                 });
+
+                // ISSUE_19: launched directly from the Explorer context menu - stage immediately.
+                if (Program.PendingAddTarget != null)
+                {
+                    var staged = Program.PendingAddTarget;
+                    Program.PendingAddTarget = null;
+                    mw.StageExternalAdd(staged);
+                }
+
                 KeyPulse.Program.LogDebug("Set MainWindow");
             }
         }
@@ -104,10 +128,11 @@ public partial class App : Application
             if (mw != null)
             {
                 if (desktop.MainWindow == null) desktop.MainWindow = mw;
-                mw.ShowInTaskbar = true;
-                mw.Show();
-                mw.WindowState = Avalonia.Controls.WindowState.Normal;
-                mw.Activate();
+                // ISSUE_32: BringToFront marks the user request BEFORE Show(), so the first
+                // open after a --hidden boot can no longer be re-hidden by MainWindow_Opened
+                // (the half-second flash-then-close). It also leaves a maximized window
+                // maximized instead of forcing it back to Normal.
+                mw.BringToFront();
             }
         }
     }

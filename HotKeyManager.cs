@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -212,7 +212,6 @@ namespace KeyPulse
             return processId == CurrentProcessId;
         }
 
-        // KBDLLHOOKSTRUCT layout: vkCode(0) scanCode(4) flags(8) time(12) dwExtraInfo(16).
         private const int HookExtraInfoOffset = 16;
 
         /// <summary>
@@ -254,13 +253,11 @@ namespace KeyPulse
                     UpdateCaptureModifierState(vkCode, false);
                 }
 
-                // Allow Escape, Tab, and Windows keys to fall through as escape hatches
                 if (vkCode == 0x1B || vkCode == 0x09 || vkCode == 0x5B || vkCode == 0x5C)
                 {
                     return CallNextHookEx(_hookID, nCode, wParam, lParam);
                 }
 
-                // Swallow the rest so Windows does not act on the combination being recorded.
                 return (IntPtr)1;
             }
 
@@ -341,10 +338,40 @@ namespace KeyPulse
                 return true;
             }
 
-            using var tcs = new ManualResetEventSlim(false);
-            _taskQueue.Enqueue(() => { action(); tcs.Set(); });
+            var signal = new ManualResetEventSlim(false);
+            var completed = false;
+
+            _taskQueue.Enqueue(() =>
+            {
+                try { action(); }
+                finally
+                {
+                    Volatile.Write(ref completed, true);
+                    try { signal.Set(); } catch { }
+                }
+            });
+
             PostMessage(_hWnd, WM_USER, IntPtr.Zero, IntPtr.Zero);
-            return tcs.Wait(5000);
+
+            if (signal.Wait(5000))
+            {
+                signal.Dispose();
+                return true;
+            }
+
+            Program.LogDebug("HotkeyManager.RunOnThread timed out after 5s; the queued work may still run.");
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    signal.Wait(30000);
+                    if (!Volatile.Read(ref completed)) Program.LogCrash("A hotkey thread task never completed.");
+                }
+                catch { }
+                finally { try { signal.Dispose(); } catch { } }
+            });
+
+            return false;
         }
 
         private static Dictionary<int, (uint modifiers, uint vk)> _activeCombos = new();
@@ -364,8 +391,6 @@ namespace KeyPulse
                 }
                 _actions.Clear();
                 _activeCombos.Clear();
-                // _currentId is deliberately NOT reset: ids are never reused, so a hotkey message
-                // still in flight can never be delivered to a different shortcut's action.
             });
         }
 
@@ -389,7 +414,6 @@ namespace KeyPulse
 
             bool success = false;
             var completed = RunOnThread(() => {
-                // If we already own this combo, return success
                 foreach (var active in _activeCombos.Values)
                 {
                     if (active.modifiers == modifiers && active.vk == vk)
@@ -485,15 +509,6 @@ namespace KeyPulse
             return string.Join("+", parts);
         }
 
-        // ------------------------------------------------------------------
-        // ISSUE_13: ONE key-name table for the whole application.
-        //
-        // There used to be three: this file's switch, a second switch in MainWindow's raw-key
-        // handler, and Avalonia's own Key enum names written straight into the box by the fallback
-        // capture path. They disagreed. The worst case was the numeric keypad: "Add" parsed to
-        // 0xBB - the "=" key next to Backspace - so the shortcut the user tested was not the
-        // shortcut that got registered. Everything now round-trips through these two dictionaries.
-        // ------------------------------------------------------------------
 
         private static readonly (uint Vk, string Name)[] CanonicalKeyNames =
         {
@@ -509,8 +524,6 @@ namespace KeyPulse
             (0x7C, "F13"), (0x7D, "F14"), (0x7E, "F15"), (0x7F, "F16"), (0x80, "F17"), (0x81, "F18"),
             (0x82, "F19"), (0x83, "F20"), (0x84, "F21"), (0x85, "F22"), (0x86, "F23"), (0x87, "F24"),
 
-            // The numeric keypad is a different set of physical keys from the number row and the
-            // punctuation row. Keeping them distinct is the whole point of this table.
             (0x60, "NumPad0"), (0x61, "NumPad1"), (0x62, "NumPad2"), (0x63, "NumPad3"),
             (0x64, "NumPad4"), (0x65, "NumPad5"), (0x66, "NumPad6"), (0x67, "NumPad7"),
             (0x68, "NumPad8"), (0x69, "NumPad9"),
@@ -538,12 +551,10 @@ namespace KeyPulse
             ("del", 0x2E), ("ins", 0x2D), ("pgup", 0x21), ("pgdn", 0x22), ("prtsc", 0x2C),
             ("menu", 0x5D), ("contextmenu", 0x5D), ("capital", 0x14), ("snapshot", 0x2C),
 
-            // Row "+" (shift-equals). Distinct from the keypad's plus, which is 0x6B.
             ("plus", 0xBB), ("+", 0xBB), ("equals", 0xBB), ("oemquotes", 0xDE),
             ("oem3", 0xC0), ("oem1", 0xBA), ("oem2", 0xBF), ("oem4", 0xDB), ("oem5", 0xDC),
             ("oem6", 0xDD), ("oem7", 0xDE), ("oem102", 0xE2),
 
-            // Keypad spellings, including the Avalonia Key enum names.
             ("add", 0x6B), ("numpadplus", 0x6B), ("numpadadd", 0x6B),
             ("subtract", 0x6D), ("numpadminus", 0x6D), ("numpadsubtract", 0x6D),
             ("multiply", 0x6A), ("numpadmultiply", 0x6A),
@@ -570,7 +581,6 @@ namespace KeyPulse
             foreach (var (vk, name) in CanonicalKeyNames) map[name] = vk;
             foreach (var (alias, vk) in KeyNameAliases) map[alias] = vk;
 
-            // Avalonia writes the number row as D0..D9; accept that spelling too.
             for (uint digit = 0; digit <= 9; digit++) map["D" + digit] = 0x30 + digit;
             return map;
         }
@@ -585,7 +595,6 @@ namespace KeyPulse
                 return ((char)vk).ToString();
             }
 
-            // Never invent a spelling we cannot read back. "VK123" always parses again.
             return "VK" + vk;
         }
 
@@ -619,7 +628,6 @@ namespace KeyPulse
 
             if (string.IsNullOrWhiteSpace(combo)) return false;
 
-            // "Ctrl++" means Ctrl plus the "+" key: keep an empty tail as a literal "+" token.
             var raw = combo.Split('+');
             var parts = new List<string>();
             for (var i = 0; i < raw.Length; i++)
@@ -698,9 +706,6 @@ namespace KeyPulse
 
             LastRegisterError = success ? 0 : lastError;
 
-            // Report success on `success`, not on `completed`. If the message thread took the
-            // hotkey but the 5-second wait expired, reporting failure would orphan a registration
-            // nothing could ever release.
             if (success)
             {
                 hotkeyId = assignedId;

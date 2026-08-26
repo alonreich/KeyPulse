@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -11,11 +11,21 @@ namespace KeyPulse;
 
 class Program
 {
-    // ISSUE_2: session-local, not Global\. A Global\ mutex created by another Windows user has a
-    // DACL this user cannot open, which threw an unhandled UnauthorizedAccessException at startup
-    // and also blocked a second user (or an RDP session) from running KeyPulse at all.
     private const string SingleInstanceMutexName = @"Local\KeyPulse_SingleInstance";
     private const string OpenWindowEventName = "KeyPulse_OpenWindow";
+
+    /// <summary>
+    /// ISSUE_12: the installer signals this named event to ask a running KeyPulse to shut down
+    /// cleanly. Closing the main window just hides it (by design), so WM_CLOSE could never work and
+    /// every upgrade stalled for a second and then hard-killed the app.
+    /// </summary>
+    private const string ExitAppEventName = "KeyPulse_ExitApp";
+
+    /// <summary>ISSUE_19: target handed over from the Explorer "Add to KeyPulse" context menu.</summary>
+    public static readonly string StagedAddPath = Path.Combine(ConfigStore.ConfigDirectory, "staged-add.txt");
+
+    /// <summary>ISSUE_19: set when this launch was started with --add-target and owns the window.</summary>
+    public static string? PendingAddTarget;
 
     public const string AdminTaskName = "KeyPulse_AdminTask";
 
@@ -42,6 +52,13 @@ class Program
 
     /// <summary>ISSUE_21 / ISSUE_8: folders earlier builds used. The setup pipeline must delete these.</summary>
     public static string LegacyNativeLibDir = Path.Combine(Path.GetTempPath(), AppName + "_NativeLibs");
+
+    /// <summary>
+    /// ISSUE_15: where ExtractNativeLibs falls back to when the install directory is not writable.
+    /// The uninstall self-delete script cleans this AND LegacyNativeLibDir - the legacy folder is
+    /// still targeted on purpose, because an upgrade from an old build leaves one behind.
+    /// </summary>
+    public static string RuntimeFallbackDir = Path.Combine(Path.GetTempPath(), AppName + "_Runtime");
     public static string LegacyLogDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
 
     /// <summary>
@@ -70,7 +87,6 @@ class Program
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 if (File.Exists(path) && new FileInfo(path).Length > 2 * 1024 * 1024)
                 {
-                    // Roll over instead of throwing the evidence away the moment it gets useful.
                     var previous = path + ".old";
                     try { if (File.Exists(previous)) File.Delete(previous); } catch { }
                     try { File.Move(path, previous); } catch { try { File.Delete(path); } catch { } }
@@ -81,12 +97,6 @@ class Program
         catch { }
     }
 
-    // ---------------------------------------------------------------------
-    // ISSUE_15: one honest answer to "which build am I running?"
-    //
-    // FileVersionInfo reads the version stamped into the exe by the build, so this works under
-    // NativeAOT without touching reflection (see the agent directives in project_structure.txt).
-    // ---------------------------------------------------------------------
 
     private static string? _appVersion;
 
@@ -102,7 +112,6 @@ class Program
                 var version = info.FileVersion;
                 if (!string.IsNullOrWhiteSpace(version))
                 {
-                    // The build stamps yyyy.MM.dd.HHmm; drop a trailing ".0" placeholder only.
                     _appVersion = version.EndsWith(".0", StringComparison.Ordinal) && version.Count(c => c == '.') == 3
                         ? version.Substring(0, version.Length - 2)
                         : version;
@@ -168,11 +177,16 @@ class Program
             e.Handled = true;
         };
 
-        ExtractNativeLibs();
+        // ISSUE_19: "Add to KeyPulse" from Explorer's right-click menu. When a copy is already
+        // running the target is staged in a file and the running instance is signalled; otherwise
+        // it is handed to the window this launch creates.
+        var addTarget = GetArgumentValue(args, "--add-target");
 
         if (args.Contains("--setup-admin-task"))
         {
-            RunSetupAdminTask();
+            // ISSUE_11: the elevated helpers never start Avalonia, so they no longer unpack or
+            // verify ~30 MB of graphics libraries first. They also never touch the settings file.
+            RunSetupAdminTask(args);
             return;
         }
 
@@ -184,21 +198,52 @@ class Program
 
         if (isUninstall)
         {
-            // The scheduled task is removed (and verified) by SetupWindow's uninstall pipeline so
-            // that a failure is reported to the user instead of being swallowed here. ISSUE_13.
             var tempUninstaller = Path.Combine(Path.GetTempPath(), "KeyPulse_Uninstaller.exe");
             if (!Environment.ProcessPath!.Equals(tempUninstaller, StringComparison.OrdinalIgnoreCase))
             {
-                File.Copy(Environment.ProcessPath!, tempUninstaller, true);
-                try { var ps = new Process { StartInfo = new ProcessStartInfo { FileName = tempUninstaller, Arguments = "--uninstall", UseShellExecute = true } }; ps.Start(); } catch { }
+                try
+                {
+                    File.Copy(Environment.ProcessPath!, tempUninstaller, true);
+                }
+                catch (Exception ex)
+                {
+                    LogCrash($"Could not stage the uninstaller at {tempUninstaller}: {ex}");
+                    MessageBox(IntPtr.Zero,
+                        "KeyPulse could not start its uninstaller.\n\n" + ex.Message +
+                        "\n\nClose any running KeyPulse setup window, make sure there is free space in your temporary folder, and try again.",
+                        "KeyPulse", 0x10);
+                    return;
+                }
+
+                try
+                {
+                    using var ps = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = tempUninstaller,
+                        Arguments = args.Contains("--elevated-retry") ? "--uninstall --elevated-retry" : "--uninstall",
+                        UseShellExecute = true
+                    });
+                }
+                catch (Exception ex)
+                {
+                    LogCrash($"Could not launch the staged uninstaller: {ex}");
+                    MessageBox(IntPtr.Zero,
+                        "KeyPulse could not start its uninstaller.\n\n" + ex.Message,
+                        "KeyPulse", 0x10);
+                }
                 return;
             }
+            // ISSUE_11: extraction now happens AFTER the single-instance check, so a second launch
+            // that only brings the window forward costs nothing. Setup windows still need the
+            // graphics libraries before Avalonia boots.
+            ExtractNativeLibs();
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
             return;
         }
 
         if (isInstallWorker)
         {
+            ExtractNativeLibs();
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
             return;
         }
@@ -217,6 +262,7 @@ class Program
                     }
                 };
                 ps.Start();
+                ps.Dispose();
             }
             catch (Exception ex)
             {
@@ -225,30 +271,52 @@ class Program
             return;
         }
 
-        if (!isSetupMode)
+        if (isSetupMode)
+        {
+            if (!TryAcquireSetupLock())
+            {
+                MessageBox(IntPtr.Zero,
+                    "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
+                    "KeyPulse", 0x40);
+                return;
+            }
+        }
+        else
         {
             bool createdNew;
+            var lockUnavailable = false;
+
             try
             {
-                _mutex = new Mutex(false, SingleInstanceMutexName);
+                _mutex = CreateSharedMutex(SingleInstanceMutexName);
                 try { createdNew = _mutex.WaitOne(0, false); }
-                catch (AbandonedMutexException) { createdNew = true; }
+                catch (AbandonedMutexException)
+                {
+                    createdNew = true;
+                }
             }
             catch (Exception ex)
             {
-                // Never let the single-instance guard stop KeyPulse from running. ISSUE_2.
-                LogCrash($"Single-instance mutex unavailable, continuing without it: {ex}");
+                LogCrash($"Single-instance mutex unavailable, falling back to a process check: {ex}");
                 _mutex = null;
                 createdNew = true;
+                lockUnavailable = true;
             }
 
             _mutexOwned = createdNew && _mutex != null;
 
+            if (createdNew && (lockUnavailable || IsAnotherInstalledInstanceRunning()))
+            {
+                LogDebug("Another installed KeyPulse process is already running; deferring to it.");
+                createdNew = false;
+                _mutexOwned = false;
+            }
+
             if (!createdNew)
             {
-                // ISSUE_5: reopening from the desktop/Start Menu shortcut is the normal way back in,
-                // not an error. Bring the running window forward silently and only complain if that
-                // could not be delivered.
+                // ISSUE_19: hand the Explorer "Add to KeyPulse" target to the running copy.
+                if (addTarget != null) WriteStagedAddTarget(addTarget);
+
                 if (!SignalExistingInstance())
                 {
                     MessageBox(IntPtr.Zero,
@@ -256,8 +324,7 @@ class Program
                         "KeyPulse", 0x40);
                 }
 
-                _mutex?.Dispose();
-                _mutex = null;
+                ReleaseSingleInstanceLock();
                 return;
             }
 
@@ -266,6 +333,10 @@ class Program
 
         try
         {
+            // ISSUE_19: remember the Explorer-requested target for the window about to open.
+            if (addTarget != null) PendingAddTarget = addTarget;
+
+            ExtractNativeLibs();
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         }
         catch (Exception ex)
@@ -274,21 +345,206 @@ class Program
         }
         finally
         {
-            if (_mutex != null)
-            {
-                if (_mutexOwned)
-                {
-                    try { _mutex.ReleaseMutex(); } catch { }
-                }
-                _mutex.Dispose();
-                _mutex = null;
-            }
+            ReleaseSingleInstanceLock();
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Elevated-mode plumbing
-    // ---------------------------------------------------------------------
+
+    private const string SetupMutexName = @"Local\KeyPulse_Setup";
+    private static Mutex? _setupMutex;
+    private static bool _setupMutexOwned;
+
+    /// <summary>
+    /// Grants every user full access and stamps a LOW mandatory label.
+    ///
+    /// ISSUE_7: a named object created by an elevated process inherits a High integrity label, and
+    /// Windows' no-write-up rule then refuses a normal-integrity process the write access that
+    /// opening a mutex or setting an event requires. That is why a desktop shortcut could start a
+    /// SECOND KeyPulse while the elevated logon-task copy was already running. A low label lets any
+    /// integrity level in the same session open it, which is exactly what a per-user guard wants.
+    /// </summary>
+    private const string SharedObjectSddl = "D:(A;;GA;;;WD)S:(ML;;NW;;;LW)";
+
+    private const uint SecurityDescriptorRevision = 1;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES
+    {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public int bInheritHandle;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string stringSecurityDescriptor, uint stringSDRevision, out IntPtr securityDescriptor, IntPtr securityDescriptorSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr hMem);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateMutexW(IntPtr lpMutexAttributes, bool bInitialOwner, string lpName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateEventW(IntPtr lpEventAttributes, bool bManualReset, bool bInitialState, string lpName);
+
+    /// <summary>Runs <paramref name="create"/> with a SECURITY_ATTRIBUTES built from the shared SDDL.</summary>
+    private static IntPtr CreateWithSharedSecurity(Func<IntPtr, IntPtr> create)
+    {
+        IntPtr descriptor = IntPtr.Zero;
+        try
+        {
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(SharedObjectSddl, SecurityDescriptorRevision, out descriptor, IntPtr.Zero))
+            {
+                LogDebug("Could not build the shared security descriptor; falling back to default security.");
+                return create(IntPtr.Zero);
+            }
+
+            var attributes = new SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>(),
+                lpSecurityDescriptor = descriptor,
+                bInheritHandle = 0
+            };
+
+            var buffer = Marshal.AllocHGlobal(attributes.nLength);
+            try
+            {
+                Marshal.StructureToPtr(attributes, buffer, false);
+                return create(buffer);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        finally
+        {
+            if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+        }
+    }
+
+    private static Mutex CreateSharedMutex(string name)
+    {
+        var handle = CreateWithSharedSecurity(attributes => CreateMutexW(attributes, false, name));
+        if (handle == IntPtr.Zero)
+        {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        var mutex = new Mutex(false);
+        mutex.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, true);
+        return mutex;
+    }
+
+    private static EventWaitHandle CreateSharedEvent(string name)
+    {
+        var handle = CreateWithSharedSecurity(attributes => CreateEventW(attributes, false, false, name));
+        if (handle == IntPtr.Zero)
+        {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        var waitHandle = new EventWaitHandle(false, EventResetMode.AutoReset);
+        waitHandle.SafeWaitHandle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(handle, true);
+        return waitHandle;
+    }
+
+    /// <summary>ISSUE_3: one setup window at a time, whatever the user double-clicks.</summary>
+    private static bool TryAcquireSetupLock()
+    {
+        try
+        {
+            _setupMutex = CreateSharedMutex(SetupMutexName);
+            try { _setupMutexOwned = _setupMutex.WaitOne(0, false); }
+            catch (AbandonedMutexException) { _setupMutexOwned = true; }
+
+            if (!_setupMutexOwned)
+            {
+                _setupMutex.Dispose();
+                _setupMutex = null;
+            }
+
+            return _setupMutexOwned;
+        }
+        catch (Exception ex)
+        {
+            LogCrash($"Setup lock unavailable, continuing without it: {ex}");
+            _setupMutex = null;
+            _setupMutexOwned = false;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// ISSUE_7: last-resort check for a KeyPulse already running from the install directory.
+    ///
+    /// Only processes whose executable really is our installed binary count. A second copy of the
+    /// INSTALLER is also called "KeyPulse", and treating that as a running app would be wrong.
+    /// A process we cannot inspect is assumed to be a KeyPulse at a higher integrity level - which
+    /// is precisely the case the mutex label is there to fix, so it counts.
+    /// </summary>
+    public static bool IsAnotherInstalledInstanceRunning()
+    {
+        try
+        {
+            foreach (var process in Process.GetProcessesByName(AppName))
+            {
+                using (process)
+                {
+                    if (process.Id == Environment.ProcessId) continue;
+
+                    string? path = null;
+                    try { path = process.MainModule?.FileName; } catch { /* higher integrity, or exited */ }
+
+                    if (path == null) return true;
+                    if (path.Equals(ExePath, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug("Could not check for another running KeyPulse: " + ex.Message);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// ISSUE_14: hands the single-instance lock back explicitly.
+    ///
+    /// Switching in or out of Administrator mode ends the process with Environment.Exit, which does
+    /// NOT run finally blocks - so the lock used to be released only by Windows abandoning it at
+    /// process death, and the replacement instance started only because it happened to catch
+    /// AbandonedMutexException. Call this before any hard exit so the restart works by design.
+    /// </summary>
+    public static void ReleaseSingleInstanceLock()
+    {
+        if (_mutex != null)
+        {
+            if (_mutexOwned)
+            {
+                try { _mutex.ReleaseMutex(); } catch { }
+                _mutexOwned = false;
+            }
+
+            try { _mutex.Dispose(); } catch { }
+            _mutex = null;
+        }
+
+        if (_setupMutex != null)
+        {
+            if (_setupMutexOwned)
+            {
+                try { _setupMutex.ReleaseMutex(); } catch { }
+                _setupMutexOwned = false;
+            }
+
+            try { _setupMutex.Dispose(); } catch { }
+            _setupMutex = null;
+        }
+    }
+
 
     private static bool RunSchtasks(string arguments, out int exitCode, out string output)
     {
@@ -308,10 +564,6 @@ class Program
             using var p = Process.Start(psi);
             if (p == null) return false;
 
-            // ISSUE_19: both pipes must be drained AT THE SAME TIME. Reading one to the end and then
-            // the other deadlocks the moment Windows writes enough to fill the pipe we are not
-            // reading - and the 15-second timeout below never fires, because the block is on the
-            // read, not on the wait. That hung Settings permanently on some machines.
             var standardOutTask = p.StandardOutput.ReadToEndAsync();
             var standardErrorTask = p.StandardError.ReadToEndAsync();
 
@@ -351,12 +603,17 @@ class Program
     {
         NotPresent,
         Enabled,
-        Disabled
+        Disabled,
+
+        /// <summary>
+        /// ISSUE_9: Windows did not answer the question. A slow, blocked or timed-out schtasks call
+        /// used to be reported as "the task does not exist", so Settings said startup was off while
+        /// it was on, and switching startup on wrote a SECOND launcher - two tray icons at login.
+        /// Unknown must never be treated as NotPresent.
+        /// </summary>
+        Unknown
     }
 
-    // ISSUE_12: schtasks.exe is a separate process, and the answer was being re-fetched on every
-    // single question - twice just to open Settings, twice more per startup toggle, all on the UI
-    // thread. The answer is cached and explicitly invalidated whenever KeyPulse changes the task.
     private static readonly object AdminTaskLock = new object();
     private static AdminTaskState? _adminTaskStateCache;
 
@@ -380,10 +637,22 @@ class Program
 
     private static AdminTaskState QueryAdminTaskState()
     {
-        // /XML is locale-independent; parsing the "Status:" column is not.
-        if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML ONELINE", out _, out var xml))
+        // ISSUE_33: this used to pass "/XML ONELINE" - ONELINE is not an schtasks option, so
+        // EVERY query failed with "Improper display format type specified" and came back as
+        // AdminTaskState.Unknown. Settings then froze the checkbox with "Windows did not
+        // answer..." while the real task kept launching KeyPulse at every logon, so the
+        // checkbox and reality could never agree. Plain /XML is the documented form; an
+        // enabled task may omit <Enabled> entirely, which the check below already treats
+        // as enabled.
+        if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var xml))
         {
-            return AdminTaskState.NotPresent;
+            // ISSUE_9: schtasks exits non-zero both when the task genuinely does not exist and when
+            // the query failed. Only "cannot find" means the task is really absent; anything else
+            // (timeout, security software, access denied) is Unknown, never "off".
+            var notFound = xml.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase)
+                || xml.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
+                || xml.Contains("cannot find", StringComparison.OrdinalIgnoreCase);
+            return notFound ? AdminTaskState.NotPresent : AdminTaskState.Unknown;
         }
 
         return xml.Contains("<Enabled>false</Enabled>", StringComparison.OrdinalIgnoreCase)
@@ -391,7 +660,28 @@ class Program
             : AdminTaskState.Enabled;
     }
 
-    public static bool IsAdminTaskInstalled() => GetAdminTaskState() != AdminTaskState.NotPresent;
+    public static bool IsAdminTaskInstalled()
+    {
+        var state = GetAdminTaskState();
+        return state == AdminTaskState.Enabled || state == AdminTaskState.Disabled;
+    }
+
+    /// <summary>
+    /// ISSUE_8: true when Administrator mode is switched ON but this process is NOT actually
+    /// elevated.
+    ///
+    /// `/RL HIGHEST` means "the highest level this account can reach", which on an account without
+    /// administrator rights is ordinary rights. Windows reports the task as created and enabled, so
+    /// Settings happily said "starts with Windows using its Administrator logon task" while typing
+    /// into elevated windows kept failing with no explanation. Policy blocking elevation, and a task
+    /// created for the wrong account, land here too. Call it off the UI thread - it may spawn
+    /// schtasks the first time.
+    /// </summary>
+    public static bool IsAdminModeClaimedButNotEffective()
+    {
+        if (IsElevated) return false;
+        return GetAdminTaskState() == AdminTaskState.Enabled;
+    }
 
     /// <summary>
     /// ISSUE_13: verified removal. The old uninstaller fired schtasks and ignored the result, so a
@@ -414,35 +704,67 @@ class Program
     }
 
     /// <summary>
-    /// ISSUE_6: one truthful answer for "does KeyPulse start with Windows?", whether startup is
-    /// driven by the Run key or by the elevated logon task.
+    /// ISSUE_9: the honest three-way answer to "does KeyPulse start with Windows?". Unknown means
+    /// Windows did not answer - never guess "off", or a second launcher gets written on top of the
+    /// existing one and two KeyPulse copies start at the next login.
     /// </summary>
-    public static bool IsStartupEnabled()
+    public enum StartupState
+    {
+        On,
+        Off,
+        Unknown
+    }
+
+    /// <summary>ISSUE_9: one truthful answer, whether startup is driven by the Run key or the logon task.</summary>
+    public static StartupState QueryStartupState()
     {
         var taskState = GetAdminTaskState();
-        if (taskState != AdminTaskState.NotPresent) return taskState == AdminTaskState.Enabled;
+        if (taskState == AdminTaskState.Enabled) return StartupState.On;
+        // ISSUE_33: a disabled (or absent) task launches nothing, but a leftover Run-key
+        // launcher still would - so fall through to the registry check instead of
+        // answering "off" while Windows keeps starting KeyPulse.
 
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false);
-            return key?.GetValue(AppName) != null;
+            if (key?.GetValue(AppName) != null) return StartupState.On;
+            // ISSUE_9: when the task state could not be determined, absence of a Run-key entry is
+            // NOT proof that startup is off - the task might exist but be unqueryable.
+            return taskState == AdminTaskState.Unknown ? StartupState.Unknown : StartupState.Off;
         }
         catch
         {
-            return false;
+            return taskState == AdminTaskState.Unknown ? StartupState.Unknown : StartupState.Off;
         }
     }
 
-    private static void RunSetupAdminTask()
-    {
-        // Read the current startup intent BEFORE touching anything, so elevating cannot lose it.
-        var wantsStartup = IsStartupEnabled();
+    /// <summary>ISSUE_6 legacy helper: true only when startup is CONFIRMED on.</summary>
+    public static bool IsStartupEnabled() => QueryStartupState() == StartupState.On;
 
-        var user = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+    /// <summary>Reads "--name value" from the command line, or null when it is absent.</summary>
+    private static string? GetArgumentValue(string[] args, string name)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+            {
+                var value = args[i + 1];
+                return string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        return null;
+    }
+
+    private static void RunSetupAdminTask(string[] args)
+    {
+        // ISSUE_9: tri-state. Only touch the registry when the previous state is actually known.
+        var startupState = QueryStartupState();
+
+        var user = GetArgumentValue(args, "--for-user")
+                   ?? System.Security.Principal.WindowsIdentity.GetCurrent().Name;
         var taskCmd = $"/Create /F /TN \"{AdminTaskName}\" /TR \"\\\"{ExePath}\\\" --hidden\" /SC ONLOGON /RL HIGHEST /RU \"{user}\"";
 
-        // ISSUE_14: never claim success without checking. A blocked schtasks used to delete the
-        // user's startup entry and then report elevated mode as active.
         if (!RunSchtasks(taskCmd, out var exitCode, out var output))
         {
             LogCrash($"schtasks create failed ({exitCode}): {output}");
@@ -450,15 +772,14 @@ class Program
                 "KeyPulse could not switch to Administrator mode.\n\nWindows refused to create the scheduled task (error " + exitCode + ").\nThis is usually blocked by company policy or security software.\n\nNothing was changed. KeyPulse will start normally.",
                 "KeyPulse", 0x10);
 
-            try { Process.Start(new ProcessStartInfo { FileName = ExePath, UseShellExecute = true }); } catch { }
+            try { using var relaunch = Process.Start(new ProcessStartInfo { FileName = ExePath, UseShellExecute = true }); } catch { }
             return;
         }
 
         InvalidateAdminTaskState();
 
-        if (wantsStartup)
+        if (startupState == StartupState.On)
         {
-            // The elevated logon task replaces the Run-key launcher; remove it so both do not fire.
             try
             {
                 using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
@@ -468,21 +789,30 @@ class Program
 
             try { var vbs = Path.Combine(InstallDir, "boot.vbs"); if (File.Exists(vbs)) File.Delete(vbs); } catch { }
         }
-        else
+        else if (startupState == StartupState.Off)
         {
-            // The user did not have launch-on-boot; elevating must not silently turn it on.
             RunSchtasks($"/Change /TN \"{AdminTaskName}\" /DISABLE", out _, out _);
             InvalidateAdminTaskState();
         }
+        else
+        {
+            // ISSUE_9: the previous state could not be determined. Touching nothing here is the only
+            // choice that cannot leave the user with zero - or two - startup launchers.
+            LogDebug("Previous startup state unknown; registry and task enablement left untouched.");
+        }
 
-        ConfigStore.TryUpdate(c => c.LaunchOnBoot = wantsStartup, out _);
+        // ISSUE_3: this helper may run as a DIFFERENT administrator account (over-the-shoulder UAC).
+        // It must never open, decrypt or rewrite the user's settings file: every target used to be
+        // read under the wrong account, fail to decrypt, and get saved back blank. Its only job is
+        // the scheduled task above; the relaunched app updates the LaunchOnBoot mirror itself.
 
-        try { Process.Start(new ProcessStartInfo { FileName = ExePath, UseShellExecute = true }); } catch { }
+        try { using var relaunch = Process.Start(new ProcessStartInfo { FileName = ExePath, UseShellExecute = true }); } catch { }
     }
 
     private static void RunRemoveAdminTask()
     {
-        var wantsStartup = IsStartupEnabled();
+        // ISSUE_9: only restore the registry launcher when startup is CONFIRMED on.
+        var startupState = QueryStartupState();
 
         var deleted = RunSchtasks($"/Delete /TN \"{AdminTaskName}\" /F", out var exitCode, out var output);
         InvalidateAdminTaskState();
@@ -494,20 +824,19 @@ class Program
                 "KeyPulse could not remove the Administrator logon task (error " + exitCode + ").\n\nRun this once in an Administrator Command Prompt:\n\n    schtasks /Delete /TN \"" + AdminTaskName + "\" /F",
                 "KeyPulse", 0x30);
         }
-        else if (wantsStartup)
+        else if (startupState == StartupState.On)
         {
-            // ISSUE_6: restore the ordinary startup entry we removed when elevating.
-            if (!SetStartup(true, out var startupError))
+            // ISSUE_3: registry only. This helper can run as a different administrator account, so
+            // it must not open or rewrite the user's settings file the way SetStartup would.
+            if (!TrySetRegistryStartup(true, out var startupError))
             {
                 LogDebug($"Failed to restore Run-key startup after de-elevating: {startupError}");
             }
         }
 
-        // explorer.exe re-launches KeyPulse at the normal (non-elevated) integrity level.
-        try { Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = $"\"{ExePath}\"", UseShellExecute = true }); } catch { }
+        try { using var shell = Process.Start(new ProcessStartInfo { FileName = "explorer.exe", Arguments = $"\"{ExePath}\"", UseShellExecute = true }); } catch { }
     }
 
-    // ---------------------------------------------------------------------
 
     private static void EnsureOpenWindowEvent()
     {
@@ -515,7 +844,7 @@ class Program
 
         try
         {
-            _openWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, OpenWindowEventName);
+            _openWindowEvent = CreateSharedEvent(OpenWindowEventName);
         }
         catch (Exception ex)
         {
@@ -574,6 +903,83 @@ class Program
         try { _openWindowEvent?.Set(); } catch { }
     }
 
+    private static EventWaitHandle? _exitAppEvent;
+    private static Thread? _exitAppListener;
+    private static volatile bool _exitAppListenerRunning;
+
+    /// <summary>
+    /// ISSUE_12: the running app listens here so an installer can ask it to exit properly - saving
+    /// settings, releasing hotkeys and letting the tray icon disappear - instead of being killed.
+    /// </summary>
+    public static void StartExitRequestListener(Action exitApp)
+    {
+        try
+        {
+            _exitAppEvent = CreateSharedEvent(ExitAppEventName);
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Failed to create exit-app event: {ex.Message}");
+            return;
+        }
+
+        if (_exitAppListener != null) return;
+
+        _exitAppListenerRunning = true;
+        _exitAppListener = new Thread(() =>
+        {
+            while (_exitAppListenerRunning)
+            {
+                try
+                {
+                    _exitAppEvent.WaitOne();
+                    if (_exitAppListenerRunning) exitApp();
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    LogDebug($"Exit-app listener failed: {ex.Message}");
+                    Thread.Sleep(500);
+                }
+            }
+        });
+        _exitAppListener.IsBackground = true;
+        _exitAppListener.Start();
+    }
+
+    /// <summary>ISSUE_12: asks every running KeyPulse to shut down cleanly. True when signalled.</summary>
+    public static bool SignalInstancesToExit()
+    {
+        try
+        {
+            using var exitEvent = EventWaitHandle.OpenExisting(ExitAppEventName);
+            exitEvent.Set();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Failed to signal running KeyPulse to exit: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>ISSUE_19: parks an Explorer "Add to KeyPulse" target for the running instance.</summary>
+    private static void WriteStagedAddTarget(string target)
+    {
+        try
+        {
+            Directory.CreateDirectory(ConfigStore.ConfigDirectory);
+            File.WriteAllText(StagedAddPath, target ?? string.Empty);
+        }
+        catch (Exception ex)
+        {
+            LogDebug("Could not stage the Add-to-KeyPulse target: " + ex.Message);
+        }
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern bool SetDllDirectory(string lpPathName);
 
@@ -591,7 +997,6 @@ class Program
     {
         LogDebug("ExtractNativeLibs started");
 
-        // Best-effort removal of the old %TEMP% location, for anyone upgrading.
         try { if (Directory.Exists(LegacyNativeLibDir)) Directory.Delete(LegacyNativeLibDir, true); } catch { }
 
         var asm = Assembly.GetExecutingAssembly();
@@ -604,9 +1009,8 @@ class Program
         }
         catch (Exception ex)
         {
-            // A read-only or missing install directory must not stop the app from starting.
             LogCrash($"Could not create the runtime library folder '{outDir}': {ex.Message}. Falling back to TEMP.");
-            outDir = Path.Combine(Path.GetTempPath(), AppName + "_Runtime");
+                outDir = RuntimeFallbackDir;
             try { Directory.CreateDirectory(outDir); } catch { }
         }
 
@@ -617,17 +1021,34 @@ class Program
             if (!res.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
 
             var target = Path.Combine(outDir, res.Split('.').SkipLast(1).Last() + ".dll");
+            var stampPath = target + ".stamp";
 
             try
             {
                 using var stream = asm.GetManifestResourceStream(res);
                 if (stream == null) continue;
 
+                // ISSUE_11: a file that was verified on a PREVIOUS launch is re-verified cheaply.
+                // The stamp records the resource length and the SHA-256 that was verified (or
+                // written) last time; if the on-disk length still matches both, accept it. Reading
+                // and hashing ~30 MB of libraries on every single start made the window take a
+                // visible beat to appear. Any mismatch falls through to the full content check.
+                if (File.Exists(target) && File.Exists(stampPath)
+                    && TryReadStamp(stampPath, out var stampedLength, out var stampedHash)
+                    && stampedLength == stream.Length
+                    && new FileInfo(target).Length == stampedLength)
+                {
+                    LogDebug($"{Path.GetFileName(target)} verified by stamp ({stampedHash[..8]}…).");
+                    continue;
+                }
+
                 var expectedHash = ComputeHash(stream);
+                var expectedHashHex = Convert.ToHexString(expectedHash);
 
                 if (File.Exists(target) && FileHashMatches(target, expectedHash))
                 {
                     LogDebug($"{Path.GetFileName(target)} verified.");
+                    WriteStamp(stampPath, stream.Length, expectedHashHex);
                     continue;
                 }
 
@@ -642,14 +1063,11 @@ class Program
 
                 try
                 {
-                    // File.Move with overwrite is atomic enough here and, unlike delete-then-move,
-                    // never leaves the folder with no library at all.
                     File.Move(tempTarget, target, true);
+                    WriteStamp(stampPath, stream.Length, expectedHashHex);
                 }
                 catch (Exception moveEx)
                 {
-                    // Locked because another KeyPulse instance has it loaded; the copy on disk is
-                    // then already the right one or will be replaced on the next launch.
                     LogDebug($"Could not replace {Path.GetFileName(target)}: {moveEx.Message}");
                     try { File.Delete(tempTarget); } catch { }
                 }
@@ -661,6 +1079,37 @@ class Program
         }
 
         LogDebug("ExtractNativeLibs finished");
+    }
+
+    /// <summary>ISSUE_11: "<length>|<sha256-hex>" sidecar that makes a repeat launch cheap.</summary>
+    private static void WriteStamp(string stampPath, long resourceLength, string hashHex)
+    {
+        try
+        {
+            File.WriteAllText(stampPath, resourceLength + "|" + hashHex);
+        }
+        catch (Exception ex)
+        {
+            LogDebug("Could not write the library stamp: " + ex.Message);
+        }
+    }
+
+    private static bool TryReadStamp(string stampPath, out long resourceLength, out string hashHex)
+    {
+        resourceLength = -1;
+        hashHex = string.Empty;
+        try
+        {
+            var parts = File.ReadAllText(stampPath).Trim().Split('|');
+            if (parts.Length != 2) return false;
+            if (!long.TryParse(parts[0], out resourceLength) || resourceLength <= 0) return false;
+            hashHex = parts[1];
+            return hashHex.Length == 64;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static byte[] ComputeHash(Stream stream)
@@ -697,10 +1146,17 @@ class Program
     {
         error = string.Empty;
 
-        // When the elevated logon task owns startup, toggle the task instead of the Run key so the
-        // two launchers can never both fire. ISSUE_6.
         var taskState = GetAdminTaskState();
-        if (taskState != AdminTaskState.NotPresent)
+        if (taskState == AdminTaskState.Unknown)
+        {
+            // ISSUE_9: if Windows would not tell us whether the logon task exists, switching
+            // startup on must NOT fall through to the registry - that wrote a second launcher
+            // next to the unqueryable task, and two KeyPulse copies started at the next login.
+            error = "Windows did not answer when KeyPulse asked about its own startup entry, so nothing was changed. Wait a moment and try again.";
+            return false;
+        }
+
+        if (taskState == AdminTaskState.Enabled || taskState == AdminTaskState.Disabled)
         {
             var verb = enable ? "/ENABLE" : "/DISABLE";
             var changed = RunSchtasks($"/Change /TN \"{AdminTaskName}\" {verb}", out var code, out var output);
@@ -718,9 +1174,25 @@ class Program
                 return false;
             }
 
-            ConfigStore.TryUpdate(c => c.LaunchOnBoot = enable, out _);
+            MirrorLaunchOnBoot(enable);
             return true;
         }
+
+        // taskState == NotPresent: the plain per-user registry launcher. Extracted so elevated
+        // helpers (ISSUE_3) can set it without ever touching the user's settings file.
+        if (!TrySetRegistryStartup(enable, out error)) return false;
+
+        MirrorLaunchOnBoot(enable);
+        return true;
+    }
+
+    /// <summary>
+    /// ISSUE_3: the registry Run-key launcher on its own, with no settings-file access. Safe for
+    /// elevated helpers that may be running as a different Windows account.
+    /// </summary>
+    public static bool TrySetRegistryStartup(bool enable, out string error)
+    {
+        error = string.Empty;
 
         try
         {
@@ -736,8 +1208,6 @@ class Program
             {
                 Directory.CreateDirectory(InstallDir);
 
-                // ISSUE_12: launch once and stand down. The old script polled for a minute and
-                // relaunched KeyPulse after the user had deliberately exited it.
                 var vbsCode = $@"On Error Resume Next
 Set WshShell = CreateObject(""WScript.Shell"")
 WshShell.Run """"""{ExePath}"""" --hidden"", 0, False";
@@ -762,13 +1232,25 @@ WshShell.Run """"""{ExePath}"""" --hidden"", 0, False";
                 }
             }
 
-            ConfigStore.TryUpdate(c => c.LaunchOnBoot = enable, out _);
             return true;
         }
         catch (Exception ex)
         {
             error = ex.Message;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// ISSUE_2: the LaunchOnBoot mirror is best-effort. ConfigStore.TryUpdate refuses to write while
+    /// the settings file is damaged, and that refusal must never undo a Windows-level change that
+    /// already succeeded.
+    /// </summary>
+    private static void MirrorLaunchOnBoot(bool enable)
+    {
+        if (!ConfigStore.TryUpdate(c => c.LaunchOnBoot = enable, out var mirrorError))
+        {
+            LogDebug("Could not mirror the startup change into the settings file: " + mirrorError);
         }
     }
 

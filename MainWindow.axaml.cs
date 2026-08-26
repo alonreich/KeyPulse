@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -22,7 +22,14 @@ namespace KeyPulse
 
         private const string AppName = "KeyPulse";
         private readonly string ConfigPath = ConfigStore.ConfigPath;
-        private readonly bool _startHidden;
+        private bool _startHidden;
+
+        /// <summary>
+        /// ISSUE_32: set the moment a real actor (tray icon click, second-launch signal,
+        /// Explorer's "Add to KeyPulse") asks for the shortcuts window. Only a Show() that
+        /// happens WITHOUT this flag may still be re-hidden as part of a --hidden startup.
+        /// </summary>
+        private bool _userAskedToBeShown;
 
         private string _searchText = string.Empty;
         private string _sortColumn = string.Empty;
@@ -57,6 +64,18 @@ namespace KeyPulse
         private TextBlock? _actionErrorMessageText;
         private TextBlock? _actionErrorRepeatText;
         private int _actionErrorRepeatCount;
+        private Avalonia.Threading.DispatcherTimer? _actionErrorCloseTimer;
+        private bool _actionErrorPointerInside;
+        private Action<int, bool, bool, bool, bool>? _rawKeyHandler;
+
+        /// <summary>
+        /// ISSUE_19: target staged from Explorer's "Add to KeyPulse" context menu. Everything is
+        /// filled in; the user only picks the keys and presses Add.
+        /// </summary>
+        private string? _stagedAddTarget;
+
+        /// <summary>ISSUE_4: serialises background reachability checks so they never pile up.</summary>
+        private readonly System.Threading.SemaphoreSlim _availabilityGate = new(1, 1);
 
         public MainWindow() : this(false)
         {
@@ -80,9 +99,6 @@ namespace KeyPulse
                 keyCombo.LostFocus += (s, e) => HotkeyManager.DisableCaptureHook();
             }
 
-            // ISSUE_1: the recording hook must never outlive KeyPulse being the active window.
-            // The hook itself also refuses to swallow keys unless we are foreground, so this is a
-            // second line of defence that also stops the hook from running at all in the background.
             this.Deactivated += (s, e) => HotkeyManager.DisableCaptureHook();
             this.Activated += (s, e) =>
             {
@@ -99,7 +115,7 @@ namespace KeyPulse
                 targetText.TextChanged += TargetText_TextChanged;
             }
 
-            HotkeyManager.OnRawKey += (vk, ctrl, alt, shift, win) =>
+            _rawKeyHandler = (vk, ctrl, alt, shift, win) =>
             {
                 Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                 {
@@ -113,8 +129,6 @@ namespace KeyPulse
 
                     bool isModifierOnly = (vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C || vk == 0xA0 || vk == 0xA1 || vk == 0xA2 || vk == 0xA3 || vk == 0xA4 || vk == 0xA5);
 
-                    // ISSUE_13: this used to hold its own private list of key names, which disagreed
-                    // with the one the parser uses. HotkeyManager owns the only table now.
                     if (!isModifierOnly) parts.Add(HotkeyManager.VirtualKeyToName((uint)vk));
 
                     var txt = string.Join("+", parts);
@@ -123,12 +137,19 @@ namespace KeyPulse
                     keyCombo.Text = txt;
                 });
             };
+            HotkeyManager.OnRawKey += _rawKeyHandler;
 
-            // ISSUE_10: surface typing runs so a long "Type text" action is visible and cancellable.
             InputSimulator.TypingStarted += OnTypingStarted;
             InputSimulator.TypingProgressChanged += OnTypingProgress;
             InputSimulator.TypingFinished += OnTypingFinished;
 
+            // ISSUE_10: say so plainly the FIRST time Windows cannot protect a target, instead of
+            // leaving the only trace in a log file while the blur keeps implying protection.
+            CryptoHelper.ProtectionFailed += OnTargetProtectionFailed;
+
+            // ISSUE_33: captured BEFORE LoadConfig - any later save writes config.json, so
+            // "did the settings file exist a moment ago" is the reliable first-run signal.
+            var firstRun = !File.Exists(ConfigPath);
             LoadConfig();
             ApplyShortcutColumnResources();
             RefreshVisibleHotkeys();
@@ -140,6 +161,35 @@ namespace KeyPulse
             }
             RefreshStatusSummary();
             StartRegistrationRetryTimer();
+
+            // ISSUE_33: a brand-new install has no launcher yet and a fresh (default-on)
+            // config. Create the per-user launcher so "starts with Windows" is genuinely
+            // checked by default on a clean machine. Only on the very first run, so an
+            // upgrade or a user's earlier "off" choice is never overridden. Best-effort
+            // and silent: failures only go to the debug log, and Settings always shows
+            // the real Windows state.
+            if (firstRun)
+            {
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        if (Program.QueryStartupState() != Program.StartupState.Off) return;
+                        if (Program.SetStartup(true, out var startupError))
+                        {
+                            Program.LogDebug("First run: enabled the default start-with-Windows launcher.");
+                        }
+                        else
+                        {
+                            Program.LogDebug("Could not enable default start-with-Windows: " + startupError);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.LogDebug("Default start-with-Windows check failed: " + ex.Message);
+                    }
+                });
+            }
         }
 
         private AppConfig _currentConfig = new AppConfig();
@@ -148,17 +198,85 @@ namespace KeyPulse
         {
             ReportStartupProblems();
 
-            if (_startHidden)
+            // ISSUE_19: pick up a target staged by a second launch's "Add to KeyPulse" request.
+            ConsumeStagedAdd();
+
+            // ISSUE_32: a --hidden start never calls Show(), so this event fires for the FIRST
+            // time exactly when the user opens the window - often hours or days after boot.
+            // The old unconditional `if (_startHidden) Hide();` turned that first open into a
+            // half-second flash: the window appeared, Opened ran, and hid it again. Only a
+            // Show() that no user action asked for may still be re-hidden; every real open
+            // goes through BringToFront(), which sets _userAskedToBeShown first.
+            if (_startHidden && !_userAskedToBeShown)
             {
+                Program.LogDebug("Main window shown during hidden startup with no user request; hiding again.");
                 App.HiddenWindow = this;
                 ShowInTaskbar = false;
                 Hide();
                 return;
             }
 
+            _startHidden = false;
+            Program.LogDebug("Main window opened.");
+
             this.Topmost = true;
             this.Activate();
             this.Topmost = false;
+
+            VerifyAdminModeIsRealAsync();
+        }
+
+        /// <summary>
+        /// ISSUE_32: the single sanctioned way to bring the shortcuts window forward. Setting
+        /// _userAskedToBeShown BEFORE Show() is what disarms the hidden-startup logic inside
+        /// MainWindow_Opened, so the first tray click after a --hidden boot opens the window
+        /// instead of flashing and hiding it. A maximized window is left maximized.
+        /// </summary>
+        public void BringToFront()
+        {
+            _userAskedToBeShown = true;
+            _startHidden = false;
+            ShowInTaskbar = true;
+            Show();
+            if (WindowState == Avalonia.Controls.WindowState.Minimized)
+            {
+                WindowState = Avalonia.Controls.WindowState.Normal;
+            }
+            this.Topmost = true;
+            Activate();
+            this.Topmost = false;
+            Program.LogDebug("Main window brought to front by a user request.");
+        }
+
+        /// <summary>
+        /// ISSUE_8: checks that Administrator mode actually took effect, and says so when it did not.
+        ///
+        /// The logon task is created with `/RL HIGHEST`, which means "the highest level this account
+        /// can reach" - on an account without administrator rights that is ordinary rights. Windows
+        /// still reports the task as created and enabled, so Settings said "starts with Windows using
+        /// its Administrator logon task" while typing into elevated windows kept failing with no
+        /// explanation. Runs off the UI thread because the first call may spawn schtasks.
+        /// </summary>
+        private async void VerifyAdminModeIsRealAsync()
+        {
+            try
+            {
+                var misleading = await System.Threading.Tasks.Task.Run(Program.IsAdminModeClaimedButNotEffective);
+                if (!misleading) return;
+
+                ShowActionMessage("KeyPulse Administrator mode",
+                    "Administrator mode is on, but it did not take effect",
+                    "Windows started KeyPulse without Administrator rights even though the Administrator "
+                    + "logon task is switched on. This normally means this Windows account cannot be "
+                    + "elevated, or company policy blocked it.\n\n"
+                    + "Everything else works normally. Typing and pasting into windows that are themselves "
+                    + "running as Administrator will keep failing until KeyPulse is started with those rights.",
+                    false);
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug("Could not verify Administrator mode: " + ex.Message);
+            }
         }
 
         /// <summary>
@@ -186,15 +304,32 @@ namespace KeyPulse
                 return;
             }
 
-            // ISSUE_3: shortcuts saved under a different Windows account cannot be decrypted here.
             var unreadable = Hotkeys.Count(h => h.TargetUnreadable);
             if (unreadable > 0)
             {
                 ShowActionMessage("KeyPulse settings problem",
                     $"{unreadable} shortcut{(unreadable == 1 ? "" : "s")} could not be read",
                     "Their targets were saved by a different Windows account, or the settings file was "
-                    + "edited outside KeyPulse. Nothing was deleted: select each affected row and enter "
-                    + "its folder, program, link or text again.", true);
+                    + "edited outside KeyPulse. Nothing was deleted: the original values are still stored "
+                    + "exactly as they were, and will come back on their own if the settings file returns "
+                    + "to the account that created them. To use them here instead, select each affected "
+                    + "row and enter its folder, program, link or text again.", true);
+            }
+
+            // ISSUE_10: be honest when Windows could not protect targets on this machine.
+            var unprotected = Hotkeys.Count(h => h.TargetProtectionFailed);
+            if (CryptoHelper.ProtectionUnavailable || unprotected > 0)
+            {
+                var subject = unprotected > 0
+                    ? $"{unprotected} shortcut{(unprotected == 1 ? " is" : "s are")} stored in readable text"
+                    : "Windows could not protect new targets";
+                ShowActionMessage("KeyPulse security notice",
+                    subject,
+                    "Windows refused to encrypt this data for your account (this happens with roaming "
+                    + "profiles, a damaged crypto store, or some managed machines). KeyPulse has kept "
+                    + "working, but anything you type into a target - especially with the Blur box "
+                    + "ticked - is stored UNENCRYPTED in the settings file, readable by anyone who can "
+                    + "open it. Affected rows are marked amber in the list.", true);
             }
 
             var broken = Hotkeys.Where(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Waiting")).ToList();
@@ -223,7 +358,7 @@ namespace KeyPulse
             _sortDescending = loaded.ShortcutSortDescending;
 
             Program.SoundEnabled = loaded.SoundEnabled;
-            InputSimulator.CharacterDelayMs = NormalizeTypingDelay(loaded.TypingDelayMs); // ISSUE_9
+            InputSimulator.CharacterDelayMs = NormalizeTypingDelay(loaded.TypingDelayMs);
             App.ApplyTheme(loaded.Theme);
 
             if (!double.IsNaN(loaded.MainWindowX) && !double.IsNaN(loaded.MainWindowY))
@@ -239,18 +374,32 @@ namespace KeyPulse
             }
             else
             {
+                // ISSUE_5: Avalonia measures this window in scaled units (DIPs), but Screen.Bounds is
+                // raw pixels. Dividing by screen.Scaling converts properly; the old raw ratio made a
+                // 4K@200% or 150% laptop open roughly twice as large as the display, with the Add and
+                // Settings buttons off-screen. The size is also clamped to the usable work area.
                 var screen = this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
                 if (screen != null)
                 {
-                    double ratioW = screen.Bounds.Width / 1920.0;
-                    double ratioH = screen.Bounds.Height / 1080.0;
-                    loaded.MainWindowWidth = 1640 * ratioW;
-                    loaded.MainWindowHeight = 975 * ratioH;
+                    var scale = screen.Scaling <= 0 ? 1.0 : screen.Scaling;
+                    var dipWidth = screen.WorkingArea.Width / scale;
+                    var dipHeight = screen.WorkingArea.Height / scale;
+                    loaded.MainWindowWidth = Math.Clamp(1640 * dipWidth / 1920.0, MinWidth, Math.Max(MinWidth, dipWidth));
+                    loaded.MainWindowHeight = Math.Clamp(975 * dipHeight / 1080.0, MinHeight, Math.Max(MinHeight, dipHeight));
                 }
                 WindowStartupLocation = WindowStartupLocation.CenterScreen;
             }
             if (loaded.MainWindowWidth > 0 && loaded.MainWindowHeight > 0)
             {
+                // ISSUE_5: a saved size from a different scaling setup must still fit the monitor
+                // the window actually lands on.
+                var fitScreen = this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
+                if (fitScreen != null)
+                {
+                    var scale = fitScreen.Scaling <= 0 ? 1.0 : fitScreen.Scaling;
+                    loaded.MainWindowWidth = Math.Clamp(loaded.MainWindowWidth, MinWidth, Math.Max(MinWidth, fitScreen.WorkingArea.Width / scale));
+                    loaded.MainWindowHeight = Math.Clamp(loaded.MainWindowHeight, MinHeight, Math.Max(MinHeight, fitScreen.WorkingArea.Height / scale));
+                }
                 Width = loaded.MainWindowWidth;
                 Height = loaded.MainWindowHeight;
             }
@@ -280,23 +429,20 @@ namespace KeyPulse
             return Math.Max(min, Math.Min(max, value));
         }
 
-        // ------------------------------------------------------------------
-        // ISSUE_23: one set of column bounds, used by the markup, the clamp and the splitters.
-        // They used to disagree: the code clamped the Shortcut column to 160-360 while the grid
-        // capped it at 250, so the saved width and the rendered width were never the same number.
-        // ------------------------------------------------------------------
         private const double StatusColumnMin = 110, StatusColumnMax = 260, StatusColumnDefault = 128;
         private const double KeyColumnMin = 130, KeyColumnMax = 300, KeyColumnDefault = 150;
         private const double ActionColumnMin = 120, ActionColumnMax = 280, ActionColumnDefault = 200;
         private const double TargetColumnMin = 180, TargetColumnMax = 1600, TargetColumnDefault = 468;
 
         /// <summary>
-        /// Fixed width of the Actions column: two 78px buttons, 6px apart, inside a cell with 8px
-        /// of padding each side. It is NOT user-resizable and NOT "Auto": the header and the rows
-        /// are two separate grids, so "Auto" sized the heading to the word "Actions" and the row to
-        /// its buttons, which is why the heading did not line up with anything.
+        /// Fixed width of the Actions column: ISSUE_6 added the On/Off toggle and ISSUE_15 made the
+        /// buttons readable at 11pt, so it is now 8px cell padding each side, a 48px toggle, a 78px
+        /// REMOVE, a 100px DUPLICATE and two 6px gaps = 252. It is NOT user-resizable and NOT "Auto":
+        /// the header and the rows are two separate grids, so "Auto" sized the heading to the word
+        /// "Actions" and the row to its buttons, which is why the heading did not line up with
+        /// anything.
         /// </summary>
-        private const double ActionsColumnWidth = 178;
+        private const double ActionsColumnWidth = 252;
 
         private void ApplyShortcutColumnResources()
         {
@@ -515,8 +661,6 @@ namespace KeyPulse
                 _currentConfig.ShortcutSortColumn = _sortColumn;
                 _currentConfig.ShortcutSortDescending = _sortDescending;
 
-                // ISSUE_4: atomic write, and a hard refusal to save when the existing file could not
-                // be read - the old code silently replaced a damaged config with an empty one.
                 if (!ConfigStore.Save(_currentConfig, out var saveError) && !string.IsNullOrEmpty(saveError))
                 {
                     Program.LogCrash("Could not save configuration: " + saveError);
@@ -572,9 +716,10 @@ namespace KeyPulse
                 KeyCombination = source.KeyCombination,
                 Action = source.Action,
                 Target = source.Target,
-                // Was silently dropped, so a rolled-back restore un-hid every hidden target.
                 IsTargetObfuscated = source.IsTargetObfuscated,
-                TargetUnreadable = source.TargetUnreadable
+                TargetUnreadable = source.TargetUnreadable,
+                UnreadableTargetCipher = source.UnreadableTargetCipher,
+                TargetProtectionFailed = source.TargetProtectionFailed
             };
         }
 
@@ -628,8 +773,6 @@ namespace KeyPulse
                 }
                 else if (h.TargetUnreadable)
                 {
-                    // ISSUE_3: the stored target could not be decrypted on this Windows account.
-                    // Say so plainly instead of registering a shortcut that opens cipher text.
                     blockingStatus = "Inactive: Could not be read";
                     blockingHint = "This shortcut was saved by a different Windows account, or the settings file was edited. Select this row and enter the target again.";
                 }
@@ -637,10 +780,6 @@ namespace KeyPulse
                 {
                     blockingStatus = "Inactive: " + hotkeyError;
                 }
-                // ISSUE_8: only the *shape* of the target can stop a shortcut from being registered.
-                // Whether the folder, drive or program is reachable is decided when it actually fires,
-                // so a VPN share or USB stick that is offline at logon no longer kills the shortcut
-                // permanently.
                 else if (!ValidateTargetShape(h.Action, h.Target, out var targetError))
                 {
                     blockingStatus = "Inactive: " + targetError;
@@ -663,8 +802,6 @@ namespace KeyPulse
 
                 var normalizedCombo = NormalizeComboKey(h.KeyCombination);
 
-                // Already registered for exactly this combination: leave the Win32 registration
-                // alone and only refresh whether its target happens to be reachable right now.
                 if (h.RegisteredHotkeyId != 0
                     && string.Equals(h.RegisteredCombo, normalizedCombo, StringComparison.OrdinalIgnoreCase))
                 {
@@ -704,9 +841,13 @@ namespace KeyPulse
         }
 
         /// <summary>Active vs. Waiting for a registered row, without touching the registration.</summary>
-        private static void RefreshLiveStatus(HotkeyEntry entry)
+        private void RefreshLiveStatus(HotkeyEntry entry)
         {
-            if (IsTargetAvailableNow(entry.Action, entry.Target))
+            // ISSUE_4: this runs on the UI thread at startup, on every add/edit/toggle/remove and
+            // every 30 seconds. It answers from the cached background result and never touches a
+            // disk or the network - an offline network share used to block Windows for tens of
+            // seconds per row right here, freezing the window ("Not Responding") forever.
+            if (entry.TargetReachable == true)
             {
                 entry.RegistrationStatus = "Active";
                 entry.StatusHint = string.Empty;
@@ -714,7 +855,75 @@ namespace KeyPulse
             else
             {
                 entry.RegistrationStatus = "Waiting";
-                entry.StatusHint = "The keys are reserved and working. The folder or program is not reachable right now, so KeyPulse will tell you if you press it before it comes back.";
+                entry.StatusHint = entry.TargetReachable == false
+                    ? "The keys are reserved and working. The folder or program is not reachable right now, so KeyPulse will tell you if you press it before it comes back."
+                    : "Checking whether the folder or program is reachable...";
+            }
+
+            QueueAvailabilityCheck(entry);
+        }
+
+        /// <summary>
+        /// ISSUE_4: the real reachability check, off the UI thread. Results land back on the UI
+        /// thread and only ever update status - a row flips from "Waiting" to "Active" on its own
+        /// once the drive or share comes back.
+        /// </summary>
+        private void QueueAvailabilityCheck(HotkeyEntry entry)
+        {
+            var action = entry.Action;
+            if (action != ActionType.OpenFolder && action != ActionType.LaunchProgram)
+            {
+                entry.TargetReachable = true;
+                return;
+            }
+
+            var target = entry.Target;
+            if (string.IsNullOrEmpty(target)) return;
+
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                await _availabilityGate.WaitAsync();
+                try
+                {
+                    var reachable = IsTargetAvailableNow(action, target);
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() => ApplyAvailabilityResult(entry, reachable));
+                }
+                finally
+                {
+                    _availabilityGate.Release();
+                }
+            });
+        }
+
+        private void ApplyAvailabilityResult(HotkeyEntry entry, bool reachable)
+        {
+            try
+            {
+                entry.TargetReachable = reachable;
+
+                // The background answer only paints a status for rows that are still registered;
+                // ApplyHotkeys owns the status of everything else.
+                if (!entry.IsEnabled || entry.RegisteredHotkeyId == 0) return;
+
+                if (reachable)
+                {
+                    if (!IsStatus(entry, "Active"))
+                    {
+                        entry.RegistrationStatus = "Active";
+                        entry.StatusHint = string.Empty;
+                        RefreshStatusSummary();
+                    }
+                }
+                else if (!IsStatus(entry, "Waiting"))
+                {
+                    entry.RegistrationStatus = "Waiting";
+                    entry.StatusHint = "The keys are reserved and working. The folder or program is not reachable right now, so KeyPulse will tell you if you press it before it comes back.";
+                    RefreshStatusSummary();
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug("Availability result could not be applied: " + ex.Message);
             }
         }
 
@@ -761,8 +970,6 @@ namespace KeyPulse
 
             var activeBefore = Hotkeys.Count(h => IsStatus(h, "Active"));
 
-            // Safe to call now: ISSUE_5 made this incremental, so the shortcuts that already work
-            // are not released and re-taken every thirty seconds just to retry the broken ones.
             ApplyHotkeys();
 
             var activeAfter = Hotkeys.Count(h => IsStatus(h, "Active"));
@@ -795,7 +1002,7 @@ namespace KeyPulse
 
             if (broken > 0)
             {
-                statusText.Text = $"KeyPulse running. {active} working, {broken} not working, {disabled} off. Click a red row to see why and how to fix it.";
+                statusText.Text = $"KeyPulse running. {active} working, {broken} not working, {disabled} off. The Status column says why each one is off.";
                 statusText.Foreground = AppBrush("AppDangerBrush");
             }
             else if (waiting > 0)
@@ -805,8 +1012,6 @@ namespace KeyPulse
             }
             else
             {
-                // ISSUE_20: the hint only means something when it is actionable. Telling a user who
-                // already ran KeyPulse as administrator to run it as administrator is just noise.
                 statusText.Text = Program.IsElevated
                     ? $"KeyPulse running as administrator. {active} working, {disabled} off."
                     : $"KeyPulse running. {active} working, {disabled} off. Run as administrator to trigger shortcuts inside elevated apps.";
@@ -821,9 +1026,6 @@ namespace KeyPulse
             }
         }
 
-        // ------------------------------------------------------------------
-        // ISSUE_17: search, sort and the visible projection of the list.
-        // ------------------------------------------------------------------
 
         public void SearchBox_TextChanged(object? sender, TextChangedEventArgs e)
         {
@@ -839,7 +1041,7 @@ namespace KeyPulse
             {
                 if (_sortDescending)
                 {
-                    _sortColumn = string.Empty;   // third click returns to the user's own order
+                    _sortColumn = string.Empty;
                     _sortDescending = false;
                 }
                 else
@@ -880,8 +1082,6 @@ namespace KeyPulse
         {
             if (string.IsNullOrWhiteSpace(search)) return true;
 
-            // ISSUE_2: a hidden target must not be searchable. Typing the password into the search
-            // box and watching which row survives was a complete bypass of the blur.
             return entry.KeyCombination.Contains(search, StringComparison.OrdinalIgnoreCase)
                 || entry.ActionDisplay.Contains(search, StringComparison.OrdinalIgnoreCase)
                 || (!entry.IsTargetObfuscated && entry.Target.Contains(search, StringComparison.OrdinalIgnoreCase))
@@ -1126,7 +1326,7 @@ namespace KeyPulse
 
         private void UpdateActionUi()
         {
-            UpdateExpandButtonState(); // ISSUE_17
+            UpdateExpandButtonState();
             var actionType = GetSelectedAction();
             var targetLabel = this.FindControl<TextBlock>("TargetLabel");
             var targetHint = this.FindControl<TextBlock>("TargetHintText");
@@ -1137,8 +1337,6 @@ namespace KeyPulse
                 var isTextAction = actionType == ActionType.TypeText || actionType == ActionType.InsertText;
                 targetText.AcceptsReturn = isTextAction;
                 targetText.TextWrapping = isTextAction ? Avalonia.Media.TextWrapping.Wrap : Avalonia.Media.TextWrapping.NoWrap;
-                // ISSUE_17: keep these in step with MainWindow.axaml. Layout measures the height;
-                // nothing computes a pixel value from a character count any more.
                 targetText.MinHeight = isTextAction ? 92 : 34;
                 targetText.MaxHeight = isTextAction ? 180 : 34;
             }
@@ -1163,7 +1361,7 @@ namespace KeyPulse
                     ActionType.OpenFolder => "Any folder on this PC, a USB drive, or a network share. If it is offline when Windows starts, the shortcut still works once it comes back.",
                     ActionType.LaunchProgram => "Pick an app, or type a command with its arguments.",
                     ActionType.BrowseChrome => "Type a website address. The https:// part is added for you.",
-                    ActionType.TypeText => "Types your text one key at a time, like a person would. Slower, but works in old console windows and anywhere that ignores paste. Press Esc to stop a long one.",
+                    ActionType.TypeText => "Types your text one key at a time, like a person would. Slower, but works in old console windows and anywhere that ignores paste. Long runs show a Stop button.",
                     ActionType.InsertText => "Pastes your text instantly with no formatting, then puts your previous clipboard back. Use this unless the target app refuses paste.",
                     _ => string.Empty
                 };
@@ -1680,11 +1878,11 @@ namespace KeyPulse
 
             if (_currentConfig.UseGoogleChromeForUrls && TryFindGoogleChrome(out var chromePath))
             {
-                Process.Start(new ProcessStartInfo(chromePath, $"\"{normalizedUrl}\"") { UseShellExecute = true });
+                using var chrome = Process.Start(new ProcessStartInfo(chromePath, $"\"{normalizedUrl}\"") { UseShellExecute = true });
                 return;
             }
 
-            Process.Start(new ProcessStartInfo(normalizedUrl) { UseShellExecute = true });
+            using var browser = Process.Start(new ProcessStartInfo(normalizedUrl) { UseShellExecute = true });
         }
 
         private static bool TryFindGoogleChrome(out string chromePath)
@@ -1774,9 +1972,6 @@ namespace KeyPulse
                 {
                     case ActionType.OpenFolder:
                         {
-                            // ISSUE_8: availability is checked here, when it matters, with a message
-                            // the user can act on - not at registration time where it used to kill
-                            // the shortcut for the rest of the session.
                             var folder = (entry.Target ?? string.Empty).Trim().Trim('"');
                             if (!SafeDirectoryExists(folder))
                             {
@@ -1784,7 +1979,7 @@ namespace KeyPulse
                                 throw new InvalidOperationException(
                                     $"The folder for {entry.KeyCombination} is not available right now:\n{folder}\n\nIf it is on a USB drive, a network share or a VPN, connect it and press the shortcut again.");
                             }
-                            Process.Start("explorer.exe", $"\"{folder}\"");
+                        using var opened = Process.Start("explorer.exe", $"\"{folder}\"");
                             MarkEntryActive(entry);
                             break;
                         }
@@ -1795,32 +1990,55 @@ namespace KeyPulse
                             throw new InvalidOperationException(
                                 $"The program for {entry.KeyCombination} could not be found right now ({launchError}):\n{entry.Target}");
                         }
-                        Process.Start(new ProcessStartInfo(fileName, arguments) { UseShellExecute = true });
-                        MarkEntryActive(entry);
+                        {
+                            using var launched = Process.Start(new ProcessStartInfo(fileName, arguments) { UseShellExecute = true });
+                            MarkEntryActive(entry);
+                        }
                         break;
                     case ActionType.BrowseChrome:
                         LaunchUrl(entry.Target);
                         break;
                     case ActionType.TypeText:
-                        // ISSUE_10: a second press while a run is in flight is ignored rather than
-                        // producing two interleaved streams of characters.
                         if (InputSimulator.IsTyping)
                         {
-                            Program.LogDebug($"Ignored {entry.KeyCombination}: typing already in progress.");
+                            // ISSUE_17: a busy press is acknowledged out loud, never swallowed.
+                            Program.LogDebug($"Refused {entry.KeyCombination}: typing already in progress.");
+                            Program.PlaySound("error");
+                            ShowActionMessage("KeyPulse is busy",
+                                "KeyPulse is still typing the previous snippet",
+                                $"Your press of {entry.KeyCombination} was received, but it was not run because the earlier text has not finished yet. Press it again once this notice is gone.", false);
                             break;
                         }
-                        if (!InputSimulator.TypeText(entry.Target, out var typeError))
+                        if (!InputSimulator.TypeText(entry.Target, out var typeError, out var typeBusy) )
                         {
-                            throw new InvalidOperationException(typeError);
+                            if (typeBusy)
+                            {
+                                Program.PlaySound("error");
+                                ShowActionMessage("KeyPulse is busy",
+                                    "KeyPulse is still typing the previous snippet",
+                                    $"Your press of {entry.KeyCombination} was received, but it was not run because the earlier text has not finished yet. Press it again once this notice is gone.", false);
+                            }
+                            else
+                            {
+                                throw new InvalidOperationException(typeError);
+                            }
                         }
                         break;
                     case ActionType.InsertText:
-                        if (!InputSimulator.InsertText(entry.Target, out var insertError, out var insertWarning))
+                        if (!InputSimulator.InsertText(entry.Target, out var insertError, out var insertWarning, out var insertBusy))
                         {
-                            throw new InvalidOperationException(insertError);
+                            if (insertBusy)
+                            {
+                                Program.PlaySound("error");
+                                ShowActionMessage("KeyPulse is busy",
+                                    "KeyPulse is still typing or pasting the previous snippet",
+                                    $"Your press of {entry.KeyCombination} was received, but it was not run because the earlier text has not finished yet. Press it again once this notice is gone.", false);
+                            }
+                            else
+                            {
+                                throw new InvalidOperationException(insertError);
+                            }
                         }
-                        // ISSUE_3: say so when the previous clipboard could not be handed back,
-                        // instead of letting the user discover it at their next Ctrl+V.
                         if (!string.IsNullOrEmpty(insertWarning))
                         {
                             ShowActionMessage("KeyPulse clipboard notice", "Your previous clipboard could not be restored", insertWarning, false);
@@ -1859,9 +2077,6 @@ namespace KeyPulse
             });
         }
 
-        // ------------------------------------------------------------------
-        // ISSUE_10: visible, cancellable progress for long typing runs.
-        // ------------------------------------------------------------------
 
         private const int TypingProgressThreshold = 120;
 
@@ -1887,7 +2102,7 @@ namespace KeyPulse
                     CloseTypingProgressWindow();
 
                     var window = CreateAppDialog("KeyPulse is typing", 360, 150, 320, 140, WindowStartupLocation.CenterScreen, false, true);
-                    window.ShowActivated = false;   // never steal focus from the app being typed into
+                    window.ShowActivated = false;
                     window.CanResize = false;
 
                     var panel = CreateDialogPanel(8);
@@ -1900,9 +2115,10 @@ namespace KeyPulse
 
                     var hint = new TextBlock
                     {
-                        Text = "Press Esc at any time to stop.",
+                        Text = "Click Stop to cancel. Escape also cancels while this window is the one you are focused on.",
                         Classes = { "Muted" },
-                        FontSize = 11
+                        FontSize = 11,
+                        TextWrapping = Avalonia.Media.TextWrapping.Wrap
                     };
 
                     var cancelButton = new Button
@@ -1913,6 +2129,19 @@ namespace KeyPulse
                         MinWidth = 110
                     };
                     cancelButton.Click += (s, e) => InputSimulator.CancelTyping();
+
+                    // ISSUE_18: Escape cancels ONLY from this window, when it is focused. The old
+                    // global Escape watch fired on any Escape press anywhere on the computer -
+                    // dismissing an autocomplete, closing a tooltip - and silently truncated the
+                    // snippet halfway through.
+                    window.KeyDown += (s, e) =>
+                    {
+                        if (e.Key == Avalonia.Input.Key.Escape)
+                        {
+                            InputSimulator.CancelTyping();
+                            e.Handled = true;
+                        }
+                    };
 
                     panel.Children.Add(_typingProgressText);
                     panel.Children.Add(_typingProgressBar);
@@ -1934,7 +2163,6 @@ namespace KeyPulse
         {
             if (!ShouldShowTypingProgress(total)) return;
 
-            // Do not flood the dispatcher with one message per keystroke on a long run.
             if (done != total && done % 10 != 0) return;
 
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
@@ -1944,12 +2172,19 @@ namespace KeyPulse
             });
         }
 
-        private void OnTypingFinished(bool cancelled)
+        private void OnTypingFinished(bool cancelled, int sent, int total)
         {
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
                 CloseTypingProgressWindow();
-                if (cancelled) Program.PlaySound("close");
+                if (!cancelled) return;
+
+                // ISSUE_18: tell the user exactly how much landed, so a half-typed signature can be
+                // cleaned up instead of discovered later.
+                Program.PlaySound("close");
+                ShowActionMessage("KeyPulse typing stopped",
+                    "Typing was stopped part-way through",
+                    $"{sent} of {total} characters were typed. The remaining text was NOT sent, so you may want to finish or delete what landed in the document.", false);
             });
         }
 
@@ -1978,17 +2213,12 @@ namespace KeyPulse
                         }
                         if (_actionErrorMessageText != null) _actionErrorMessageText.Text = message;
                         if (_actionErrorRepeatText != null) _actionErrorRepeatText.Text = $"Repeated {_actionErrorRepeatCount} times while this notice was open.";
-                        // ISSUE_10: deliberately NOT Activate(). Repeating the notice must not rip
-                        // the keyboard away from whatever the user is doing.
+                        RestartActionNoticeTimer();
                         return;
                     }
 
                     _actionErrorRepeatCount = 1;
 
-                    // ISSUE_10: this window used to open centre-screen, on top, WITH keyboard focus.
-                    // A shortcut that failed while the user was mid-sentence in another app swallowed
-                    // the next keystrokes into a dialog. It now opens quietly in the corner and never
-                    // takes focus - exactly as the typing-progress window already does.
                     var errWin = CreateAppDialog(windowTitle, 460, 250, 400, 200, WindowStartupLocation.Manual, true, true);
                     errWin.ShowActivated = false;
                     PositionNoticeBottomRight(errWin, 460, 250);
@@ -2017,6 +2247,13 @@ namespace KeyPulse
                     closeButton.Click += (s, e) => errWin.Close();
                     sp.Children.Add(closeButton);
 
+                    // ISSUE_16: behave like a Windows toast - go away on its own. The old notice was
+                    // Topmost with no auto-dismiss, so it sat over every other application until the
+                    // user hunted it down. Hovering pauses the countdown; a repeat restarts it. The
+                    // tray tooltip still carries the "something is not working" signal afterwards.
+                    errWin.PointerEntered += (s, e) => _actionErrorPointerInside = true;
+                    errWin.PointerExited += (s, e) => _actionErrorPointerInside = false;
+
                     errWin.Content = new ScrollViewer
                     {
                         Content = sp,
@@ -2032,16 +2269,45 @@ namespace KeyPulse
                             _actionErrorRepeatText = null;
                             _actionErrorRepeatCount = 0;
                         }
+                        StopActionNoticeTimer();
                     };
 
                     _actionErrorWindow = errWin;
                     errWin.Show();
+                    RestartActionNoticeTimer();
                 }
                 catch (Exception ex)
                 {
                     Program.LogCrash($"Failed to show shortcut action message: {ex}");
                 }
             });
+        }
+
+        private void RestartActionNoticeTimer()
+        {
+            _actionErrorCloseTimer?.Stop();
+            _actionErrorCloseTimer = new Avalonia.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(10)
+            };
+            _actionErrorCloseTimer.Tick += (s, e) =>
+            {
+                if (_actionErrorPointerInside)
+                {
+                    // Still reading it - give the user another moment instead of yanking it away.
+                    return;
+                }
+                _actionErrorCloseTimer?.Stop();
+                try { _actionErrorWindow?.Close(); } catch { }
+            };
+            _actionErrorCloseTimer.Start();
+        }
+
+        private void StopActionNoticeTimer()
+        {
+            _actionErrorCloseTimer?.Stop();
+            _actionErrorCloseTimer = null;
+            _actionErrorPointerInside = false;
         }
 
         /// <summary>Drops a non-activating notice into the corner of the working area.</summary>
@@ -2203,7 +2469,12 @@ namespace KeyPulse
 
             var actionType = GetSelectedAction();
             var target = this.FindControl<TextBox>("TargetText")?.Text;
-            if (!ValidateTarget(actionType, target, out _, out var targetError, out var targetWarning))
+
+            // ISSUE_4: live validation is SHAPE-only. The full check resolves programs and probes
+            // folders, which can block for tens of seconds on an offline network share - running it
+            // on the UI thread on every keystroke froze the whole window. The full, off-thread
+            // check runs when Add/Save is pressed.
+            if (!ValidateTargetShape(actionType, target, out var targetError))
             {
                 SetFieldError("TargetText", targetError);
                 SetFieldWarning("TargetText", null);
@@ -2211,7 +2482,7 @@ namespace KeyPulse
             else
             {
                 SetFieldError("TargetText", null);
-                SetFieldWarning("TargetText", targetWarning);
+                SetFieldWarning("TargetText", null);
             }
         }
 
@@ -2244,7 +2515,13 @@ namespace KeyPulse
             var newAction = (ActionType)actionCombo.SelectedIndex;
             var rawTarget = this.FindControl<TextBox>("TargetText")?.Text ?? string.Empty;
 
-            if (!ValidateTarget(newAction, rawTarget, out var normalizedTarget, out var targetError, out var targetWarning))
+            // ISSUE_4: the full check (program resolution, folder probing) runs off the UI thread.
+            var normalizedTarget = string.Empty;
+            string targetError = string.Empty, targetWarning = string.Empty;
+            var targetValid = await System.Threading.Tasks.Task.Run(() =>
+                ValidateTarget(newAction, rawTarget, out normalizedTarget, out targetError, out targetWarning));
+
+            if (!targetValid)
             {
                 SetFieldError("TargetText", targetError);
                 SetFieldWarning("TargetText", null);
@@ -2257,6 +2534,13 @@ namespace KeyPulse
             _editingEntry.KeyCombination = keyText;
             _editingEntry.Action = newAction;
             _editingEntry.Target = normalizedTarget;
+            // ISSUE_1: a freshly typed target replaces whatever was stored - including an
+            // undecryptable original that must now stop being written back to disk.
+            _editingEntry.TargetUnreadable = false;
+            _editingEntry.UnreadableTargetCipher = string.Empty;
+            // ISSUE_10: give the new value a fresh chance at protection instead of pinning it to
+            // plain text forever.
+            _editingEntry.TargetProtectionFailed = false;
             _editingEntry.IsTargetObfuscated = this.FindControl<CheckBox>("ObfuscateCheck")?.IsChecked ?? false;
 
             ApplyHotkeys();
@@ -2361,7 +2645,15 @@ namespace KeyPulse
             }
 
             var actionType = (ActionType)actionCombo.SelectedIndex;
-            if (!ValidateTarget(actionType, target, out var normalizedTarget, out var targetError, out var targetWarning))
+
+            // ISSUE_4: the full target check (program resolution, folder probing) runs off the UI
+            // thread so an unreachable network location can never freeze the window on Add.
+            var normalizedTarget = string.Empty;
+            string targetError = string.Empty, targetWarning = string.Empty;
+            var targetValid = await System.Threading.Tasks.Task.Run(() =>
+                ValidateTarget(actionType, target, out normalizedTarget, out targetError, out targetWarning));
+
+            if (!targetValid)
             {
                 SetFieldError("TargetText", targetError);
                 Program.PlaySound("error");
@@ -2381,8 +2673,6 @@ namespace KeyPulse
             Hotkeys.Add(entry);
             ApplyHotkeys();
 
-            // "Waiting" means the keys were reserved successfully but the folder or program is offline
-            // at this moment; that is a perfectly valid shortcut to keep. ISSUE_8.
             if (!IsStatus(entry, "Active") && !IsStatus(entry, "Waiting"))
             {
                 var reason = string.IsNullOrWhiteSpace(entry.StatusHint)
@@ -2404,6 +2694,8 @@ namespace KeyPulse
             SetFieldWarning("TargetText", targetWarning);
             _creatingDuplicate = false;
             _duplicateSourceCombo = null;
+            _stagedAddTarget = null;
+            UpdateEditorModeText();
             SelectHotkeyEntry(entry);
         }
 
@@ -2423,8 +2715,6 @@ namespace KeyPulse
 
         private void SelectHotkeyEntry(HotkeyEntry entry)
         {
-            // A shortcut that the current search filters out cannot be selected, so drop the filter
-            // rather than silently doing nothing. ISSUE_17.
             if (!VisibleHotkeys.Contains(entry))
             {
                 if (this.FindControl<TextBox>("SearchBox") is TextBox searchBox) searchBox.Text = string.Empty;
@@ -2478,8 +2768,6 @@ namespace KeyPulse
             UpdateActionUi();
             UpdateEditorModeText();
 
-            // Must come last: the original code set the message and then immediately wiped it with a
-            // trailing ClearFieldErrors(), so a user selecting a broken row was told nothing.
             ShowEntryStatusInEditor(entry);
         }
 
@@ -2489,8 +2777,6 @@ namespace KeyPulse
 
             if (entry.RegistrationStatus.StartsWith("Inactive:", StringComparison.OrdinalIgnoreCase))
             {
-                // ISSUE_20: show the actionable hint (including a free combination to try) rather
-                // than the bare status word.
                 SetFieldError("KeyCombo", string.IsNullOrWhiteSpace(entry.StatusHint)
                     ? entry.RegistrationStatus.Substring("Inactive:".Length).Trim()
                     : entry.StatusHint);
@@ -2504,6 +2790,14 @@ namespace KeyPulse
         private void UpdateEditorModeText()
         {
             if (this.FindControl<TextBlock>("EditorModeText") is not TextBlock editText) return;
+
+            // ISSUE_19: "Add to KeyPulse" from Explorer staged everything except the keys.
+            if (_stagedAddTarget != null && _editingEntry == null)
+            {
+                editText.Text = "Adding from Explorer: the action and target are filled in. Press the keys you want in the Shortcut box, then press Add.";
+                editText.IsVisible = true;
+                return;
+            }
 
             if (_creatingDuplicate)
             {
@@ -2527,6 +2821,7 @@ namespace KeyPulse
 
         public void CancelEdit_Click(object? sender, RoutedEventArgs e)
         {
+            _stagedAddTarget = null;
             ResetEditor();
         }
 
@@ -2604,7 +2899,7 @@ namespace KeyPulse
             {
                 if (!await ConfirmRemoveAsync(entry)) return;
                 if (ReferenceEquals(_editingEntry, entry) || (_creatingDuplicate && entry.IsEditing)) ResetEditor();
-                ReleaseRegistration(entry); // a removed row must give its keys back to Windows
+                ReleaseRegistration(entry);
                 Hotkeys.Remove(entry);
                 ApplyHotkeys();
                 RefreshVisibleHotkeys();
@@ -2719,6 +3014,23 @@ namespace KeyPulse
 
         public void KeyCombo_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
         {
+            // ISSUE_8: this box used to swallow every key, so Tab was recorded as the literal word
+            // "Tab" and a keyboard-only user could never leave it. Tab now moves focus on like it
+            // does everywhere else in Windows, and Escape/Delete/Backspace clear the box.
+            if (e.Key == Avalonia.Input.Key.Tab)
+            {
+                e.Handled = false;
+                return;
+            }
+
+            if (e.Key == Avalonia.Input.Key.Escape || e.Key == Avalonia.Input.Key.Delete || e.Key == Avalonia.Input.Key.Back)
+            {
+                if (sender is TextBox clearBox) clearBox.Text = string.Empty;
+                SetFieldError("KeyCombo", null);
+                e.Handled = true;
+                return;
+            }
+
             e.Handled = true;
 
             var currentVk = e.Key switch
@@ -2748,11 +3060,6 @@ namespace KeyPulse
 
             if (!isModifierOnly)
             {
-                // ISSUE_13: this used to write Avalonia's own Key enum name straight into the box
-                // ("Add", "Oem3", "OemBackslash"), which the parser then mis-mapped or rejected.
-                // "Add" is the keypad's plus key, but it parsed to 0xBB - the "=" key next to
-                // Backspace - so the shortcut the user tested was not the one that got registered.
-                // Everything now goes through HotkeyManager's single table.
                 var vk = MapAvaloniaKeyToVirtualKey(e.Key);
                 if (vk == 0)
                 {
@@ -2777,7 +3084,6 @@ namespace KeyPulse
         /// </summary>
         private static uint MapAvaloniaKeyToVirtualKey(Avalonia.Input.Key key)
         {
-            // Letters and the number row map straight onto their ASCII codes.
             if (key >= Avalonia.Input.Key.A && key <= Avalonia.Input.Key.Z)
             {
                 return (uint)('A' + (key - Avalonia.Input.Key.A));
@@ -2822,7 +3128,6 @@ namespace KeyPulse
                 case Avalonia.Input.Key.Pause: return 0x13;
                 case Avalonia.Input.Key.Apps: return 0x5D;
 
-                // The keypad. Distinct physical keys from the punctuation row - the whole point.
                 case Avalonia.Input.Key.Multiply: return 0x6A;
                 case Avalonia.Input.Key.Add: return 0x6B;
                 case Avalonia.Input.Key.Separator: return 0x6C;
@@ -2866,20 +3171,22 @@ namespace KeyPulse
 
         public void Settings_Click(object? sender, RoutedEventArgs e)
         {
-            // ISSUE_19: there is no "open.wav" embedded in the assembly, so the old call was silent.
             Program.PlaySound("click");
 
             double settingsW = _currentConfig.SettingsWindowWidth;
             double settingsH = _currentConfig.SettingsWindowHeight;
             if (double.IsNaN(_currentConfig.SettingsWindowX))
             {
-                var screen = this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
+                // ISSUE_5: scale-aware first open, clamped to the usable work area, exactly like the
+                // main window. The old raw-pixel ratio made this window ~2x too big at 150-200% DPI.
+                var screen = this.Screens.ScreenFromWindow(this) ?? this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
                 if (screen != null)
                 {
-                    double ratioW = screen.Bounds.Width / 1920.0;
-                    double ratioH = screen.Bounds.Height / 1080.0;
-                    settingsW = 580 * ratioW;
-                    settingsH = 750 * ratioH;
+                    var scale = screen.Scaling <= 0 ? 1.0 : screen.Scaling;
+                    var dipWidth = screen.WorkingArea.Width / scale;
+                    var dipHeight = screen.WorkingArea.Height / scale;
+                    settingsW = Math.Clamp(580 * dipWidth / 1920.0, 440, Math.Max(440, dipWidth));
+                    settingsH = Math.Clamp(750 * dipHeight / 1080.0, 400, Math.Max(400, dipHeight));
                 }
             }
             var w = CreateAppDialog("Settings", settingsW, settingsH, 440, 400, WindowStartupLocation.CenterOwner);
@@ -2902,11 +3209,6 @@ namespace KeyPulse
             panel.Children.Add(new TextBlock { Text = "Settings", Classes = { "SectionTitle" } });
             panel.Children.Add(new TextBlock { Text = "Startup", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 8, 0, 0) });
 
-            // ISSUE_12: this window used to ask Windows about the scheduled task TWICE before it
-            // could even be drawn, and two to four more times per toggle - each one launching
-            // schtasks.exe, all of it on the UI thread. Settings hung, unpaintable, every time.
-            // The state is fetched in the background and the box fills itself in when the answer
-            // arrives; Program caches the answer so this normally costs nothing at all.
             var chk = new CheckBox { Content = "Start KeyPulse when Windows starts", IsEnabled = false, TabIndex = 0, IsTabStop = true };
             var startupStatus = new TextBlock
             {
@@ -2930,7 +3232,6 @@ namespace KeyPulse
 
                 if (ok)
                 {
-                    // Keep the in-memory config in step so a later SaveConfig cannot undo it. ISSUE_6.
                     _currentConfig.LaunchOnBoot = requestedState;
                     SaveConfig();
 
@@ -2961,7 +3262,6 @@ namespace KeyPulse
             };
             panel.Children.Add(chromeChk);
 
-            // ISSUE_21: the app used to be pinned to a black window regardless of the Windows setting.
             panel.Children.Add(new TextBlock { Text = "Appearance", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 12, 0, 0) });
             var themeCombo = new ComboBox
             {
@@ -2989,9 +3289,6 @@ namespace KeyPulse
             };
             panel.Children.Add(themeCombo);
 
-            // ------------------------------------------------------------------
-            // ISSUE_9: typing speed is a setting, not a hard-coded 12 ms per character.
-            // ------------------------------------------------------------------
             panel.Children.Add(new TextBlock { Text = "Typing speed", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 12, 0, 0) });
             var speedCombo = new ComboBox
             {
@@ -3032,7 +3329,6 @@ namespace KeyPulse
             panel.Children.Add(speedCombo);
             panel.Children.Add(speedHint);
 
-            // ISSUE_19: sounds now actually play, so they need an off switch.
             panel.Children.Add(new TextBlock { Text = "Sound", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 12, 0, 0) });
             var soundChk = new CheckBox { Content = "Play a sound when adding or removing shortcuts", IsChecked = _currentConfig.SoundEnabled, TabIndex = 4, IsTabStop = true };
             soundChk.IsCheckedChanged += (s, ev) =>
@@ -3056,9 +3352,6 @@ namespace KeyPulse
             var statusTxt = new TextBlock { Margin = new Avalonia.Thickness(0,10,0,0), Foreground = AppBrush("AppWarningBrush"), TextWrapping = Avalonia.Media.TextWrapping.Wrap, Classes = { "Muted" } };
             panel.Children.Add(statusTxt);
 
-            // ------------------------------------------------------------------
-            // ISSUE_15: say which build this is, and offer to find out if it is stale.
-            // ------------------------------------------------------------------
             panel.Children.Add(new TextBlock { Text = "About", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
             panel.Children.Add(new TextBlock
             {
@@ -3088,7 +3381,7 @@ namespace KeyPulse
             {
                 if (updateButtonOpensDownloadPage)
                 {
-                    try { Process.Start(new ProcessStartInfo(Program.ReleasesPageUrl) { UseShellExecute = true }); }
+                    try { using var page = Process.Start(new ProcessStartInfo(Program.ReleasesPageUrl) { UseShellExecute = true }); }
                     catch (Exception ex) { updateStatus.Text = "Could not open the download page: " + ex.Message; }
                     return;
                 }
@@ -3128,7 +3421,7 @@ namespace KeyPulse
             panel.Children.Add(updateStatus);
 
             panel.Children.Add(new TextBlock { Text = "Privileges", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
-            bool isAdmin = Program.IsElevated; // ISSUE_20: one cached answer for the whole app
+            bool isAdmin = Program.IsElevated;
             var adminBtn = new Button { HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center, Margin = new Avalonia.Thickness(0, 4, 0, 0), TabIndex = 8, IsTabStop = true };
             var adminStack = new StackPanel { Orientation = Avalonia.Layout.Orientation.Vertical, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
             var adminTitle = new TextBlock { Text = isAdmin ? "Run As User Level" : "Run As Administrator", FontWeight = Avalonia.Media.FontWeight.SemiBold, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
@@ -3178,14 +3471,6 @@ namespace KeyPulse
             closeBtn.Click += (s, ev) => w.Close();
             panel.Children.Add(closeBtn);
 
-            // ------------------------------------------------------------------
-            // ISSUE_1 / ISSUE_24: backup and restore.
-            //
-            // BackupService owns the format, the encryption, the integrity check and the validation
-            // so this handler cannot accidentally skip one. What happens here is only the asking:
-            // where to put it, whether to protect it, and - on the way back in - whether the user
-            // really means to replace what they have.
-            // ------------------------------------------------------------------
             backupBtn.Click += async (s, ev) =>
             {
                 backupBtn.IsEnabled = false; restoreBtn.IsEnabled = false;
@@ -3212,9 +3497,6 @@ namespace KeyPulse
                         return;
                     }
 
-                    // ISSUE_24: targets can hold passwords - that is what the Blur/Obfuscate box is
-                    // for - so exporting them in the clear needs to be a decision, not a default
-                    // nobody was ever told about.
                     var choice = await AskBackupPassphraseAsync();
                     if (choice.Cancelled)
                     {
@@ -3233,7 +3515,6 @@ namespace KeyPulse
                     var destination = file.Path.LocalPath;
                     var passphrase = choice.Passphrase;
 
-                    // Key derivation is deliberately slow. Keep it off the UI thread.
                     string writeError = string.Empty;
                     var ok = await System.Threading.Tasks.Task.Run(
                         () => BackupService.Write(destination, payload, passphrase, out writeError));
@@ -3303,12 +3584,11 @@ namespace KeyPulse
                         return;
                     }
 
-                    // Unlock before asking to confirm, so the confirmation can state real numbers.
                     BackupPayload? payload = inspection.Payload;
                     if (payload == null)
                     {
                         payload = await UnlockBackupAsync(inspection, statusTxt);
-                        if (payload == null) return; // UnlockBackupAsync has already explained why
+                        if (payload == null) return;
                     }
 
                     if (!BackupService.ValidatePayload(payload, out var importError, out var importWarnings))
@@ -3371,7 +3651,6 @@ namespace KeyPulse
                     }
                     catch (Exception ex)
                     {
-                        // Put everything back, exactly as it was, and say so.
                         Program.LogCrash("Restore failed, rolling back: " + ex);
                         try
                         {
@@ -3417,22 +3696,50 @@ namespace KeyPulse
         {
             try
             {
-                // ISSUE_6: ask the one authority that knows about BOTH the Run key and the elevated
-                // logon task. Reading only the Run key made this box lie whenever admin mode was on.
-                var (isStartup, adminTaskInstalled) = await System.Threading.Tasks.Task.Run(
-                    () => (Program.IsStartupEnabled(), Program.IsAdminTaskInstalled()));
+                var (startup, adminTaskInstalled) = await System.Threading.Tasks.Task.Run(() =>
+                {
+                    // ISSUE_33: the task state is cached per process; without this,
+                    // "close and reopen Settings" would repeat the same stale answer
+                    // forever. Re-ask Windows every time Settings opens.
+                    Program.InvalidateAdminTaskState();
+                    return (Program.QueryStartupState(), Program.IsAdminTaskInstalled());
+                });
+
+                // ISSUE_9: a failure to ask Windows is "couldn't check", never "off". The checkbox
+                // stays disabled so nobody can stack a second launcher on top of an unqueryable one.
+                if (startup == Program.StartupState.Unknown)
+                {
+                    chk.IsEnabled = false;
+                    // ISSUE_33: an honest "not known" square instead of an unchecked box that
+                    // reads as "off" while Windows may still be starting KeyPulse at logon.
+                    chk.IsThreeState = true;
+                    setSuppress(true);
+                    chk.IsChecked = null;
+                    setSuppress(false);
+                    startupStatus.Text = "Windows did not answer when asked whether KeyPulse starts with Windows, so this could not be checked. Nothing was changed. Try closing and reopening Settings.";
+                    startupStatus.Foreground = AppBrush("AppWarningBrush");
+                    return;
+                }
+
+                var isStartup = startup == Program.StartupState.On;
 
                 setSuppress(true);
+                chk.IsThreeState = false;
                 chk.IsChecked = isStartup;
                 setSuppress(false);
 
                 chk.IsEnabled = true;
+
+                var adminTaskIneffective = adminTaskInstalled && isStartup && !Program.IsElevated;
+
                 startupStatus.Text = isStartup
                     ? (adminTaskInstalled
-                        ? "KeyPulse starts with Windows using its Administrator logon task."
+                        ? (adminTaskIneffective
+                            ? "KeyPulse starts with Windows using its Administrator logon task, but this session is NOT running as Administrator - the task did not take effect on this account."
+                            : "KeyPulse starts with Windows using its Administrator logon task.")
                         : "KeyPulse starts with Windows.")
                     : "KeyPulse does not start with Windows.";
-                startupStatus.Foreground = AppBrush("AppTextMutedBrush");
+                startupStatus.Foreground = AppBrush(adminTaskIneffective ? "AppWarningBrush" : "AppTextMutedBrush");
             }
             catch (Exception ex)
             {
@@ -3453,8 +3760,6 @@ namespace KeyPulse
         {
             try
             {
-                // Save FIRST, while this window is still open so a failure can be reported in it.
-                // Nothing below is allowed to lose the user's work.
                 SaveConfig();
             }
             catch (Exception ex)
@@ -3465,22 +3770,22 @@ namespace KeyPulse
                 return;
             }
 
-            // Its Closing handler stores the window geometry and saves again.
             try { settingsWindow.Close(); } catch { }
 
             try
             {
-                Process.Start(new ProcessStartInfo
+                var forUser = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+
+                using var elevated = Process.Start(new ProcessStartInfo
                 {
                     FileName = Program.ExePath,
-                    Arguments = arguments,
+                    Arguments = arguments + " --for-user \"" + forUser + "\"",
                     UseShellExecute = true,
                     Verb = "runas"
                 });
             }
             catch (Exception ex)
             {
-                // Almost always "the user said No to the UAC prompt". Stay running.
                 Program.LogDebug("Privilege change was not started: " + ex.Message);
                 ShowActionMessage("KeyPulse", "Nothing was changed",
                     "KeyPulse is still running exactly as before. Windows did not allow the change to start ("
@@ -3488,10 +3793,12 @@ namespace KeyPulse
                 return;
             }
 
-            // The replacement process is on its way; shut this one down cleanly.
             try { HotkeyManager.DisableCaptureHook(); } catch { }
             try { HotkeyManager.Clear(); } catch { }
             try { HotkeyManager.Stop(); } catch { }
+
+            try { Program.ReleaseSingleInstanceLock(); } catch { }
+
             Environment.Exit(0);
         }
 
@@ -3536,9 +3843,6 @@ namespace KeyPulse
                     AllowRiskyShortcut = h.AllowRiskyShortcut,
                     KeyCombination = h.KeyCombination,
                     Action = h.Action,
-                    // The plain value on purpose: on disk it is tied to this Windows account, so a
-                    // backup carrying the protected form could never be restored anywhere else.
-                    // Protection for the FILE is the passphrase offered when it is saved.
                     Target = h.Target,
                     IsTargetObfuscated = h.IsTargetObfuscated
                 }).ToList()
@@ -3925,7 +4229,6 @@ namespace KeyPulse
                     KeyCombination = item.KeyCombination ?? string.Empty,
                     Action = item.Action,
                     Target = item.Target ?? string.Empty,
-                    // ISSUE_24: the Blur/Obfuscate choice is per shortcut and travels with it.
                     IsTargetObfuscated = item.IsTargetObfuscated
                 });
             }
@@ -3968,15 +4271,12 @@ namespace KeyPulse
         {
             var skipped = new List<string>();
 
-            // Column widths are screen-independent; clamping alone is enough.
             if (layout.ShortcutStatusColumnWidth > 0) _currentConfig.ShortcutStatusColumnWidth = ClampColumnWidth(layout.ShortcutStatusColumnWidth, StatusColumnDefault, StatusColumnMin, StatusColumnMax);
             if (layout.ShortcutKeyColumnWidth > 0) _currentConfig.ShortcutKeyColumnWidth = ClampColumnWidth(layout.ShortcutKeyColumnWidth, KeyColumnDefault, KeyColumnMin, KeyColumnMax);
             if (layout.ShortcutActionColumnWidth > 0) _currentConfig.ShortcutActionColumnWidth = ClampColumnWidth(layout.ShortcutActionColumnWidth, ActionColumnDefault, ActionColumnMin, ActionColumnMax);
             if (layout.ShortcutTargetColumnWidth > 0) _currentConfig.ShortcutTargetColumnWidth = ClampColumnWidth(layout.ShortcutTargetColumnWidth, TargetColumnDefault, TargetColumnMin, TargetColumnMax);
             ApplyShortcutColumnResources();
 
-            // The Settings and Setup windows read their geometry when they next open, so storing a
-            // validated value here is enough.
             if (IsSaneWindowSize(layout.SettingsWindowWidth, layout.SettingsWindowHeight))
             {
                 _currentConfig.SettingsWindowWidth = layout.SettingsWindowWidth;
@@ -3995,7 +4295,6 @@ namespace KeyPulse
                 _currentConfig.SetupWindowY = setupOnScreen ? layout.SetupWindowY : double.NaN;
             }
 
-            // The main window is open right now, so apply it live as well as storing it.
             var screen = this.Screens.ScreenFromWindow(this) ?? this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
             if (IsSaneWindowSize(layout.MainWindowWidth, layout.MainWindowHeight))
             {
@@ -4034,7 +4333,6 @@ namespace KeyPulse
                 skipped.Add("the saved window position is off this PC's screens, so the window was left where it is");
             }
 
-            // Never restore Minimized: the user would see nothing happen at all.
             var state = layout.MainWindowState ?? "Normal";
             if (string.Equals(state, "Maximized", StringComparison.OrdinalIgnoreCase))
             {
@@ -4083,6 +4381,115 @@ namespace KeyPulse
             return false;
         }
 
+        /// <summary>
+        /// ISSUE_19: fills the editor from an Explorer "Add to KeyPulse" request. Everything is
+        /// staged - folder actions for folders, program launches for files - and the window waits
+        /// for nothing but the shortcut keys and the Add press.
+        /// </summary>
+        public void StageExternalAdd(string rawPath)
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    var path = (rawPath ?? string.Empty).Trim().Trim('"');
+                    if (path.Length == 0) return;
+
+                    // Classification avoids touching the disk on the UI thread: an offline network
+                    // path must not freeze the window we are trying to bring forward. A URL is a web
+                    // link; a UNC path or an extension-less path is a folder; everything else is a
+                    // program/file launch.
+                    ActionType action;
+                    string target;
+                    if (Uri.TryCreate(path, UriKind.Absolute, out var uri)
+                        && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                    {
+                        action = ActionType.BrowseChrome;
+                        target = uri.AbsoluteUri;
+                    }
+                    else if (path.StartsWith(@"\\", StringComparison.Ordinal)
+                        || !Path.HasExtension(path))
+                    {
+                        action = ActionType.OpenFolder;
+                        target = path;
+                    }
+                    else
+                    {
+                        action = ActionType.LaunchProgram;
+                        target = "\"" + path + "\"";
+                    }
+
+                    ResetEditor();
+                    _stagedAddTarget = path;
+
+                    _loadingEditorFields = true;
+                    try
+                    {
+                        if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)action;
+                        if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = target;
+                    }
+                    finally
+                    {
+                        _loadingEditorFields = false;
+                    }
+
+                    UpdateActionUi();
+                    UpdateEditorModeText();
+
+                    // ISSUE_32: go through BringToFront so the hidden-startup logic in
+                    // MainWindow_Opened can never hide this window right after it appears.
+                    BringToFront();
+                    this.FindControl<TextBox>("KeyCombo")?.Focus();
+
+                    Program.LogDebug($"Staged an external add for: {path}");
+                }
+                catch (Exception ex)
+                {
+                    Program.LogCrash("Could not stage the external add: " + ex);
+                }
+            });
+        }
+
+        /// <summary>ISSUE_19: picks up a target staged by a second launch of KeyPulse.</summary>
+        public void ConsumeStagedAdd()
+        {
+            try
+            {
+                if (!File.Exists(Program.StagedAddPath)) return;
+
+                var path = File.ReadAllText(Program.StagedAddPath).Trim();
+                try { File.Delete(Program.StagedAddPath); } catch { }
+
+                if (path.Length == 0) return;
+                StageExternalAdd(path);
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug("Could not consume the staged add: " + ex.Message);
+            }
+        }
+
+        /// <summary>ISSUE_10: the first time Windows cannot protect a target, say so plainly.</summary>
+        private void OnTargetProtectionFailed(string reason)
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    ShowActionMessage("KeyPulse security notice",
+                        "Windows cannot protect this target",
+                        "Windows refused to encrypt it for your account (" + reason + "), so it will be stored in "
+                        + "READABLE text in the settings file - including anything you ticked the Blur box for. "
+                        + "The list marks such rows amber. This usually happens with roaming profiles, a damaged "
+                        + "crypto store, or a machine managed by company policy.", true);
+                }
+                catch (Exception ex)
+                {
+                    Program.LogDebug("Protection notice failed: " + ex.Message);
+                }
+            });
+        }
+
         protected override void OnClosing(Avalonia.Controls.WindowClosingEventArgs e)
         {
             SaveConfig();
@@ -4097,10 +4504,9 @@ namespace KeyPulse
             App.HiddenWindow = this;
             ShowInTaskbar = false;
             HotkeyManager.DisableCaptureHook();
+            Program.LogDebug("Main window close requested -> hidden back to the tray (ISSUE_32 instrumentation).");
             this.Hide();
 
-            // ISSUE_15: the X button hides the window and leaves the shortcuts live. Say so once,
-            // so nobody thinks they closed KeyPulse and then wonders why their keys still fire.
             if (!_currentConfig.HasSeenTrayHint)
             {
                 _currentConfig.HasSeenTrayHint = true;
@@ -4159,20 +4565,24 @@ namespace KeyPulse
             InputSimulator.TypingProgressChanged -= OnTypingProgress;
             InputSimulator.TypingFinished -= OnTypingFinished;
 
+            // Static event with an instance handler - must be detached (project rule).
+            CryptoHelper.ProtectionFailed -= OnTargetProtectionFailed;
+
+            StopActionNoticeTimer();
+
+            if (_rawKeyHandler != null)
+            {
+                HotkeyManager.OnRawKey -= _rawKeyHandler;
+                _rawKeyHandler = null;
+            }
+
             CloseTypingProgressWindow();
             HotkeyManager.DisableCaptureHook();
-            HotkeyManager.Clear(); // release every hotkey back to Windows before the loop stops
+            HotkeyManager.Clear();
             HotkeyManager.Stop();
             base.OnClosed(e);
         }
     }
 }
-
-
-
-
-
-
-
 
 

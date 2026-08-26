@@ -55,6 +55,9 @@
                     <ComboBoxItem>Type text (one key at a time)</ComboBoxItem>
                     <ComboBoxItem>Paste text (instant)</ComboBoxItem>
                 </ComboBox>
+                <!-- ISSUE_14: tab order walks the editor once, top to bottom, left to right:
+                     shortcut(0), action(1), target(2), browse(3), expand(4), blur(5), add(6),
+                     cancel(7). The old markup gave two controls TabIndex 4 and two TabIndex 5. -->
                 <Button Grid.Row="1"
                         Grid.Column="2"
                         Name="AddButton"
@@ -62,7 +65,7 @@
                         Classes="Primary"
                         Click="Add_Click"
                         Margin="0,0,8,0"
-                        TabIndex="4"
+                        TabIndex="6"
                         MinWidth="96" />
                 <Button Grid.Row="1"
                         Grid.Column="3"
@@ -71,7 +74,7 @@
                         Classes="Secondary"
                         Click="CancelEdit_Click"
                         IsVisible="False"
-                        TabIndex="5"
+                        TabIndex="7"
                         MinWidth="86" />
 
                 <StackPanel Grid.Row="2"
@@ -122,7 +125,7 @@
                               ToolTip.Tip="Blur the target text in the list to hide passwords or sensitive data"
                               Margin="0,0,8,0"
                               VerticalAlignment="Center"
-                              TabIndex="3" />
+                              TabIndex="5" />
                     <Button Grid.Column="2"
                             Name="ExpandTargetBtn"
                             Content="Expand"
@@ -138,7 +141,7 @@
                             Content="Browse"
                             Classes="Secondary"
                             Click="Browse_Click"
-                            TabIndex="5"
+                            TabIndex="3"
                             MinWidth="92"
                             ToolTip.Tip="Choose a file or folder" />
                 </Grid>
@@ -170,7 +173,7 @@
                  Margin="0,0,0,12"
                  PlaceholderText="Search shortcuts..."
                  TextChanged="SearchBox_TextChanged"
-                 TabIndex="7"
+                 TabIndex="8"
                  ToolTip.Tip="Filter by shortcut keys, action, target or status" />
 
         <Border Grid.Row="2"
@@ -312,22 +315,21 @@
                                             <ColumnDefinition Width="{DynamicResource ShortcutActionsColumnWidth}" />
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Classes="ShortcutGridCell">
-                                            <Button Content="{Binding RegistrationStatus}"
-                                                    HorizontalAlignment="Center"
-                                                    VerticalAlignment="Center"
-                                                    HorizontalContentAlignment="Center"
-                                                    Click="Enabled_Click"
-                                                    TabIndex="0"
-                                                    Width="85"
-                                                    MinWidth="85"
-                                                    Height="24"
-                                                    MinHeight="24"
-                                                    Padding="4,2"
-                                                    FontSize="11"
-                                                    ToolTip.Tip="{Binding StatusTooltip}"
-                                                    Background="{Binding StatusButtonBackground}"
-                                                    Foreground="{Binding StatusButtonForeground}"
-                                                    Cursor="Hand" />
+                                            <!-- ISSUE_6: the status is a plain, readable label that
+                                                 shows the whole reason. It used to be an 85px button
+                                                 clipped to "Inactive: C..." that toggled the shortcut
+                                                 off when clicked - reading a status must never
+                                                 change anything. Enabling is the separate On/Off
+                                                 control in the Actions column. -->
+                                            <TextBlock Text="{Binding StatusLabel}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       FontWeight="SemiBold"
+                                                       FontSize="11"
+                                                       Foreground="{Binding RegistrationBrush}"
+                                                       ToolTip.Tip="{Binding StatusTooltip}" />
                                         </Border>
                                         <Grid Grid.Column="1">
                                             <Border Classes="ShortcutGridSeparatorCell" />
@@ -396,6 +398,24 @@
                                                         HorizontalAlignment="Center"
                                                         VerticalAlignment="Center"
                                                         Spacing="6">
+                                                <!-- ISSUE_6: enabling and disabling is this clearly
+                                                     labelled control, nothing else on the row. -->
+                                                <Button Content="{Binding ToggleLabel}"
+                                                        Classes="Secondary"
+                                                        Click="Enabled_Click"
+                                                        Width="48"
+                                                        MinWidth="48"
+                                                        Height="24"
+                                                        MinHeight="24"
+                                                        Padding="4,2"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        FontSize="11"
+                                                        TabIndex="0"
+                                                        ToolTip.Tip="{Binding ToggleTooltip}" />
+                                                <!-- ISSUE_15: 8.5pt text is roughly two-thirds the
+                                                     size of the smallest text anywhere else here,
+                                                     and REMOVE is a destructive action. -->
                                                 <Button Content="REMOVE"
                                                         Classes="Danger"
                                                         Click="Remove_Click"
@@ -406,19 +426,19 @@
                                                         Padding="4,2"
                                                         HorizontalAlignment="Center"
                                                         VerticalAlignment="Center"
-                                                        FontSize="8.5"
+                                                        FontSize="11"
                                                         TabIndex="1"
                                                         ToolTip.Tip="Delete this shortcut" />
                                                 <Button Classes="Secondary"
                                                         Click="Duplicate_Click"
-                                                        Width="78"
-                                                        MinWidth="78"
+                                                        Width="100"
+                                                        MinWidth="100"
                                                         Height="24"
                                                         MinHeight="24"
                                                         Padding="4,2"
                                                         HorizontalAlignment="Center"
                                                         VerticalAlignment="Center"
-                                                        FontSize="8.5"
+                                                        FontSize="11"
                                                         TabIndex="2"
                                                         ToolTip.Tip="Copy this shortcut's action to a new key combination">
                                                     <StackPanel Orientation="Horizontal"
@@ -426,7 +446,7 @@
                                                                 VerticalAlignment="Center"
                                                                 Spacing="3">
                                                         <TextBlock Text="&#x29C9;"
-                                                                   FontSize="9"
+                                                                   FontSize="11"
                                                                    VerticalAlignment="Center" />
                                                         <TextBlock Text="DUPLICATE"
                                                                    VerticalAlignment="Center" />
@@ -440,32 +460,34 @@
                         </ListBox.ItemTemplate>
                     </ListBox>
 
+                    <!-- ISSUE_13: the edge fades follow the chosen theme instead of fixed black
+                         gradients with near-white arrows that smeared over Light mode. -->
                     <Border Name="ScrollFadeTop" Height="40" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25B2; &#x25B2; &#x25B2;" HorizontalAlignment="Center" VerticalAlignment="Top" FontSize="10" Foreground="#A0ffffff" Margin="0,4,0,0"/>
+                        <TextBlock Text="&#x25B2; &#x25B2; &#x25B2;" HorizontalAlignment="Center" VerticalAlignment="Top" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="0,4,0,0"/>
                     </Border>
                     <Border Name="ScrollFadeBottom" Height="40" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
-                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25BC; &#x25BC; &#x25BC;" HorizontalAlignment="Center" VerticalAlignment="Bottom" FontSize="10" Foreground="#A0ffffff" Margin="0,0,0,4"/>
+                        <TextBlock Text="&#x25BC; &#x25BC; &#x25BC;" HorizontalAlignment="Center" VerticalAlignment="Bottom" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="0,0,0,4"/>
                     </Border>
                     <Border Name="ScrollFadeLeft" Width="40" HorizontalAlignment="Left" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
-                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25C0; &#x25C0;" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="10" Foreground="#A0ffffff" Margin="4,0,0,0">
+                        <TextBlock Text="&#x25C0; &#x25C0;" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="4,0,0,0">
                             <TextBlock.RenderTransform>
                                 <RotateTransform Angle="-90"/>
                             </TextBlock.RenderTransform>
@@ -474,11 +496,11 @@
                     <Border Name="ScrollFadeRight" Width="40" HorizontalAlignment="Right" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="100%,0%" EndPoint="0%,0%">
-                                <GradientStop Offset="0" Color="#50000000"/>
+                                <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25B6; &#x25B6;" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="10" Foreground="#A0ffffff" Margin="0,0,4,0">
+                        <TextBlock Text="&#x25B6; &#x25B6;" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="0,0,4,0">
                             <TextBlock.RenderTransform>
                                 <RotateTransform Angle="90"/>
                             </TextBlock.RenderTransform>
@@ -543,7 +565,7 @@
                     Content="Settings"
                     Classes="Secondary"
                     Click="Settings_Click"
-                    TabIndex="6"
+                    TabIndex="9"
                     HorizontalAlignment="Right"
                     MinWidth="98" />
         </Grid>

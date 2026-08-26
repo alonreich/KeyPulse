@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -35,8 +35,6 @@ namespace KeyPulse
                 }
                 catch (Exception ex)
                 {
-                    // The file exists but cannot be opened (locked, permissions, offline profile).
-                    // Do NOT quarantine and do NOT start empty-and-overwrite: refuse to save instead.
                     loadError = "Your KeyPulse settings file could not be opened (" + ex.Message +
                                 "). Your shortcuts were not loaded and will not be overwritten.";
                     return new AppConfig { IsReadOnlySession = true };
@@ -112,10 +110,30 @@ namespace KeyPulse
             }
         }
 
-        /// <summary>Reads one flag without disturbing the running window's in-memory state.</summary>
+        /// <summary>
+        /// Reads one flag without disturbing the running window's in-memory state.
+        ///
+        /// ISSUE_2: refuses to run when the file underneath is damaged or unreadable. Load() quietly
+        /// quarantines a corrupt file and hands back a blank one; the old code then saved that blank
+        /// over the top, so flipping one Settings checkbox erased every shortcut with no warning.
+        /// Nothing is written until the user has seen the problem and chosen what to do.
+        /// </summary>
         public static bool TryUpdate(Action<AppConfig> mutate, out string error)
         {
-            var config = Load(out _, out _);
+            var config = Load(out var loadError, out var quarantinePath);
+
+            if (!string.IsNullOrEmpty(loadError) && (config.IsReadOnlySession || quarantinePath != null))
+            {
+                error = "Your KeyPulse settings file needs attention: " + loadError;
+                if (!string.IsNullOrEmpty(quarantinePath))
+                {
+                    error += " The unreadable file was kept as " + quarantinePath + ".";
+                }
+                error += " This change was NOT saved, so nothing was lost.";
+                Program.LogCrash("TryUpdate refused to save over a damaged settings file.");
+                return false;
+            }
+
             mutate(config);
             return Save(config, out error);
         }
@@ -162,6 +180,50 @@ namespace KeyPulse
                 }
             }
             catch { }
+        }
+
+        /// <summary>
+        /// ISSUE_7: dated safety copy of the settings file OUTSIDE the KeyPulse config folder, taken
+        /// before a "Wipe Settings" install destroys that whole folder. Because it sits beside the
+        /// folder (not inside it), the wipe cannot take the copy with it. Three most recent kept.
+        /// </summary>
+        public static string? SaveWipeSafetyCopy()
+        {
+            lock (IoLock)
+            {
+                try
+                {
+                    if (!File.Exists(ConfigPath)) return null;
+
+                    var parent = Directory.GetParent(ConfigDirectory)?.FullName;
+                    if (string.IsNullOrEmpty(parent)) return null;
+
+                    var target = Path.Combine(parent,
+                        "KeyPulse.before-wipe-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".json");
+                    File.Copy(ConfigPath, target, true);
+
+                    try
+                    {
+                        var existing = Directory.GetFiles(parent, "KeyPulse.before-wipe-*.json");
+                        if (existing.Length > 3)
+                        {
+                            Array.Sort(existing, StringComparer.OrdinalIgnoreCase);
+                            for (var i = 0; i < existing.Length - 3; i++)
+                            {
+                                try { File.Delete(existing[i]); } catch { }
+                            }
+                        }
+                    }
+                    catch { }
+
+                    return target;
+                }
+                catch (Exception ex)
+                {
+                    Program.LogDebug("Could not write a pre-wipe safety copy: " + ex.Message);
+                    return null;
+                }
+            }
         }
 
         private static string? Quarantine()

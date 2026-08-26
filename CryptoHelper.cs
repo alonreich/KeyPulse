@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -22,15 +22,29 @@ namespace KeyPulse
         private const string DpapiPrefix = "DPAPI:";
         private const string LegacyPrefix = "ENC:";
 
-        // Legacy fixed key/IV. Present ONLY so shortcuts saved by older builds can still be read.
         private static readonly byte[] LegacyKey = Encoding.UTF8.GetBytes("KeyPulseSecret!Key1234567890ABCD");
         private static readonly byte[] LegacyIV = Encoding.UTF8.GetBytes("KeyPulseIV67890A");
 
-        // Ties the protected blob to KeyPulse, so another app's DPAPI blob cannot be swapped in.
         private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("KeyPulse.Target.v1");
 
         /// <summary>True when this machine could not protect data at all (broken CAPI, roaming profile).</summary>
         public static bool ProtectionUnavailable { get; private set; }
+
+        /// <summary>
+        /// ISSUE_10: raised ONCE, the first time Windows refuses to protect a target, so the UI can
+        /// tell the user plainly instead of leaving the only trace in a log file. Static event:
+        /// instance handlers MUST detach on close.
+        /// </summary>
+        public static event Action<string>? ProtectionFailed;
+        private static bool _protectionFailureAnnounced;
+
+        /// <summary>True when the stored value carries the DPAPI or legacy cipher-text prefix.</summary>
+        public static bool IsProtectedValue(string? stored)
+        {
+            return stored != null
+                && (stored.StartsWith(DpapiPrefix, StringComparison.Ordinal)
+                    || stored.StartsWith(LegacyPrefix, StringComparison.Ordinal));
+        }
 
         /// <summary>Turns a plain target into the string written to config.json.</summary>
         public static string Protect(string plainText)
@@ -45,10 +59,16 @@ namespace KeyPulse
             }
             catch (Exception ex)
             {
-                // Never lose the user's shortcut because encryption is unavailable. Store it readable
-                // and let the caller surface that fact rather than silently dropping the target.
                 ProtectionUnavailable = true;
                 Program.LogCrash("Target protection unavailable, storing in readable form: " + ex.Message);
+
+                if (!_protectionFailureAnnounced)
+                {
+                    _protectionFailureAnnounced = true;
+                    try { ProtectionFailed?.Invoke(ex.Message); }
+                    catch (Exception notifyEx) { Program.LogDebug("Protection notice failed: " + notifyEx.Message); }
+                }
+
                 return plainText;
             }
         }
@@ -83,7 +103,6 @@ namespace KeyPulse
                 return TryDecryptLegacy(stored, out plainText);
             }
 
-            // Written before any protection existed, or stored readable because protection failed.
             plainText = stored;
             return true;
         }

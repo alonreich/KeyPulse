@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Net.Http;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -41,7 +41,6 @@ namespace KeyPulse
         private static HttpClient CreateClient()
         {
             var client = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
-            // GitHub rejects requests without a user agent.
             client.DefaultRequestHeaders.Add("User-Agent", "KeyPulse-UpdateCheck");
             client.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
             return client;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -54,9 +54,9 @@ namespace KeyPulse
     public static class BackupService
     {
         private const int SaltBytes = 16;
-        private const int NonceBytes = 12;   // AesGcm.NonceByteSizes
-        private const int TagBytes = 16;     // AesGcm.TagByteSizes maximum
-        private const int KeyBytes = 32;     // AES-256
+        private const int NonceBytes = 12;
+        private const int TagBytes = 16;
+        private const int KeyBytes = 32;
 
         /// <summary>
         /// Deliberately high. This runs once per backup and once per restore, so a second of work is
@@ -67,9 +67,6 @@ namespace KeyPulse
 
         private static readonly byte[] AssociatedData = Encoding.UTF8.GetBytes("KeyPulseBackup.v2");
 
-        // ------------------------------------------------------------------
-        // Writing
-        // ------------------------------------------------------------------
 
         /// <summary>
         /// Serializes, hashes, optionally encrypts, writes ATOMICALLY, then reads the result back
@@ -129,8 +126,6 @@ namespace KeyPulse
 
                 var envelopeJson = JsonSerializer.Serialize(envelope, AppConfigJsonContext.Default.BackupEnvelope);
 
-                // Write to a sibling temp file and move it into place, so a failure part-way through
-                // cannot leave a half-written file sitting where a good backup used to be.
                 var temp = path + ".writing";
                 File.WriteAllText(temp, envelopeJson, new UTF8Encoding(false));
                 try
@@ -143,7 +138,6 @@ namespace KeyPulse
                     try { File.Delete(temp); } catch { }
                 }
 
-                // Read it back. If this fails the file on disk is not usable and the user must know.
                 var verification = Inspect(path);
                 if (!verification.Ok)
                 {
@@ -170,9 +164,6 @@ namespace KeyPulse
             }
         }
 
-        // ------------------------------------------------------------------
-        // Reading
-        // ------------------------------------------------------------------
 
         /// <summary>
         /// Identifies a candidate file WITHOUT changing anything. Never throws.
@@ -185,8 +176,6 @@ namespace KeyPulse
                 var info = new FileInfo(path);
                 if (!info.Exists) return Failure("That file no longer exists.");
 
-                // A KeyPulse backup is small. Anything enormous is the wrong file, and refusing it
-                // here avoids loading a multi-gigabyte file into memory to find that out.
                 if (info.Length > 64L * 1024 * 1024)
                 {
                     return Failure("That file is far too large to be a KeyPulse backup.");
@@ -201,10 +190,6 @@ namespace KeyPulse
 
             if (string.IsNullOrWhiteSpace(text)) return Failure("That file is empty.");
 
-            // Look at the shape of the json before trusting any deserializer's defaults. This is the
-            // check that closes the old hole: an unrelated json file used to deserialize into an
-            // AppConfig whose Hotkeys list defaulted to empty, sail through validation, and wipe
-            // everything. A missing property is now a refusal, not a silent empty list.
             JsonDocument document;
             try
             {
@@ -230,9 +215,6 @@ namespace KeyPulse
                     return InspectNative(text);
                 }
 
-                // ISSUE_25: backwards compatibility. Every backup taken by an earlier build is a raw
-                // copy of config.json. Those files must keep working, but only when they really are
-                // one: a "Hotkeys" array has to be present in the file itself.
                 if (root.TryGetProperty("Hotkeys", out var hotkeys) && hotkeys.ValueKind == JsonValueKind.Array)
                 {
                     return InspectLegacy(text, hotkeys.GetArrayLength());
@@ -289,7 +271,7 @@ namespace KeyPulse
                     IsEncrypted = true,
                     CreatedUtc = envelope.CreatedUtc,
                     CreatedByVersion = envelope.CreatedByVersion,
-                    ShortcutCount = -1, // not knowable until it is unlocked
+                    ShortcutCount = -1,
                     Envelope = envelope
                 };
             }
@@ -327,9 +309,6 @@ namespace KeyPulse
                 return Failure("That looks like an old KeyPulse settings file but contains no shortcuts.");
             }
 
-            // Targets in an old backup were encrypted with the fixed key that shipped inside the
-            // executable, so they can still be decrypted here. Ones that cannot are reported rather
-            // than imported as cipher text.
             var unreadable = config.Hotkeys.Count(h => h.TargetUnreadable);
 
             var payload = new BackupPayload
@@ -441,8 +420,6 @@ namespace KeyPulse
             }
             catch (CryptographicException)
             {
-                // AES-GCM cannot tell "wrong password" from "tampered file"; both fail the tag check.
-                // Say the likely thing, and mention the other.
                 CryptographicOperations.ZeroMemory(plain);
                 return new BackupOpenResult
                 {
@@ -513,9 +490,6 @@ namespace KeyPulse
             }
         }
 
-        // ------------------------------------------------------------------
-        // Validation
-        // ------------------------------------------------------------------
 
         /// <summary>
         /// Separates STRUCTURAL corruption from MACHINE differences.
@@ -537,9 +511,6 @@ namespace KeyPulse
                 return false;
             }
 
-            // A plain range check, deliberately not Enum.GetValues: this is a NativeAOT build and
-            // the agent directives forbid reflection. ActionType is contiguous from OpenFolder to
-            // InsertText; a new member must be appended, never inserted.
             var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             for (var i = 0; i < payload.Shortcuts.Count; i++)
@@ -573,7 +544,6 @@ namespace KeyPulse
 
                 if (!string.IsNullOrWhiteSpace(item.Id) && !seenIds.Add(item.Id))
                 {
-                    // Harmless on its own; the importer gives it a fresh id.
                     item.Id = string.Empty;
                 }
             }
@@ -581,7 +551,6 @@ namespace KeyPulse
             return true;
         }
 
-        // ------------------------------------------------------------------
 
         private static byte[] DeriveKey(string passphrase, byte[] salt, int iterations)
         {

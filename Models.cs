@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -41,6 +41,8 @@ namespace KeyPulse
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(StatusButtonBackground));
                 OnPropertyChanged(nameof(StatusButtonForeground));
+                OnPropertyChanged(nameof(ToggleLabel));
+                OnPropertyChanged(nameof(ToggleTooltip));
             }
         }
 
@@ -72,7 +74,7 @@ namespace KeyPulse
                 _keyCombination = value;
                 OnPropertyChanged();
             }
-        } // e.g. "Ctrl+Alt+A"
+        }
 
         public ActionType Action
         {
@@ -110,29 +112,63 @@ namespace KeyPulse
         [JsonIgnore]
         public bool TargetUnreadable { get; set; }
 
+        /// <summary>
+        /// ISSUE_1: the exact stored value from the settings file when it could not be decrypted on
+        /// this Windows account. It is written back byte-for-byte until the user types a replacement,
+        /// so a config that is simply moved back to the right account recovers every shortcut.
+        /// </summary>
+        [JsonIgnore]
+        public string UnreadableTargetCipher { get; set; } = string.Empty;
+
+        /// <summary>
+        /// ISSUE_10: this target is sitting in the settings file as readable text because Windows
+        /// could not protect it. The list stops implying a protection that is not there.
+        /// </summary>
+        [JsonIgnore]
+        public bool TargetProtectionFailed { get; set; }
+
+        /// <summary>
+        /// ISSUE_4: last background reachability answer for this row. Null while a check is running,
+        /// so the UI never has to touch a disk or the network to paint a status.
+        /// </summary>
+        [JsonIgnore]
+        public bool? TargetReachable { get; set; }
+
         [JsonPropertyName("Target")]
         public string EncryptedTarget
         {
-            get => CryptoHelper.Protect(_target);
+            get
+            {
+                // ISSUE_1: while the target cannot be decrypted, hand back the ORIGINAL cipher text.
+                // Re-protecting the now-empty _target here used to overwrite the stored value with an
+                // empty string the first time anything saved, destroying the shortcut forever right
+                // after the app had promised "Nothing was deleted".
+                if (TargetUnreadable && UnreadableTargetCipher.Length > 0) return UnreadableTargetCipher;
+                // ISSUE_10: never re-protect a value that could not be protected - it would fail again
+                // anyway, and quietly re-writing plain text hides the problem from the user.
+                if (TargetProtectionFailed && _target.Length > 0) return _target;
+                return CryptoHelper.Protect(_target);
+            }
             set
             {
                 if (CryptoHelper.TryUnprotect(value, out var plain))
                 {
                     TargetUnreadable = false;
+                    UnreadableTargetCipher = string.Empty;
+                    // ISSUE_10: a value stored without the DPAPI/legacy prefix was written in plain
+                    // text because Windows could not protect it. Flag it so the row is honest.
+                    TargetProtectionFailed = value.Length > 0 && !CryptoHelper.IsProtectedValue(value);
                     Target = plain;
                 }
                 else
                 {
                     TargetUnreadable = true;
+                    UnreadableTargetCipher = value ?? string.Empty;
                     Target = string.Empty;
                 }
             }
         }
 
-        // ------------------------------------------------------------------
-        // ISSUE_5: live registration bookkeeping so one shortcut can be changed
-        // without tearing down and re-registering every other shortcut.
-        // ------------------------------------------------------------------
 
         /// <summary>Win32 hotkey id currently held by this row, or 0 when it holds none.</summary>
         [JsonIgnore]
@@ -203,16 +239,27 @@ namespace KeyPulse
         }
 
         [JsonIgnore]
-        public string TargetTooltip => IsTargetHidden
-            ? "Hidden. Select this row to view or change the value."
-            : Target;
+        public string TargetTooltip
+        {
+            get
+            {
+                if (!IsTargetHidden) return Target;
+                // ISSUE_10: when Windows could not encrypt the value, say so instead of implying
+                // the blur means the file on disk is protected.
+                return TargetProtectionFailed
+                    ? "Hidden from the list, but stored UNENCRYPTED in the settings file because Windows could not protect it. Anyone who opens that file can read it."
+                    : "Hidden. Select this row to view or change the value.";
+            }
+        }
 
         /// <summary>ISSUE_2: strong enough that no glyph shape survives it.</summary>
         [JsonIgnore]
         public double TargetBlurRadius => IsTargetHidden ? 12.0 : 0.0;
 
         [JsonIgnore]
-        public IBrush TargetDisplayBrush => IsTargetObfuscated ? AppBrush("AppDisabledForegroundBrush") : AppBrush("AppTextPrimaryBrush");
+        public IBrush TargetDisplayBrush => TargetProtectionFailed && IsTargetObfuscated
+            ? AppBrush("AppWarningBrush")
+            : (IsTargetObfuscated ? AppBrush("AppDisabledForegroundBrush") : AppBrush("AppTextPrimaryBrush"));
 
         [JsonIgnore]
         public IBrush RegistrationBrush
@@ -231,8 +278,8 @@ namespace KeyPulse
         {
             get
             {
-                if (!IsEnabled) return AppBrush("AppDangerBrush"); // Dark red if disabled
-                return AppBrush("AppPanelRaisedBrush"); // Normal button color
+                if (!IsEnabled) return AppBrush("AppDangerBrush");
+                return AppBrush("AppPanelRaisedBrush");
             }
         }
 
@@ -241,8 +288,8 @@ namespace KeyPulse
         {
             get
             {
-                if (!IsEnabled) return AppBrush("AppOnAccentTextBrush"); // White text on dark red
-                return RegistrationBrush; // Colored text for active/waiting/error
+                if (!IsEnabled) return AppBrush("AppOnAccentTextBrush");
+                return RegistrationBrush;
             }
         }
 
@@ -260,6 +307,7 @@ namespace KeyPulse
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(RegistrationBrush));
                 OnPropertyChanged(nameof(StatusTooltip));
+                OnPropertyChanged(nameof(StatusLabel));
                 OnPropertyChanged(nameof(StatusButtonBackground));
                 OnPropertyChanged(nameof(StatusButtonForeground));
             }
@@ -276,6 +324,7 @@ namespace KeyPulse
                 _statusHint = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(StatusTooltip));
+                OnPropertyChanged(nameof(StatusLabel));
             }
         }
 
@@ -283,6 +332,26 @@ namespace KeyPulse
         public string StatusTooltip => string.IsNullOrWhiteSpace(StatusHint)
             ? RegistrationStatus
             : RegistrationStatus + "\n" + StatusHint;
+
+        /// <summary>
+        /// ISSUE_6: the full reason, in words, for the Status column. Reading a status must never
+        /// change anything, so the column is a plain label now - not a disguised toggle button that
+        /// clipped to "Inactive: C..." and silently switched the shortcut off when clicked.
+        /// </summary>
+        [JsonIgnore]
+        public string StatusLabel => string.IsNullOrWhiteSpace(StatusHint)
+            ? RegistrationStatus
+            : RegistrationStatus + ": " + StatusHint;
+
+        /// <summary>ISSUE_6: what the separate on/off control says.</summary>
+        [JsonIgnore]
+        public string ToggleLabel => IsEnabled ? "On" : "Off";
+
+        /// <summary>ISSUE_6: what the separate on/off control explains.</summary>
+        [JsonIgnore]
+        public string ToggleTooltip => IsEnabled
+            ? "Switch this shortcut off. The keys are released and nothing is deleted."
+            : "Switch this shortcut back on.";
 
         private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
@@ -332,8 +401,12 @@ namespace KeyPulse
 
         public bool UseGoogleChromeForUrls { get; set; } = true;
 
-        /// <summary>Mirror of the Windows startup state so elevating/de-elevating cannot silently lose it.</summary>
-        public bool LaunchOnBoot { get; set; }
+        /// <summary>
+        /// Mirror of the Windows startup state so elevating/de-elevating cannot silently lose it.
+        /// ISSUE_33: defaults to true - a fresh install starts with Windows unless the user
+        /// turns it off; MainWindow turns that default into a real launcher on the first run.
+        /// </summary>
+        public bool LaunchOnBoot { get; set; } = true;
 
         public bool SoundEnabled { get; set; } = true;
 
@@ -359,22 +432,6 @@ namespace KeyPulse
         public bool IsReadOnlySession { get; set; }
     }
 
-    // ----------------------------------------------------------------------
-    // ISSUE_1 / ISSUE_24: a backup is its own file format, not a raw copy of config.json.
-    //
-    // Three things forced this.
-    //   1. "Restore" used to accept ANY json file: a file that simply did not mention shortcuts
-    //      deserialized into an empty list, passed validation, and wiped every shortcut the user
-    //      had. A backup must identify itself before it is allowed to replace anything.
-    //   2. Targets on disk are tied to the Windows account (ISSUE_3), so a straight file copy would
-    //      restore into unreadable junk on a new PC - the one case backups exist for.
-    //   3. A plain-text export of targets is a plain-text export of whatever the user hid behind
-    //      the Blur/Obfuscate checkbox. The payload is therefore optionally encrypted with a
-    //      passphrase the user chooses, and is integrity-checked either way.
-    //
-    // The envelope is always readable so the file can identify itself, be dated, and be recognised
-    // as encrypted BEFORE anyone is asked for a passphrase. Only the payload is protected.
-    // ----------------------------------------------------------------------
 
     public class BackupShortcut
     {
@@ -432,10 +489,6 @@ namespace KeyPulse
 
         public BackupWindowLayout Window { get; set; } = new();
 
-        // NOTE: AppConfig.LaunchOnBoot is deliberately NOT carried. Whether KeyPulse starts with
-        // Windows is a property of the machine, held in the registry or a scheduled task. Silently
-        // switching that on because a backup from another PC had it on would be an unpleasant
-        // surprise, so restore leaves it exactly as it is and says so.
     }
 
     public class BackupEnvelope

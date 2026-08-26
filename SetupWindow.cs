@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,6 +25,7 @@ namespace KeyPulse
         private Button _actionButton;
         private Grid _mainGrid;
         private bool _isUninstall;
+        private readonly bool _elevatedRetry;
         private readonly ObservableCollection<string> _logLines = new();
 
         private AppConfig _config = new AppConfig();
@@ -32,6 +34,8 @@ namespace KeyPulse
         public SetupWindow(bool isUninstall)
         {
             _isUninstall = isUninstall;
+            _elevatedRetry = Environment.GetCommandLineArgs()
+                .Any(a => string.Equals(a, "--elevated-retry", StringComparison.OrdinalIgnoreCase));
             Title = isUninstall ? "KeyPulse Setup - Uninstalling" : "KeyPulse Setup - Installing";
             Width = 550;
             Height = 400;
@@ -107,8 +111,6 @@ namespace KeyPulse
         {
             try
             {
-                // ISSUE_4: shared loader that quarantines a damaged file instead of silently
-                // starting empty and then overwriting it.
                 var loaded = ConfigStore.Load(out _, out _);
                 _config = loaded;
 
@@ -141,16 +143,36 @@ namespace KeyPulse
             catch { }
         }
 
-        private void SaveConfig()
+        /// <summary>
+        /// ISSUE_1 / ISSUE_2: saves ONLY this window's own geometry, read-modify-write, and never a
+        /// whole settings snapshot.
+        ///
+        /// This method used to write `_config` - which is only ever loaded from disk inside the
+        /// upgrade branch. Whenever config.json existed but KeyPulse.exe did not (the program folder
+        /// deleted by hand, the exe quarantined by antivirus, or a roaming %APPDATA% arriving on a
+        /// second PC where %LOCALAPPDATA% did not), setup started from a blank AppConfig and saved
+        /// that blank over every shortcut the user had. On an ordinary upgrade it was subtler: the
+        /// snapshot was read at the "Keep Settings" prompt, the running KeyPulse was then closed and
+        /// saved its own newer state, and this overwrote it again on the way out.
+        /// </summary>
+        private void SaveSetupWindowGeometry()
         {
             try
             {
-                _config.SetupWindowX = Position.X;
-                _config.SetupWindowY = Position.Y;
-                _config.SetupWindowWidth = Bounds.Width;
-                _config.SetupWindowHeight = Bounds.Height;
+                var x = Position.X;
+                var y = Position.Y;
+                var width = Bounds.Width;
+                var height = Bounds.Height;
 
-                ConfigStore.Save(_config, out _);
+                if (width <= 0 || height <= 0) return;
+
+                ConfigStore.TryUpdate(c =>
+                {
+                    c.SetupWindowX = x;
+                    c.SetupWindowY = y;
+                    c.SetupWindowWidth = width;
+                    c.SetupWindowHeight = height;
+                }, out _);
             }
             catch { }
         }
@@ -158,12 +180,144 @@ namespace KeyPulse
         private void SetupWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
             if (!_isUninstall)
-                SaveConfig();
-            else
             {
-                var outDir = Path.Combine(Path.GetTempPath(), Program.AppName + "_NativeLibs");
-                var selfDeleteScript = $"/c for /L %i in (1,1,30) do (ping 127.0.0.1 -n 2 > nul & rmdir /S /Q \"{outDir}\" & del /F /q \"{Environment.ProcessPath}\" & if not exist \"{Environment.ProcessPath}\" exit)";
-                Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+                SaveSetupWindowGeometry();
+                return;
+            }
+
+            var legacyDir = Program.LegacyNativeLibDir;
+            var fallbackDir = Program.RuntimeFallbackDir;
+            var self = Environment.ProcessPath;
+
+            var selfDeleteScript =
+                $"/c for /L %i in (1,1,30) do (ping 127.0.0.1 -n 2 > nul & rmdir /S /Q \"{legacyDir}\" & rmdir /S /Q \"{fallbackDir}\" & del /F /q \"{self}\" & if not exist \"{self}\" exit)";
+
+            try
+            {
+                using var cleanup = Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript)
+                {
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug("Uninstall self-delete could not be started: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// ISSUE_3 / ISSUE_12: the processes setup is allowed to close, and nothing else.
+        ///
+        /// The old loops closed EVERY process named "KeyPulse" - which a second copy of the
+        /// installer also is, because it is the same binary under a different folder. Two installers
+        /// launched together killed each other, and a kill landing during the binary copy left a
+        /// truncated KeyPulse.exe behind. Only a process actually running the installed binary is a
+        /// candidate; one we cannot inspect is assumed to be an elevated KeyPulse and is included,
+        /// because that is exactly the case the uninstaller has to notice (ISSUE_5).
+        /// The caller MUST dispose what it gets back.
+        /// </summary>
+        private static List<Process> FindInstalledInstances(out bool sawUninspectable)
+        {
+            var matches = new List<Process>();
+            sawUninspectable = false;
+
+            Process[] all;
+            try { all = Process.GetProcessesByName(Program.AppName); }
+            catch (Exception ex)
+            {
+                Program.LogDebug("Could not enumerate KeyPulse processes: " + ex.Message);
+                return matches;
+            }
+
+            foreach (var process in all)
+            {
+                var keep = false;
+                try
+                {
+                    if (process.Id != Environment.ProcessId)
+                    {
+                        string? path = null;
+                        try { path = process.MainModule?.FileName; }
+                        catch { sawUninspectable = true; keep = true; }
+
+                        if (path != null && path.Equals(Program.ExePath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            keep = true;
+                        }
+                    }
+                }
+                catch { }
+
+                if (keep) matches.Add(process);
+                else process.Dispose();
+            }
+
+            return matches;
+        }
+
+        /// <summary>ISSUE_5: offers to restart the uninstaller with Administrator rights.</summary>
+        private async Task<bool> AskToRetryElevatedAsync()
+        {
+            var tcs = new TaskCompletionSource<bool>();
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                var previousContent = Content;
+
+                var panel = new StackPanel
+                {
+                    VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Spacing = 14,
+                    MaxWidth = 470
+                };
+                panel.Children.Add(new TextBlock { Text = "KeyPulse Is Running As Administrator", Classes = { "SectionTitle" }, HorizontalAlignment = HorizontalAlignment.Center });
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "KeyPulse is running with Administrator rights, so this uninstaller cannot close it. Restart the uninstaller with Administrator rights to finish, or close KeyPulse yourself from the icon next to the clock and run it again.",
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center
+                });
+
+                var retry = new Button { Content = "Restart As Administrator", Classes = { "Primary" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 0 };
+                var skip = new Button { Content = "Continue Anyway", Classes = { "Secondary" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 1 };
+
+                retry.Click += (s, e) => { Content = previousContent; tcs.TrySetResult(true); };
+                skip.Click += (s, e) => { Content = previousContent; tcs.TrySetResult(false); };
+
+                panel.Children.Add(retry);
+                panel.Children.Add(skip);
+
+                Content = new Border { Classes = { "Panel" }, Margin = new Thickness(24), Child = panel };
+                retry.Focus();
+            });
+
+            return await tcs.Task;
+        }
+
+        /// <summary>
+        /// Starts this same uninstaller again with a UAC prompt. `--elevated-retry` guarantees the
+        /// elevated copy never offers to elevate a second time, so this cannot loop.
+        /// </summary>
+        private static bool RelaunchUninstallerElevated(out string error)
+        {
+            error = string.Empty;
+            try
+            {
+                using var elevated = Process.Start(new ProcessStartInfo
+                {
+                    FileName = Environment.ProcessPath!,
+                    Arguments = "--uninstall --elevated-retry",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
             }
         }
 
@@ -453,6 +607,178 @@ namespace KeyPulse
             else await RunInstall();
         }
 
+        /// <summary>
+        /// ISSUE_7: the second, explicit confirmation before a wipe. It says how many shortcuts are
+        /// about to be destroyed, and confirms that a dated safety copy will be written first.
+        /// </summary>
+        private async Task<bool> ConfirmWipeAsync()
+        {
+            var shortcutCount = 0;
+            try
+            {
+                shortcutCount = ConfigStore.Load(out _, out _).Hotkeys.Count;
+            }
+            catch { }
+
+            var w = new Window
+            {
+                Title = "Wipe every KeyPulse setting?",
+                Width = 480,
+                MinWidth = 420,
+                MinHeight = 260,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                CanResize = false,
+                Icon = this.Icon
+            };
+
+            var panel = new StackPanel { Margin = new Thickness(20), Spacing = 10 };
+            panel.Children.Add(new TextBlock { Text = "Delete all of it?", Classes = { "SectionTitle" } });
+            panel.Children.Add(new TextBlock
+            {
+                Text = shortcutCount > 0
+                    ? $"This permanently deletes ALL {shortcutCount} shortcut{(shortcutCount == 1 ? "" : "s")} you have saved, every preference, and every rollback copy."
+                    : "This permanently deletes every saved preference and every rollback copy.",
+                TextWrapping = TextWrapping.Wrap
+            });
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Before deleting, KeyPulse writes a dated safety copy of your settings next to the KeyPulse folder, so this can be undone by hand if you change your mind.",
+                Classes = { "Muted" },
+                TextWrapping = TextWrapping.Wrap
+            });
+
+            var buttons = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                Spacing = 8,
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+            var keep = new Button { Content = "Keep my settings", Classes = { "Primary" }, MinWidth = 140 };
+            var wipe = new Button { Content = "Yes, wipe everything", Classes = { "Danger" }, MinWidth = 150 };
+            buttons.Children.Add(keep);
+            buttons.Children.Add(wipe);
+            panel.Children.Add(buttons);
+
+            var result = false;
+            keep.Click += (s, e) => w.Close();
+            wipe.Click += (s, e) => { result = true; w.Close(); };
+
+            w.Content = new ScrollViewer
+            {
+                Content = panel,
+                VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
+            };
+            w.Opened += (s, e) => keep.Focus();
+
+            try
+            {
+                await w.ShowDialog(this);
+            }
+            catch (InvalidOperationException)
+            {
+                var closed = new TaskCompletionSource<object?>();
+                w.Closed += (s, e) => closed.TrySetResult(null);
+                w.Show();
+                await closed.Task;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// ISSUE_12: asks a running KeyPulse to exit through the named event the app actually
+        /// honours (its window hides on WM_CLOSE by design, so CloseMainWindow could never work).
+        /// Waits up to ~4 seconds for a clean exit, then force-kills any straggler.
+        /// </summary>
+        private async Task CloseRunningInstancesAsync()
+        {
+            Program.SignalInstancesToExit();
+
+            for (var attempt = 0; attempt < 8; attempt++)
+            {
+                var still = FindInstalledInstances(out _);
+                var alive = still.Count;
+                foreach (var p in still) p.Dispose();
+                if (alive == 0)
+                {
+                    Log("  -> Closed cleanly on request.");
+                    return;
+                }
+
+                await Task.Delay(500);
+            }
+
+            var stragglers = FindInstalledInstances(out _);
+            foreach (var p in stragglers)
+            {
+                using (p)
+                {
+                    try
+                    {
+                        Log($"  -> Process {p.Id} did not exit on request; forcing.");
+                        p.Kill();
+                        p.WaitForExit(3000);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("  -> Failed to stop process " + p.Id + ": " + ex.Message);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// ISSUE_19: per-user "Add to KeyPulse" entries for File Explorer's right-click menu:
+        /// any file (programs, apps, shortcuts), any folder, and the background of an open folder.
+        /// These are plain HKCU registrations: Windows 10 shows them directly in the menu, and
+        /// Windows 11 shows them in the classic menu behind "Show more options" (Shift+right-click).
+        /// A top-level entry in Windows 11's new-style menu would require a packaged COM
+        /// IExplorerCommand server, which does not fit a single-file NativeAOT exe.
+        /// </summary>
+        private void RegisterExplorerContextMenu()
+        {
+            try
+            {
+                var command = $"\"{Program.ExePath}\" --add-target \"%1\"";
+                var backgroundCommand = $"\"{Program.ExePath}\" --add-target \"%V\"";
+
+                RegisterContextMenuShellKey(@"Software\Classes\*\shell\KeyPulse.Add", command);
+                RegisterContextMenuShellKey(@"Software\Classes\Directory\shell\KeyPulse.Add", command);
+                RegisterContextMenuShellKey(@"Software\Classes\Directory\Background\shell\KeyPulse.Add", backgroundCommand);
+                Log("  -> \"Add to KeyPulse\" added to the right-click menu.");
+            }
+            catch (Exception ex)
+            {
+                Log("  -> Warning: could not register the right-click menu entry: " + ex.Message);
+            }
+        }
+
+        private void RegisterContextMenuShellKey(string shellKeyPath, string command)
+        {
+            using var shellKey = Registry.CurrentUser.CreateSubKey(shellKeyPath, true);
+            shellKey.SetValue(null, "Add to KeyPulse");
+            shellKey.SetValue("Icon", Program.ExePath + ",0");
+            using var commandKey = shellKey.CreateSubKey("command", true);
+            commandKey.SetValue(null, command);
+        }
+
+        /// <summary>ISSUE_19: removes every per-user "Add to KeyPulse" menu entry.</summary>
+        private void RemoveExplorerContextMenu()
+        {
+            try
+            {
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\*\shell\KeyPulse.Add", false);
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Directory\shell\KeyPulse.Add", false);
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Directory\Background\shell\KeyPulse.Add", false);
+                Log("  -> \"Add to KeyPulse\" removed from the right-click menu.");
+            }
+            catch (Exception ex)
+            {
+                Log("  -> Warning: could not remove the right-click menu entry: " + ex.Message);
+            }
+        }
+
         private async Task RunInstall()
         {
             try
@@ -461,9 +787,7 @@ namespace KeyPulse
                 Log("Cleaning up legacy temporary files...");
                 try { DeleteMatchingFilesExceptCurrent("KeyPulse*.exe"); } catch { }
                 try { DeleteMatchingFilesExceptCurrent("keypulse_*.txt"); } catch { }
-                // ISSUE_21: the graphics libraries moved out of %TEMP% and into the install folder.
                 try { if (Directory.Exists(Program.LegacyNativeLibDir)) Directory.Delete(Program.LegacyNativeLibDir, true); } catch { }
-                // ISSUE_8: logs moved out of %LOCALAPPDATA%\KeyPulse, which nothing ever cleaned up.
                 try { if (Directory.Exists(Program.LegacyLogDir)) Directory.Delete(Program.LegacyLogDir, true); } catch { }
                 var installWarnings = new List<string>();
 
@@ -478,16 +802,30 @@ namespace KeyPulse
                         panel.Children.Add(new TextBlock { Text = "Existing Installation Detected", Classes = { "SectionTitle" }, HorizontalAlignment = HorizontalAlignment.Center });
                         panel.Children.Add(new TextBlock { Text = "Keep your existing shortcuts and settings, or wipe them for a fresh install.", TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
                         panel.Children.Add(new TextBlock { Text = "Wiping settings deletes saved shortcuts and app preferences.", Classes = { "ErrorText" }, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
-                        
+
                         var btnKeep = new Button { Content = "Keep Settings & Upgrade", Classes = { "Primary" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 0 };
                         var btnWipe = new Button { Content = "Wipe Settings", Classes = { "Danger" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 1 };
-                        
+
                         btnKeep.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(false); };
-                        btnWipe.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(true); };
-                        
+                        btnWipe.Click += async (s, e) =>
+                        {
+                            // ISSUE_7: one misclick must not destroy everything. Wiping asks a
+                            // second, explicit confirmation that says how many shortcuts are about
+                            // to be destroyed - and a dated safety copy is written aside first, the
+                            // same safety net a restore gets.
+                            var confirmed = await ConfirmWipeAsync();
+                            if (!confirmed)
+                            {
+                                Log("Wipe was canceled. Nothing was deleted.");
+                                return;
+                            }
+                            Content = _mainGrid;
+                            tcs.TrySetResult(true);
+                        };
+
                         panel.Children.Add(btnKeep);
                         panel.Children.Add(btnWipe);
-                        
+
                         Content = new Border { Classes = { "Panel" }, Margin = new Thickness(24), Child = panel };
                         btnKeep.Focus();
                     });
@@ -495,18 +833,25 @@ namespace KeyPulse
                     bool wipe = await tcs.Task;
                     if (wipe)
                     {
-                        Log("User opted for a FRESH INSTALL. Wiping old settings and logs...");
+                        Log("User opted for a FRESH INSTALL. Writing a safety copy, then wiping old settings and logs...");
+                        var safetyCopy = ConfigStore.SaveWipeSafetyCopy();
+                        if (safetyCopy != null)
+                        {
+                            Log("  -> Safety copy kept as: " + safetyCopy);
+                        }
+                        else
+                        {
+                            Log("  -> Warning: no safety copy could be written (there may be no existing settings).");
+                        }
                         try { Directory.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse"), true); } catch { }
                         _config = new AppConfig();
-                        
+
                         Log("  -> Success.");
                     }
                     else
                     {
                         Log("User opted to UPGRADE. Keeping existing settings.");
                         Log("Validating existing configuration schema...");
-                        // ISSUE_4: a damaged config is renamed aside, never deleted. The old code
-                        // called File.Delete on it, destroying the user's shortcuts permanently.
                         var loaded = ConfigStore.Load(out var configError, out var quarantined);
                         if (string.IsNullOrEmpty(configError))
                         {
@@ -535,10 +880,12 @@ namespace KeyPulse
 
                 SetProgress("Step 1 of 6: Terminating running instances...", 1, 6);
                 Log("Step 1/6: Terminating running instances...");
-                foreach (var p in Process.GetProcessesByName("KeyPulse"))
-                {
-                    if (p.Id != Environment.ProcessId) { try { p.CloseMainWindow(); if (!p.WaitForExit(1000)) p.Kill(); p.WaitForExit(3000); } catch { } }
-                }
+
+                // ISSUE_12: a window close request can never work - the app hides to the tray by
+                // design - so the old polite ask always failed, stalled a second and force-killed.
+                // Ask through the named event the app honours, wait for a clean exit, and only kill
+                // real stragglers.
+                await CloseRunningInstancesAsync();
                 await Task.Delay(500);
                 Log("  -> Success.");
 
@@ -560,14 +907,25 @@ namespace KeyPulse
 
                 SetProgress("Step 3 of 6: Copying application binaries...", 3, 6);
                 Log("Step 3/6: Copying application binaries...");
-                File.Copy(Environment.ProcessPath!, Program.ExePath, true);
+
+                var stagedExe = Program.ExePath + ".new";
+                try { if (File.Exists(stagedExe)) File.Delete(stagedExe); } catch { }
+
+                File.Copy(Environment.ProcessPath!, stagedExe, true);
+
+                var stagedLength = new FileInfo(stagedExe).Length;
+                var sourceLength = new FileInfo(Environment.ProcessPath!).Length;
+                if (stagedLength != sourceLength)
+                {
+                    try { File.Delete(stagedExe); } catch { }
+                    throw new IOException($"The copied program file is {stagedLength} bytes but should be {sourceLength}. Nothing was replaced.");
+                }
+
+                File.Move(stagedExe, Program.ExePath, true);
                 Log("  -> Success.");
 
                 SetProgress("Step 4 of 6: Registering with Windows...", 4, 6);
                 Log("Step 4/6: Registering with Programs and Features (appwiz.cpl)...");
-                // ISSUE_16: Windows "Installed apps" showed KeyPulse with a blank version, blank
-                // size and no install date, because only four values were ever written. The row now
-                // carries everything Windows knows how to display.
                 var key = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{Program.AppName}");
                 key.SetValue("DisplayName", Program.AppName);
                 key.SetValue("DisplayIcon", Program.ExePath + ",0");
@@ -593,6 +951,9 @@ namespace KeyPulse
                 }
 
                 Log("  -> Success (version " + Program.AppVersion + ").");
+
+                // ISSUE_19: register the per-user "Add to KeyPulse" Explorer menu entries.
+                RegisterExplorerContextMenu();
 
                 SetProgress("Step 5 of 6: Creating shortcuts...", 5, 6);
                 Log("Step 5/6: Creating Start Menu and Desktop shortcuts...");
@@ -621,8 +982,6 @@ namespace KeyPulse
                 Log("Step 6/6: Updating Launch on Boot script if enabled...");
                 try
                 {
-                    // ISSUE_6 / ISSUE_12: ask the single authority (Run key OR elevated logon task)
-                    // and regenerate the launcher script without the old 60-second relaunch loop.
                     if (Program.IsStartupEnabled())
                     {
                         if (Program.SetStartup(true, out var startupError))
@@ -659,7 +1018,7 @@ namespace KeyPulse
                     _actionButton.Focus();
                     _actionButton.Click += (s, ev) =>
                     {
-                        try { Process.Start(new ProcessStartInfo { FileName = Program.ExePath, Arguments = "", UseShellExecute = true }); } catch { }
+                        try { using var launched = Process.Start(new ProcessStartInfo { FileName = Program.ExePath, Arguments = "", UseShellExecute = true }); } catch { }
                         ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
                     };
                 });
@@ -708,29 +1067,41 @@ namespace KeyPulse
 
                 SetProgress("Step 1 of 4: Terminating running instances...", 1, 4);
                 Log("Step 1/4: Terminating running instances...");
+
                 var processFailureCount = failures.Count;
-                foreach (var p in Process.GetProcessesByName("KeyPulse"))
+
+                // ISSUE_12: same as the upgrade path - ask through the exit event, then clean up.
+                await CloseRunningInstancesAsync();
+                await Task.Delay(500);
+
+                var survivors = FindInstalledInstances(out _);
+                var survivorCount = survivors.Count;
+                foreach (var p in survivors) p.Dispose();
+
+                if (survivorCount > 0)
                 {
-                    if (p.Id != Environment.ProcessId)
+                    if (!Program.IsElevated && !_elevatedRetry)
                     {
-                        try
+                        Log($"  -> {survivorCount} KeyPulse process(es) could not be closed - they are running with Administrator rights.");
+                        if (await AskToRetryElevatedAsync())
                         {
-                            p.CloseMainWindow();
-                            if (!p.WaitForExit(1000)) p.Kill();
-                            if (!p.WaitForExit(3000))
+                            if (RelaunchUninstallerElevated(out var relaunchError))
                             {
-                                var message = $"Process {p.Id}: did not exit within 3 seconds";
-                                failures.Add(message);
-                                Log("  -> Failed: " + message);
+                                Log("  -> Restarting the uninstaller with Administrator rights...");
+                                Dispatcher.UIThread.Post(() => ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty));
+                                return;
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            RecordFailure($"Process {p.Id}", ex);
+
+                            RecordFailure("Restarting with Administrator rights", new Exception(relaunchError));
                         }
                     }
+
+                    var stuck = $"{survivorCount} running KeyPulse process(es) could not be closed. "
+                              + "Right-click the KeyPulse icon next to the clock, choose \"Exit KeyPulse\", then run the uninstaller again.";
+                    failures.Add(stuck);
+                    Log("  -> Failed: " + stuck);
                 }
-                await Task.Delay(500);
+
                 if (failures.Count == processFailureCount) Log("  -> Success.");
 
                 SetProgress("Step 2 of 4: Removing application binaries...", 2, 4);
@@ -754,9 +1125,6 @@ namespace KeyPulse
                 SetProgress("Step 3 of 4: Removing registry and startup entries...", 3, 4);
                 Log("Step 3/4: Removing the Administrator logon task, Registry keys and startup entries...");
 
-                // ISSUE_13: verify the scheduled task is really gone. The old code fired schtasks
-                // from Program.cs, ignored the exit code, and reported success either way - leaving a
-                // logon task that tried to start a deleted KeyPulse.exe at every sign-in.
                 try
                 {
                     if (Program.TryRemoveAdminTask(out var taskError))
@@ -777,21 +1145,34 @@ namespace KeyPulse
                 var registrySucceeded = true;
                 try { Registry.CurrentUser.DeleteSubKeyTree($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{Program.AppName}", false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Uninstall registry key", ex); }
                 try { Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)?.DeleteValue(Program.AppName, false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Startup registry key", ex); }
+
+                // ISSUE_19: take the "Add to KeyPulse" right-click entries back out.
+                RemoveExplorerContextMenu();
+
                 if (registrySucceeded) Log("  -> Success.");
 
                 SetProgress("Step 3 of 4: Purging AppData configuration...", 3.5, 4);
                 Log("Step 3.5/4: Purging AppData configuration...");
                 try
                 {
-                    // %APPDATA%\KeyPulse now holds config.json AND the logs folder (ISSUE_8), so this
-                    // single delete finally takes everything KeyPulse ever wrote about the user.
                     var appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
                     if (Directory.Exists(appDataDir)) Directory.Delete(appDataDir, true);
 
-                    // ISSUE_8: builds before this one wrote keypulse_debug.txt and keypulse_crash.txt -
-                    // a record of every shortcut the user ever pressed - into %LOCALAPPDATA%\KeyPulse,
-                    // and no uninstaller ever removed it. Take it now.
                     if (Directory.Exists(Program.LegacyLogDir)) Directory.Delete(Program.LegacyLogDir, true);
+
+                    // ISSUE_7: the dated pre-wipe safety copies live beside the folder so a wipe
+                    // cannot destroy them; the uninstaller is the one that finally removes them.
+                    var appDataParent = Directory.GetParent(appDataDir)?.FullName;
+                    if (!string.IsNullOrEmpty(appDataParent))
+                    {
+                        foreach (var leftover in Directory.GetFiles(appDataParent, "KeyPulse.before-wipe-*.json"))
+                        {
+                            try { File.Delete(leftover); } catch { }
+                        }
+                    }
+
+                    // ISSUE_19: any staged "Add to KeyPulse" hand-off file goes with the rest.
+                    try { if (File.Exists(Program.StagedAddPath)) File.Delete(Program.StagedAddPath); } catch { }
 
                     Log("  -> Success.");
                 }
@@ -859,7 +1240,7 @@ namespace KeyPulse
                     _actionButton.Click += (s, ev) =>
                     {
                         var selfDeleteScript = $"/c ping 127.0.0.1 -n 3 > nul & del /F /q \"{Environment.ProcessPath}\"";
-                        Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+                        using var cleanup = Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
                         ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
                     };
                 });
@@ -878,7 +1259,7 @@ namespace KeyPulse
                     _actionButton.Click += (s, ev) =>
                     {
                         var selfDeleteScript = $"/c ping 127.0.0.1 -n 3 > nul & del /F /q \"{Environment.ProcessPath}\"";
-                        Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+                        using var cleanup = Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
                         ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
                     };
                 });
@@ -886,7 +1267,5 @@ namespace KeyPulse
         }
     }
 }
-
-
 
 

@@ -58,7 +58,7 @@ namespace KeyPulse
         /// capture hook can recognise and ignore its own output instead of reading it back as if
         /// the user had typed it.
         /// </summary>
-        public static readonly IntPtr InjectionTag = new IntPtr(0x4B50_5545); // "KPUE"
+        public static readonly IntPtr InjectionTag = new IntPtr(0x4B50_5545);
 
         /// <summary>
         /// ISSUE_9: milliseconds paused between batches of characters, mirrored from AppConfig.
@@ -67,9 +67,6 @@ namespace KeyPulse
         /// </summary>
         public static volatile int CharacterDelayMs = 1;
 
-        // ------------------------------------------------------------------
-        // ISSUE_10: long "Type text" runs are cancellable, reportable, and never overlap.
-        // ------------------------------------------------------------------
 
         private static int _typingBusy;
         private static volatile bool _cancelRequested;
@@ -80,8 +77,12 @@ namespace KeyPulse
         /// <summary>Raised as typing advances. Arguments are (charactersSent, totalCharacters).</summary>
         public static event Action<int, int>? TypingProgressChanged;
 
-        /// <summary>Raised when a typing run ends. Argument is true when it was cancelled.</summary>
-        public static event Action<bool>? TypingFinished;
+        /// <summary>
+        /// Raised when a typing run ends. Arguments are (wasCancelled, charactersSent, totalCharacters).
+        /// ISSUE_18: a run cut short must be reported with how much actually landed, so the user can
+        /// clean up half a signature instead of wondering what happened.
+        /// </summary>
+        public static event Action<bool, int, int>? TypingFinished;
 
         public static bool IsTyping => Volatile.Read(ref _typingBusy) != 0;
 
@@ -99,41 +100,42 @@ namespace KeyPulse
             var batchSize = delay <= 2 ? 20 : 1;
             var batches = (characterCount + batchSize - 1) / batchSize;
 
-            // 60 ms settle, plus roughly a millisecond of SendInput per batch on top of the pause.
             return 60 + batches * (delay + 1);
         }
 
         public static void CancelTyping() => _cancelRequested = true;
 
-        public static bool TypeText(string text, out string error)
+        /// <summary>
+        /// ISSUE_17: a press that arrives while a run is already active is now refused OUT LOUD.
+        /// Returning true here used to report the swallowed press as a success, so the user had no
+        /// way to tell whether their key press was ignored or the app was broken.
+        /// </summary>
+        public static bool TypeText(string text, out string error, out bool ignoredBecauseBusy)
         {
             error = string.Empty;
+            ignoredBecauseBusy = false;
             if (string.IsNullOrEmpty(text)) return true;
 
-            // A second press while the first run is still typing used to start a parallel stream
-            // and interleave the two into garbage. Ignore it instead.
             if (Interlocked.CompareExchange(ref _typingBusy, 1, 0) != 0)
             {
-                Program.LogDebug("TypeText ignored: a typing run is already in progress.");
-                return true;
+                Program.LogDebug("TypeText refused: a typing run is already in progress.");
+                ignoredBecauseBusy = true;
+                error = "KeyPulse is still typing the previous snippet.";
+                return false;
             }
 
             _cancelRequested = false;
             var cancelled = false;
+            var sent = 0;
 
             try
             {
-                // ISSUE_9: characters are sent in batches and the pause is a user setting, not a
-                // hard-coded 12 ms per character.
                 var delay = Math.Clamp(CharacterDelayMs, 0, 250);
                 var batchSize = delay <= 2 ? 20 : 1;
 
                 Program.LogDebug($"TypeText: {text.Length} characters, {delay} ms between batches of {batchSize}.");
                 TypingStarted?.Invoke(text.Length);
 
-                // ISSUE_6: ask the window we are typing INTO which keyboard layout it uses. Asking
-                // our own thread produced the wrong letters whenever the target app was on another
-                // layout (Hebrew, German, French...).
                 var keyboardLayout = GetTargetKeyboardLayout();
                 SettleBeforeTyping();
 
@@ -149,7 +151,12 @@ namespace KeyPulse
 
                 while (i < text.Length)
                 {
-                    if (_cancelRequested || IsKeyPressed(VK_ESCAPE))
+                    // ISSUE_18: Escape is the most reflexively pressed key there is - dismissing an
+                    // autocomplete, closing a tooltip, backing out of a menu. Watching it across the
+                    // whole computer cut snippets in half with no notice. Cancelling now happens only
+                    // through CancelTyping(): the Stop button, or Escape while the progress window
+                    // itself is focused.
+                    if (_cancelRequested)
                     {
                         cancelled = true;
                         Program.LogDebug($"TypeText cancelled after {i} of {text.Length} characters.");
@@ -192,9 +199,11 @@ namespace KeyPulse
 
                     if (!SendKeyboardInputs(inputsList, "text input", out error))
                     {
+                        sent = i;
                         return false;
                     }
 
+                    sent = i;
                     TypingProgressChanged?.Invoke(i, text.Length);
                     if (delay > 0) Thread.Sleep(delay);
                 }
@@ -205,7 +214,7 @@ namespace KeyPulse
             {
                 _cancelRequested = false;
                 Volatile.Write(ref _typingBusy, 0);
-                TypingFinished?.Invoke(cancelled);
+                TypingFinished?.Invoke(cancelled, sent, text.Length);
             }
         }
 
@@ -382,7 +391,7 @@ namespace KeyPulse
             if (sent != inputs.Length)
             {
                 var win32Error = Marshal.GetLastWin32Error();
-                if (win32Error == 5) // ERROR_ACCESS_DENIED
+                if (win32Error == 5)
                 {
                     error = "Failed to type. The target app is running as Administrator. You must run KeyPulse as Administrator to type into it.";
                 }
@@ -396,9 +405,6 @@ namespace KeyPulse
             return true;
         }
 
-        // ------------------------------------------------------------------
-        // Clipboard
-        // ------------------------------------------------------------------
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool OpenClipboard(IntPtr hWndNewOwner);
@@ -533,7 +539,24 @@ namespace KeyPulse
             public readonly Dictionary<uint, byte[]> Formats = new();
             public readonly List<string> Unpreservable = new();
             public bool Captured;
+
+            /// <summary>Total bytes copied aside so far, across every format.</summary>
+            public long TotalBytes;
         }
+
+        /// <summary>
+        /// ISSUE_10: overall ceiling on what a clipboard backup may hold.
+        ///
+        /// There was a 64 MB limit per FORMAT but none on the total, and a clipboard carrying one
+        /// large image can offer it in several formats at once (CF_DIB, CF_DIBV5, PNG, private
+        /// application formats...). A single "Paste text" press could therefore copy hundreds of
+        /// megabytes aside, all of it well past the Large Object Heap threshold, and it happened on
+        /// EVERY press. Anything over the budget is reported through the same warning the user
+        /// already sees for content Windows will not let KeyPulse put back.
+        /// </summary>
+        private const long ClipboardBackupBudgetBytes = 96L * 1024 * 1024;
+
+        private const long ClipboardSingleFormatLimitBytes = 64L * 1024 * 1024;
 
         private static ClipboardSnapshot BackupClipboard()
         {
@@ -559,7 +582,6 @@ namespace KeyPulse
                     IntPtr handle = GetClipboardData(format);
                     if (handle == IntPtr.Zero)
                     {
-                        // Delayed-rendered content the owner refused or failed to produce.
                         snapshot.Unpreservable.Add(DescribeFormat(format));
                         continue;
                     }
@@ -578,16 +600,20 @@ namespace KeyPulse
                         {
                             snapshot.Unpreservable.Add(DescribeFormat(format));
                         }
-                        else if (size >= 64L * 1024 * 1024)
+                        else if (size >= ClipboardSingleFormatLimitBytes)
                         {
-                            // Too large to hold in memory safely - say so rather than dropping it silently.
                             snapshot.Unpreservable.Add(DescribeFormat(format) + " (too large to hold)");
+                        }
+                        else if (snapshot.TotalBytes + size > ClipboardBackupBudgetBytes)
+                        {
+                            snapshot.Unpreservable.Add(DescribeFormat(format) + " (clipboard too large to hold all of it)");
                         }
                         else
                         {
                             var data = new byte[size];
                             Marshal.Copy(pointer, data, 0, (int)size);
                             snapshot.Formats[format] = data;
+                            snapshot.TotalBytes += size;
                         }
                     }
                     catch
@@ -727,7 +753,6 @@ namespace KeyPulse
                 }
                 else if (observedForeignReader)
                 {
-                    // The reader finished with the data; give it a beat to copy it out.
                     Thread.Sleep(60);
                     return;
                 }
@@ -741,22 +766,27 @@ namespace KeyPulse
             }
         }
 
-        public static bool InsertText(string text, out string error, out string warning)
+        /// <summary>ISSUE_17: like TypeText, a busy press is refused out loud, never swallowed.</summary>
+        public static bool InsertText(string text, out string error, out string warning, out bool ignoredBecauseBusy)
         {
             error = string.Empty;
             warning = string.Empty;
+            ignoredBecauseBusy = false;
             if (string.IsNullOrEmpty(text)) return true;
 
             if (Interlocked.CompareExchange(ref _typingBusy, 1, 0) != 0)
             {
-                Program.LogDebug("InsertText ignored: a typing or pasting run is already in progress.");
-                return true;
+                Program.LogDebug("InsertText refused: a typing or pasting run is already in progress.");
+                ignoredBecauseBusy = true;
+                error = "KeyPulse is still typing or pasting the previous snippet.";
+                return false;
             }
 
+            ClipboardSnapshot? originalClipboard = null;
             try
             {
                 Program.LogDebug($"InsertText using plain-text clipboard paste for {text.Length} characters.");
-                var originalClipboard = BackupClipboard();
+                originalClipboard = BackupClipboard();
 
                 if (originalClipboard.Unpreservable.Count > 0)
                 {
@@ -771,13 +801,12 @@ namespace KeyPulse
                 if (!SetWin32ClipboardText(text))
                 {
                     error = "Plain-text clipboard setup failed.";
-                    RestoreClipboard(originalClipboard);
                     return false;
                 }
 
                 Thread.Sleep(50);
 
-                var keyboardLayout = GetTargetKeyboardLayout(); // ISSUE_6
+                var keyboardLayout = GetTargetKeyboardLayout();
                 var inputsList = new List<INPUT>();
 
                 AddPressedModifierKeyUps(inputsList, keyboardLayout);
@@ -788,17 +817,19 @@ namespace KeyPulse
 
                 if (!SendKeyboardInputs(inputsList, "paste input", out error))
                 {
-                    RestoreClipboard(originalClipboard);
                     return false;
                 }
 
                 WaitForClipboardToBeConsumed(2500);
-                RestoreClipboard(originalClipboard);
 
                 return true;
             }
             finally
             {
+                if (originalClipboard != null)
+                {
+                    RestoreClipboard(originalClipboard);
+                }
                 Volatile.Write(ref _typingBusy, 0);
             }
         }

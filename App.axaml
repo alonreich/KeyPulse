@@ -21,6 +21,11 @@
                     <SolidColorBrush x:Key="AppInputBrush" Color="#111827" />
                     <SolidColorBrush x:Key="AppHoverBrush" Color="#27364d" />
                     <SolidColorBrush x:Key="AppSelectedBrush" Color="#1d4ed833" />
+                    <!-- ISSUE_13: the "more content this way" fades follow the theme. The old
+                         hard-coded black gradients with near-white arrows rendered as dirty grey
+                         smudges with almost invisible arrows in Light mode. -->
+                    <Color x:Key="ScrollFadeEdgeColor">#50000000</Color>
+                    <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#A0f8fafc" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <SolidColorBrush x:Key="AppSurfaceBrush" Color="#f8fafc" />
@@ -33,6 +38,10 @@
                     <SolidColorBrush x:Key="AppInputBrush" Color="#ffffff" />
                     <SolidColorBrush x:Key="AppHoverBrush" Color="#e2e8f0" />
                     <SolidColorBrush x:Key="AppSelectedBrush" Color="#bfdbfe" />
+                    <!-- ISSUE_13: a soft grey shadow over white instead of a black smudge, with
+                         dark arrows that stay legible. -->
+                    <Color x:Key="ScrollFadeEdgeColor">#2B64748b</Color>
+                    <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#C00f172a" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
