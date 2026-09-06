@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Net.Http;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -112,7 +112,14 @@ namespace KeyPulse
         {
             if (string.IsNullOrWhiteSpace(version)) return null;
 
-            var raw = version.Trim().Split('.', StringSplitOptions.RemoveEmptyEntries);
+            var clean = version.Trim().TrimStart('v', 'V');
+            var metaIdx = clean.IndexOfAny(new[] { '-', '+' });
+            if (metaIdx >= 0)
+            {
+                clean = clean.Substring(0, metaIdx);
+            }
+
+            var raw = clean.Split('.', StringSplitOptions.RemoveEmptyEntries);
             if (raw.Length == 0) return null;
 
             var parts = new long[raw.Length];

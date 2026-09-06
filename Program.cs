@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -198,6 +198,14 @@ class Program
 
         if (isUninstall)
         {
+            if (!TryAcquireSetupLock())
+            {
+                MessageBox(IntPtr.Zero,
+                    "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
+                    "KeyPulse", 0x40);
+                return;
+            }
+
             var tempUninstaller = Path.Combine(Path.GetTempPath(), "KeyPulse_Uninstaller.exe");
             if (!Environment.ProcessPath!.Equals(tempUninstaller, StringComparison.OrdinalIgnoreCase))
             {
@@ -207,6 +215,7 @@ class Program
                 }
                 catch (Exception ex)
                 {
+                    ReleaseSingleInstanceLock();
                     LogCrash($"Could not stage the uninstaller at {tempUninstaller}: {ex}");
                     MessageBox(IntPtr.Zero,
                         "KeyPulse could not start its uninstaller.\n\n" + ex.Message +
@@ -231,25 +240,59 @@ class Program
                         "KeyPulse could not start its uninstaller.\n\n" + ex.Message,
                         "KeyPulse", 0x10);
                 }
+                finally
+                {
+                    ReleaseSingleInstanceLock();
+                }
                 return;
             }
             // ISSUE_11: extraction now happens AFTER the single-instance check, so a second launch
             // that only brings the window forward costs nothing. Setup windows still need the
             // graphics libraries before Avalonia boots.
-            ExtractNativeLibs();
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            try
+            {
+                ExtractNativeLibs();
+                BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            }
+            finally
+            {
+                ReleaseSingleInstanceLock();
+            }
             return;
         }
 
         if (isInstallWorker)
         {
-            ExtractNativeLibs();
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            if (!TryAcquireSetupLock())
+            {
+                MessageBox(IntPtr.Zero,
+                    "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
+                    "KeyPulse", 0x40);
+                return;
+            }
+
+            try
+            {
+                ExtractNativeLibs();
+                BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            }
+            finally
+            {
+                ReleaseSingleInstanceLock();
+            }
             return;
         }
 
         if (!IsRunningFromInstallPath())
         {
+            if (!TryAcquireSetupLock())
+            {
+                MessageBox(IntPtr.Zero,
+                    "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
+                    "KeyPulse", 0x40);
+                return;
+            }
+
             try
             {
                 var ps = new Process
@@ -268,20 +311,13 @@ class Program
             {
                 LogCrash($"Install relaunch failed: {ex.Message}");
             }
+            finally
+            {
+                ReleaseSingleInstanceLock();
+            }
             return;
         }
 
-        if (isSetupMode)
-        {
-            if (!TryAcquireSetupLock())
-            {
-                MessageBox(IntPtr.Zero,
-                    "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
-                    "KeyPulse", 0x40);
-                return;
-            }
-        }
-        else
         {
             bool createdNew;
             var lockUnavailable = false;
@@ -646,10 +682,10 @@ class Program
         // as enabled.
         if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var xml))
         {
-            // ISSUE_9: schtasks exits non-zero both when the task genuinely does not exist and when
-            // the query failed. Only "cannot find" means the task is really absent; anything else
-            // (timeout, security software, access denied) is Unknown, never "off".
-            var notFound = xml.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase)
+            // Language-independent check: the task definition file resides in System32\Tasks
+            var taskFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "Tasks", AdminTaskName);
+            var notFound = !File.Exists(taskFilePath)
+                || xml.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase)
                 || xml.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
                 || xml.Contains("cannot find", StringComparison.OrdinalIgnoreCase);
             return notFound ? AdminTaskState.NotPresent : AdminTaskState.Unknown;
@@ -763,9 +799,77 @@ class Program
 
         var user = GetArgumentValue(args, "--for-user")
                    ?? System.Security.Principal.WindowsIdentity.GetCurrent().Name;
-        var taskCmd = $"/Create /F /TN \"{AdminTaskName}\" /TR \"\\\"{ExePath}\\\" --hidden\" /SC ONLOGON /RL HIGHEST /RU \"{user}\"";
 
-        if (!RunSchtasks(taskCmd, out var exitCode, out var output))
+        var xmlTemplate = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
+<Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
+  <RegistrationInfo>
+    <Date>{DateTime.UtcNow:s}</Date>
+    <Author>{System.Security.SecurityElement.Escape(user)}</Author>
+    <URI>\{AdminTaskName}</URI>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id=""Author"">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <IdleSettings>
+      <Duration>PT10M</Duration>
+      <WaitTimeout>PT1H</WaitTimeout>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Triggers>
+    <LogonTrigger>
+      <Delay>PT3S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Actions Context=""Author"">
+    <Exec>
+      <Command>{System.Security.SecurityElement.Escape(ExePath)}</Command>
+      <Arguments>--hidden</Arguments>
+    </Exec>
+  </Actions>
+</Task>";
+
+        var tempXmlPath = Path.Combine(Path.GetTempPath(), $"keypulse_task_{Guid.NewGuid():N}.xml");
+        bool created = false;
+        int exitCode = -1;
+        string output = string.Empty;
+
+        try
+        {
+            File.WriteAllText(tempXmlPath, xmlTemplate, System.Text.Encoding.Unicode);
+            created = RunSchtasks($"/Create /TN \"{AdminTaskName}\" /XML \"{tempXmlPath}\" /F", out exitCode, out output);
+        }
+        catch (Exception ex)
+        {
+            LogCrash($"XML task creation error: {ex.Message}");
+        }
+        finally
+        {
+            try { if (File.Exists(tempXmlPath)) File.Delete(tempXmlPath); } catch { }
+        }
+
+        if (!created)
+        {
+            var taskCmd = $"/Create /F /TN \"{AdminTaskName}\" /TR \"\\\"{ExePath}\\\" --hidden\" /SC ONLOGON /RL HIGHEST /RU \"{user}\"";
+            created = RunSchtasks(taskCmd, out exitCode, out output);
+        }
+
+        if (!created)
         {
             LogCrash($"schtasks create failed ({exitCode}): {output}");
             MessageBox(IntPtr.Zero,

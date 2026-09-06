@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -216,6 +216,26 @@ namespace KeyPulse
                 OnPropertyChanged(nameof(TargetTooltip));
             }
         }
+
+        private bool _addToQuickActionMenu;
+        public bool AddToQuickActionMenu
+        {
+            get => _addToQuickActionMenu;
+            set
+            {
+                if (_addToQuickActionMenu == value) return;
+                _addToQuickActionMenu = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(QuickActionIndicator));
+                OnPropertyChanged(nameof(QuickActionTooltip));
+            }
+        }
+
+        [JsonIgnore]
+        public string QuickActionIndicator => AddToQuickActionMenu ? "⚡" : string.Empty;
+
+        [JsonIgnore]
+        public string QuickActionTooltip => AddToQuickActionMenu ? "In Quick Action Menu (Right-click system tray)" : string.Empty;
 
         /// <summary>True while the value must not be shown anywhere in the list.</summary>
         [JsonIgnore]
@@ -442,6 +462,7 @@ namespace KeyPulse
         public ActionType Action { get; set; }
         public string Target { get; set; } = string.Empty;
         public bool IsTargetObfuscated { get; set; }
+        public bool AddToQuickActionMenu { get; set; }
     }
 
     /// <summary>
@@ -520,9 +541,69 @@ namespace KeyPulse
         public const string EncryptionAesGcm = "AesGcmPbkdf2";
     }
 
+    public enum UnsavedIconBehavior
+    {
+        CenterGrid,
+        LeaveInPlace,
+        SideColumn
+    }
+
+    public class DesktopIconSnapshot
+    {
+        public string Name { get; set; } = string.Empty;
+        public int MonitorIndex { get; set; } = 1;
+        public int RelativeX { get; set; }
+        public int RelativeY { get; set; }
+        public int AbsoluteX { get; set; }
+        public int AbsoluteY { get; set; }
+    }
+
+    public class DesktopMonitorSnapshot
+    {
+        public int Index { get; set; } = 1;
+        public int Left { get; set; }
+        public int Top { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public bool IsPrimary { get; set; }
+    }
+
+    public class DesktopLayoutProfile
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string Name { get; set; } = "Default Layout";
+        public string CreatedAt { get; set; } = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        public int DisplayCount { get; set; }
+        public int IconSpacingX { get; set; } = 76;
+        public int IconSpacingY { get; set; } = 100;
+        public List<DesktopMonitorSnapshot> Monitors { get; set; } = new();
+        public List<DesktopIconSnapshot> Icons { get; set; } = new();
+
+        [JsonIgnore]
+        public int IconCount => Icons?.Count ?? 0;
+
+        [JsonIgnore]
+        public string SummaryText => $"{DisplayCount} Monitor{(DisplayCount == 1 ? "" : "s")} • {IconCount} Icon{(IconCount == 1 ? "" : "s")}";
+    }
+
+    public class DesktopOrganizerConfig
+    {
+        public bool AutoRestoreOnDisplayChange { get; set; } = false;
+        public UnsavedIconBehavior NewIconBehavior { get; set; } = UnsavedIconBehavior.CenterGrid;
+        public string ActiveProfileId { get; set; } = string.Empty;
+        public List<DesktopLayoutProfile> Profiles { get; set; } = new();
+    }
+
     [JsonSerializable(typeof(AppConfig))]
     [JsonSerializable(typeof(BackupEnvelope))]
     [JsonSerializable(typeof(BackupPayload))]
     [JsonSerializable(typeof(GitHubRelease))]
+    [JsonSerializable(typeof(DesktopOrganizerConfig))]
+    [JsonSerializable(typeof(DesktopLayoutProfile))]
+    [JsonSerializable(typeof(DesktopIconSnapshot))]
+    [JsonSerializable(typeof(DesktopMonitorSnapshot))]
+    [JsonSerializable(typeof(List<DesktopLayoutProfile>))]
+    [JsonSerializable(typeof(List<DesktopIconSnapshot>))]
+    [JsonSerializable(typeof(List<DesktopMonitorSnapshot>))]
     public partial class AppConfigJsonContext : JsonSerializerContext { }
 }

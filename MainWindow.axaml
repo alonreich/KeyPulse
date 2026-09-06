@@ -55,9 +55,9 @@
                     <ComboBoxItem>Type text (one key at a time)</ComboBoxItem>
                     <ComboBoxItem>Paste text (instant)</ComboBoxItem>
                 </ComboBox>
-                <!-- ISSUE_14: tab order walks the editor once, top to bottom, left to right:
-                     shortcut(0), action(1), target(2), browse(3), expand(4), blur(5), add(6),
-                     cancel(7). The old markup gave two controls TabIndex 4 and two TabIndex 5. -->
+                <!-- tab order walks the editor once, top to bottom, left to right:
+                     shortcut(0), action(1), target(2), blur(3), quick action(4), expand(5), browse(6), add(7),
+                     cancel(8). -->
                 <Button Grid.Row="1"
                         Grid.Column="2"
                         Name="AddButton"
@@ -65,7 +65,7 @@
                         Classes="Primary"
                         Click="Add_Click"
                         Margin="0,0,8,0"
-                        TabIndex="6"
+                        TabIndex="7"
                         MinWidth="96" />
                 <Button Grid.Row="1"
                         Grid.Column="3"
@@ -74,7 +74,7 @@
                         Classes="Secondary"
                         Click="CancelEdit_Click"
                         IsVisible="False"
-                        TabIndex="7"
+                        TabIndex="8"
                         MinWidth="86" />
 
                 <StackPanel Grid.Row="2"
@@ -102,7 +102,7 @@
 
                 <Grid Grid.Row="4"
                       Grid.ColumnSpan="4"
-                      ColumnDefinitions="*,Auto,Auto,Auto">
+                      ColumnDefinitions="*,Auto,Auto,Auto,Auto">
                     <!-- ISSUE_17: no fixed Height. The old code computed one in C# from a guess that
                          a line holds ~40 characters regardless of the window's real width, capped at
                          15 lines, and re-applied it on every keystroke. Layout measures it properly
@@ -125,23 +125,30 @@
                               ToolTip.Tip="Blur the target text in the list to hide passwords or sensitive data"
                               Margin="0,0,8,0"
                               VerticalAlignment="Center"
-                              TabIndex="5" />
-                    <Button Grid.Column="2"
+                              TabIndex="3" />
+                    <CheckBox Grid.Column="2"
+                              Name="QuickActionCheck"
+                              Content="Add to Quick Action Menu"
+                              ToolTip.Tip="Show this shortcut in the right-click system tray menu for one-click execution without using the keyboard"
+                              Margin="0,0,8,0"
+                              VerticalAlignment="Center"
+                              TabIndex="4" />
+                    <Button Grid.Column="3"
                             Name="ExpandTargetBtn"
                             Content="Expand"
                             Classes="Secondary"
                             Click="ExpandTarget_Click"
                             IsVisible="False"
-                            TabIndex="4"
+                            TabIndex="5"
                             MinWidth="88"
                             Margin="0,0,8,0"
                             ToolTip.Tip="Open this text in a larger, resizable editor" />
-                    <Button Grid.Column="3"
+                    <Button Grid.Column="4"
                             Name="BrowseBtn"
                             Content="Browse"
                             Classes="Secondary"
                             Click="Browse_Click"
-                            TabIndex="3"
+                            TabIndex="6"
                             MinWidth="92"
                             ToolTip.Tip="Choose a file or folder" />
                 </Grid>
@@ -173,7 +180,7 @@
                  Margin="0,0,0,12"
                  PlaceholderText="Search shortcuts..."
                  TextChanged="SearchBox_TextChanged"
-                 TabIndex="8"
+                 TabIndex="9"
                  ToolTip.Tip="Filter by shortcut keys, action, target or status" />
 
         <Border Grid.Row="2"
@@ -336,14 +343,24 @@
                                             <Border Classes="ShortcutGridSeparatorLine" />
                                         </Grid>
                                         <Border Grid.Column="2" Classes="ShortcutGridCell">
-                                            <TextBlock Text="{Binding KeyCombination}"
-                                                       HorizontalAlignment="Center"
-                                                       VerticalAlignment="Center"
-                                                       TextAlignment="Center"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource AppAccentBrush}"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       ToolTip.Tip="{Binding KeyCombination}" />
+                                            <StackPanel Orientation="Horizontal"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        Spacing="4">
+                                                <TextBlock Text="{Binding KeyCombination}"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center"
+                                                           TextAlignment="Center"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource AppAccentBrush}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip.Tip="{Binding KeyCombination}" />
+                                                <TextBlock Text="{Binding QuickActionIndicator}"
+                                                           Foreground="{DynamicResource AppAccentBrush}"
+                                                           FontSize="11"
+                                                           VerticalAlignment="Center"
+                                                           ToolTip.Tip="{Binding QuickActionTooltip}" />
+                                            </StackPanel>
                                         </Border>
                                         <Grid Grid.Column="3">
                                             <Border Classes="ShortcutGridSeparatorCell" />
@@ -561,13 +578,22 @@
                        HorizontalAlignment="Center"
                        Margin="10,0,10,0"
                        TextTrimming="CharacterEllipsis" />
-            <Button Grid.Column="2"
-                    Content="Settings"
-                    Classes="Secondary"
-                    Click="Settings_Click"
-                    TabIndex="9"
-                    HorizontalAlignment="Right"
-                    MinWidth="98" />
+            <StackPanel Grid.Column="2"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        HorizontalAlignment="Right">
+                <Button Content="Desktop Organizer"
+                        Classes="Secondary"
+                        Click="DesktopOrganizer_Click"
+                        TabIndex="8"
+                        MinWidth="136"
+                        ToolTip.Tip="Save, restore, and manage desktop icon arrangements across your displays." />
+                <Button Content="Settings"
+                        Classes="Secondary"
+                        Click="Settings_Click"
+                        TabIndex="9"
+                        MinWidth="98" />
+            </StackPanel>
         </Grid>
     </Grid>
 </Window>

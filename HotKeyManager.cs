@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -253,7 +253,7 @@ namespace KeyPulse
                     UpdateCaptureModifierState(vkCode, false);
                 }
 
-                if (vkCode == 0x1B || vkCode == 0x09 || vkCode == 0x5B || vkCode == 0x5C)
+                if (vkCode == 0x1B || vkCode == 0x09)
                 {
                     return CallNextHookEx(_hookID, nCode, wParam, lParam);
                 }

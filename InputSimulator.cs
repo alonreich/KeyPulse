@@ -753,11 +753,19 @@ namespace KeyPulse
                 }
                 else if (observedForeignReader)
                 {
-                    Thread.Sleep(60);
+                    Thread.Sleep(20);
                     return;
                 }
 
-                Thread.Sleep(5);
+                // In the initial 30ms, use short sleeps to catch microsecond clipboard opens; then throttle to 5ms
+                if (stopwatch.ElapsedMilliseconds < 30)
+                {
+                    Thread.Sleep(1);
+                }
+                else
+                {
+                    Thread.Sleep(5);
+                }
             }
 
             if (!observedForeignReader)
@@ -820,7 +828,7 @@ namespace KeyPulse
                     return false;
                 }
 
-                WaitForClipboardToBeConsumed(2500);
+                WaitForClipboardToBeConsumed(2000);
 
                 return true;
             }

@@ -45,6 +45,8 @@ public partial class App : Application
             var icons = TrayIcon.GetIcons(current);
             if (icons == null || icons.Count == 0) return;
 
+            if (!icons[0].IsVisible) icons[0].IsVisible = true;
+
             icons[0].ToolTipText = inactive > 0
                 ? $"KeyPulse - {active} working, {inactive} NOT working (click to fix)"
                 : $"KeyPulse - {active} shortcut{(active == 1 ? "" : "s")} working";
@@ -52,6 +54,206 @@ public partial class App : Application
         catch
         {
         }
+    }
+
+    public static void RefreshTrayIcon()
+    {
+        try
+        {
+            var current = Current;
+            if (current == null) return;
+
+            var icons = TrayIcon.GetIcons(current);
+            if (icons == null || icons.Count == 0) return;
+
+            icons[0].IsVisible = false;
+            icons[0].IsVisible = true;
+            if (_lastQuickActionHotkeys != null)
+            {
+                UpdateTrayQuickActions(_lastQuickActionHotkeys);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static List<HotkeyEntry>? _lastQuickActionHotkeys;
+
+    public static void UpdateTrayQuickActions(IEnumerable<HotkeyEntry>? hotkeys)
+    {
+        try
+        {
+            var current = Current as App;
+            if (current == null) return;
+
+            if (hotkeys != null)
+            {
+                _lastQuickActionHotkeys = new List<HotkeyEntry>(hotkeys);
+            }
+
+            var icons = TrayIcon.GetIcons(current);
+            if (icons == null || icons.Count == 0) return;
+
+            var trayIcon = icons[0];
+            if (trayIcon.Menu == null)
+            {
+                trayIcon.Menu = new NativeMenu();
+            }
+
+            trayIcon.Menu.Items.Clear();
+
+            var quickActions = (_lastQuickActionHotkeys ?? Enumerable.Empty<HotkeyEntry>())
+                .Where(h => h.AddToQuickActionMenu && h.IsEnabled)
+                .ToList();
+
+            if (quickActions.Count > 0)
+            {
+                var headerItem = new NativeMenuItem("QUICK ACTIONS") { IsEnabled = false };
+                trayIcon.Menu.Items.Add(headerItem);
+
+                foreach (var entry in quickActions)
+                {
+                    var title = "  " + FormatQuickActionTitle(entry);
+                    var item = new NativeMenuItem(title);
+                    var captured = entry;
+                    item.Click += (s, e) => ExecuteQuickAction(captured);
+                    trayIcon.Menu.Items.Add(item);
+                }
+
+                trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
+            }
+
+            var openItem = new NativeMenuItem("Open KeyPulse");
+            openItem.Click += current.OpenKeybinds_Clicked;
+            trayIcon.Menu.Items.Add(openItem);
+
+            var orgItem = new NativeMenuItem("Desktop Organizer");
+            orgItem.Click += current.DesktopOrganizer_Clicked;
+            trayIcon.Menu.Items.Add(orgItem);
+
+            var settingsItem = new NativeMenuItem("Settings");
+            settingsItem.Click += current.OpenSettings_Clicked;
+            trayIcon.Menu.Items.Add(settingsItem);
+
+            trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
+
+            var exitItem = new NativeMenuItem("Exit KeyPulse");
+            exitItem.Click += current.Exit_Clicked;
+            trayIcon.Menu.Items.Add(exitItem);
+        }
+        catch (Exception ex)
+        {
+            KeyPulse.Program.LogCrash("UpdateTrayQuickActions failed: " + ex);
+        }
+    }
+
+    public static void ExecuteQuickAction(HotkeyEntry entry)
+    {
+        try
+        {
+            if (Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                var mw = desktop.MainWindow as MainWindow ?? HiddenWindow;
+                if (mw != null)
+                {
+                    if (entry.Action == ActionType.TypeText || entry.Action == ActionType.InsertText)
+                    {
+                        Task.Run(async () =>
+                        {
+                            await Task.Delay(180);
+                            Avalonia.Threading.Dispatcher.UIThread.Post(() => mw.ExecuteAction(entry));
+                        });
+                    }
+                    else
+                    {
+                        mw.ExecuteAction(entry);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            KeyPulse.Program.LogCrash($"ExecuteQuickAction failed for {entry.KeyCombination}: {ex}");
+        }
+    }
+
+    private static string FormatQuickActionTitle(HotkeyEntry entry)
+    {
+        if (entry.IsTargetObfuscated)
+        {
+            return string.IsNullOrWhiteSpace(entry.KeyCombination)
+                ? $"{entry.ActionDisplay} (Protected)"
+                : $"{entry.ActionDisplay} ({entry.KeyCombination})";
+        }
+
+        string actionDesc;
+        switch (entry.Action)
+        {
+            case ActionType.OpenFolder:
+            {
+                var folder = (entry.Target ?? string.Empty).Trim().Trim('"').TrimEnd('\\', '/');
+                var name = Path.GetFileName(folder);
+                if (string.IsNullOrWhiteSpace(name)) name = folder;
+                actionDesc = string.IsNullOrWhiteSpace(name) ? "Open Folder" : $"Open {name}";
+                break;
+            }
+            case ActionType.LaunchProgram:
+            {
+                var raw = (entry.Target ?? string.Empty).Trim().Trim('"');
+                var name = string.Empty;
+                try
+                {
+                    if (MainWindow.TryResolveLaunchTarget(raw, out var resolvedFile, out _, out _))
+                    {
+                        name = Path.GetFileNameWithoutExtension(resolvedFile);
+                    }
+                    else
+                    {
+                        var firstToken = raw.Split(' ')[0].Trim('"');
+                        name = Path.GetFileNameWithoutExtension(firstToken);
+                    }
+                }
+                catch { }
+
+                if (string.IsNullOrWhiteSpace(name)) name = "Program";
+                actionDesc = $"Launch {name}";
+                break;
+            }
+            case ActionType.BrowseChrome:
+            {
+                var url = (entry.Target ?? string.Empty).Trim();
+                string displayUrl = url;
+                try
+                {
+                    if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                    {
+                        displayUrl = uri.Host + (uri.PathAndQuery.Length > 1 && uri.PathAndQuery != "/" ? uri.PathAndQuery : "");
+                    }
+                }
+                catch { }
+
+                if (displayUrl.Length > 28) displayUrl = displayUrl.Substring(0, 25) + "...";
+                actionDesc = string.IsNullOrWhiteSpace(displayUrl) ? "Open Web Link" : $"Open {displayUrl}";
+                break;
+            }
+            case ActionType.TypeText:
+            case ActionType.InsertText:
+            {
+                var snippet = (entry.Target ?? string.Empty).Trim().Replace("\r\n", " ").Replace("\n", " ");
+                if (snippet.Length > 24) snippet = snippet.Substring(0, 21) + "...";
+                var verb = entry.Action == ActionType.TypeText ? "Type" : "Paste";
+                actionDesc = string.IsNullOrWhiteSpace(snippet) ? $"{verb} text" : $"{verb} \"{snippet}\"";
+                break;
+            }
+            default:
+                actionDesc = entry.ActionDisplay;
+                break;
+        }
+
+        return string.IsNullOrWhiteSpace(entry.KeyCombination)
+            ? actionDesc
+            : $"{actionDesc} ({entry.KeyCombination})";
     }
 
     public override void OnFrameworkInitializationCompleted()
@@ -135,6 +337,11 @@ public partial class App : Application
                 mw.BringToFront();
             }
         }
+    }
+
+    public void DesktopOrganizer_Clicked(object? sender, System.EventArgs e)
+    {
+        DesktopOrganizerWindow.OpenOrganizer(ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop ? desktop.MainWindow : null);
     }
 
     public void OpenSettings_Clicked(object? sender, System.EventArgs e)

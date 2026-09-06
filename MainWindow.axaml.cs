@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -76,6 +76,7 @@ namespace KeyPulse
 
         /// <summary>ISSUE_4: serialises background reachability checks so they never pile up.</summary>
         private readonly System.Threading.SemaphoreSlim _availabilityGate = new(1, 1);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _activeAvailabilityChecks = new();
 
         public MainWindow() : this(false)
         {
@@ -409,6 +410,17 @@ namespace KeyPulse
             }
 
             UpdateSortHeaderText();
+            try
+            {
+                if (Screens != null)
+                {
+                    Screens.Changed += (s, e) =>
+                    {
+                        DesktopOrganizerService.HandleDisplayChangeDebounced();
+                    };
+                }
+            }
+            catch { }
         }
 
         /// <summary>ISSUE_9: the three speeds the Settings list offers, in milliseconds.</summary>
@@ -564,10 +576,10 @@ namespace KeyPulse
         {
             return resourceKey switch
             {
-                "ShortcutKeyColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutKeyColumnWidth, 220, 160, 360),
-                "ShortcutActionColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutActionColumnWidth, 128, 110, 260),
-                "ShortcutStatusColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutStatusColumnWidth, 128, 110, 260),
-                "ShortcutTargetColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutTargetColumnWidth, 468, 180, 1600),
+                "ShortcutStatusColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutStatusColumnWidth, StatusColumnDefault, StatusColumnMin, StatusColumnMax),
+                "ShortcutKeyColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutKeyColumnWidth, KeyColumnDefault, KeyColumnMin, KeyColumnMax),
+                "ShortcutActionColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutActionColumnWidth, ActionColumnDefault, ActionColumnMin, ActionColumnMax),
+                "ShortcutTargetColumnWidth" => ClampColumnWidth(_currentConfig.ShortcutTargetColumnWidth, TargetColumnDefault, TargetColumnMin, TargetColumnMax),
                 _ => 120
             };
         }
@@ -634,6 +646,9 @@ namespace KeyPulse
             var columns = headerGrid.ColumnDefinitions;
             if (columns.Count < 9) return;
 
+            // Do not capture if the grid has not been measured/rendered yet (e.g. starting hidden)
+            if (columns[0].ActualWidth <= 0 || columns[2].ActualWidth <= 0 || columns[4].ActualWidth <= 0 || columns[6].ActualWidth <= 0) return;
+
             _currentConfig.ShortcutStatusColumnWidth = ClampColumnWidth(columns[0].ActualWidth, StatusColumnDefault, StatusColumnMin, StatusColumnMax);
             _currentConfig.ShortcutKeyColumnWidth = ClampColumnWidth(columns[2].ActualWidth, KeyColumnDefault, KeyColumnMin, KeyColumnMax);
             _currentConfig.ShortcutActionColumnWidth = ClampColumnWidth(columns[4].ActualWidth, ActionColumnDefault, ActionColumnMin, ActionColumnMax);
@@ -649,12 +664,15 @@ namespace KeyPulse
                     CaptureShortcutColumnWidths();
                 }
                 _currentConfig.Hotkeys = new System.Collections.Generic.List<HotkeyEntry>(Hotkeys);
-                if (WindowState != Avalonia.Controls.WindowState.Minimized)
+                if (WindowState == Avalonia.Controls.WindowState.Normal)
                 {
                     _currentConfig.MainWindowX = Position.X;
                     _currentConfig.MainWindowY = Position.Y;
                     _currentConfig.MainWindowWidth = Bounds.Width;
                     _currentConfig.MainWindowHeight = Bounds.Height;
+                }
+                if (WindowState != Avalonia.Controls.WindowState.Minimized)
+                {
                     _currentConfig.MainWindowState = WindowState.ToString();
                 }
 
@@ -717,6 +735,7 @@ namespace KeyPulse
                 Action = source.Action,
                 Target = source.Target,
                 IsTargetObfuscated = source.IsTargetObfuscated,
+                AddToQuickActionMenu = source.AddToQuickActionMenu,
                 TargetUnreadable = source.TargetUnreadable,
                 UnreadableTargetCipher = source.UnreadableTargetCipher,
                 TargetProtectionFailed = source.TargetProtectionFailed
@@ -880,6 +899,9 @@ namespace KeyPulse
             var target = entry.Target;
             if (string.IsNullOrEmpty(target)) return;
 
+            var checkKey = entry.Id + ":" + target;
+            if (!_activeAvailabilityChecks.TryAdd(checkKey, 0)) return;
+
             _ = System.Threading.Tasks.Task.Run(async () =>
             {
                 await _availabilityGate.WaitAsync();
@@ -891,6 +913,7 @@ namespace KeyPulse
                 finally
                 {
                     _availabilityGate.Release();
+                    _activeAvailabilityChecks.TryRemove(checkKey, out _);
                 }
             });
         }
@@ -987,6 +1010,7 @@ namespace KeyPulse
             var disabled = Hotkeys.Count(h => !h.IsEnabled);
 
             App.UpdateTrayStatus(active, broken);
+            App.UpdateTrayQuickActions(Hotkeys);
             UpdateEmptyState();
 
             if (this.FindControl<TextBlock>("ShortcutCountText") is TextBlock countText)
@@ -1743,7 +1767,7 @@ namespace KeyPulse
             return true;
         }
 
-        private static bool TryResolveLaunchTarget(string rawTarget, out string fileName, out string arguments, out string error)
+        internal static bool TryResolveLaunchTarget(string rawTarget, out string fileName, out string arguments, out string error)
         {
             fileName = string.Empty;
             arguments = string.Empty;
@@ -1818,15 +1842,52 @@ namespace KeyPulse
                 lastSpace = target.LastIndexOf(' ', lastSpace - 1);
             }
 
+            var extensions = new[] { ".exe", ".bat", ".cmd", ".ps1", ".lnk", ".vbs", ".com" };
+            foreach (var ext in extensions)
+            {
+                var extIdx = target.IndexOf(ext + " ", StringComparison.OrdinalIgnoreCase);
+                if (extIdx > 0)
+                {
+                    fileName = target.Substring(0, extIdx + ext.Length);
+                    arguments = target.Substring(extIdx + ext.Length + 1).Trim();
+                    return true;
+                }
+                if (target.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                {
+                    fileName = target;
+                    arguments = string.Empty;
+                    return true;
+                }
+            }
+
+            var switchIndex = target.IndexOf(" -", StringComparison.Ordinal);
+            if (switchIndex < 0) switchIndex = target.IndexOf(" /", StringComparison.Ordinal);
+            if (switchIndex > 0)
+            {
+                fileName = target.Substring(0, switchIndex).Trim();
+                arguments = target.Substring(switchIndex + 1).Trim();
+                return true;
+            }
+
             var firstSpace = target.IndexOf(' ');
             if (firstSpace > 0)
             {
-                fileName = target.Substring(0, firstSpace);
-                arguments = target.Substring(firstSpace + 1).Trim();
+                var candidate = target.Substring(0, firstSpace);
+                if (Path.HasExtension(candidate) || candidate.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) < 0)
+                {
+                    fileName = candidate;
+                    arguments = target.Substring(firstSpace + 1).Trim();
+                }
+                else
+                {
+                    fileName = target;
+                    arguments = string.Empty;
+                }
             }
             else
             {
                 fileName = target;
+                arguments = string.Empty;
             }
 
             return true;
@@ -1963,7 +2024,7 @@ namespace KeyPulse
             catch { }
         }
 
-        private void ExecuteAction(HotkeyEntry entry)
+        internal void ExecuteAction(HotkeyEntry entry)
         {
             try
             {
@@ -2486,30 +2547,46 @@ namespace KeyPulse
             }
         }
 
-        private async System.Threading.Tasks.Task CommitSelectedEditorChangeAsync()
+        private async System.Threading.Tasks.Task<bool> CommitSelectedEditorChangeAsync()
         {
-            if (_loadingEditorFields || _editingEntry == null) return;
+            if (_loadingEditorFields || _editingEntry == null) return false;
 
             var keyText = this.FindControl<TextBox>("KeyCombo")?.Text?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(keyText) || keyText.EndsWith("+", StringComparison.Ordinal))
             {
-                return;
+                SetFieldError("KeyCombo", "Enter a complete shortcut");
+                Program.PlaySound("error");
+                return false;
+            }
+
+            var normalizedNewCombo = NormalizeComboKey(keyText);
+            var duplicate = Hotkeys.FirstOrDefault(h => !ReferenceEquals(h, _editingEntry) &&
+                string.Equals(NormalizeComboKey(h.KeyCombination), normalizedNewCombo, StringComparison.OrdinalIgnoreCase));
+            if (duplicate != null)
+            {
+                SetFieldError("KeyCombo", "This shortcut is already in use");
+                Program.PlaySound("error");
+                return false;
             }
 
             var actionCombo = this.FindControl<ComboBox>("ActionCombo");
             if (actionCombo == null || actionCombo.SelectedIndex < 0 || actionCombo.SelectedIndex > (int)ActionType.InsertText)
             {
-                return;
+                SetFieldError("TargetText", "Choose an action");
+                Program.PlaySound("error");
+                return false;
             }
 
             if (!await EnsureRiskyShortcutApprovedAsync(keyText))
             {
-                return;
+                return false;
             }
 
-            if (!ValidateHotkeyFormat(keyText, false, out _, _editingEntry.AllowRiskyShortcut))
+            if (!ValidateHotkeyFormat(keyText, false, out var formatError, _editingEntry.AllowRiskyShortcut))
             {
-                return;
+                SetFieldError("KeyCombo", formatError ?? "Invalid shortcut");
+                Program.PlaySound("error");
+                return false;
             }
 
             var newAction = (ActionType)actionCombo.SelectedIndex;
@@ -2525,7 +2602,8 @@ namespace KeyPulse
             {
                 SetFieldError("TargetText", targetError);
                 SetFieldWarning("TargetText", null);
-                return;
+                Program.PlaySound("error");
+                return false;
             }
 
             SetFieldError("TargetText", null);
@@ -2542,11 +2620,13 @@ namespace KeyPulse
             // plain text forever.
             _editingEntry.TargetProtectionFailed = false;
             _editingEntry.IsTargetObfuscated = this.FindControl<CheckBox>("ObfuscateCheck")?.IsChecked ?? false;
+            _editingEntry.AddToQuickActionMenu = this.FindControl<CheckBox>("QuickActionCheck")?.IsChecked ?? false;
 
             ApplyHotkeys();
             RefreshVisibleHotkeys();
             SaveConfig();
             UpdateEditorModeText();
+            return true;
         }
 
         private async System.Threading.Tasks.Task<bool> EnsureRiskyShortcutApprovedAsync(string combo)
@@ -2600,8 +2680,10 @@ namespace KeyPulse
 
             if (isEditing)
             {
-                await CommitSelectedEditorChangeAsync();
-                ResetEditor();
+                if (await CommitSelectedEditorChangeAsync())
+                {
+                    ResetEditor();
+                }
                 return;
             }
 
@@ -2667,7 +2749,8 @@ namespace KeyPulse
                 Target = normalizedTarget,
                 IsEnabled = true,
                 AllowRiskyShortcut = allowRiskyShortcut,
-                IsTargetObfuscated = this.FindControl<CheckBox>("ObfuscateCheck")?.IsChecked ?? false
+                IsTargetObfuscated = this.FindControl<CheckBox>("ObfuscateCheck")?.IsChecked ?? false,
+                AddToQuickActionMenu = this.FindControl<CheckBox>("QuickActionCheck")?.IsChecked ?? false
             };
 
             Hotkeys.Add(entry);
@@ -2695,8 +2778,11 @@ namespace KeyPulse
             _creatingDuplicate = false;
             _duplicateSourceCombo = null;
             _stagedAddTarget = null;
-            UpdateEditorModeText();
-            SelectHotkeyEntry(entry);
+            ResetEditor();
+            if (this.FindControl<ListBox>("HotkeyList") is ListBox list)
+            {
+                list.ScrollIntoView(entry);
+            }
         }
 
         public void HotkeyList_SelectionChanged(object? sender, SelectionChangedEventArgs e)
@@ -2748,6 +2834,7 @@ namespace KeyPulse
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)entry.Action;
                 if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = entry.Target;
                 if (this.FindControl<CheckBox>("ObfuscateCheck") is CheckBox obfuscateCheck) obfuscateCheck.IsChecked = entry.IsTargetObfuscated;
+                if (this.FindControl<CheckBox>("QuickActionCheck") is CheckBox quickActionCheck) quickActionCheck.IsChecked = entry.AddToQuickActionMenu;
             }
             finally
             {
@@ -2815,7 +2902,7 @@ namespace KeyPulse
                 return;
             }
 
-            editText.Text = $"Editing {_editingEntry.KeyCombination} - {_editingEntry.ActionDisplay}. Changes save automatically.";
+            editText.Text = $"Editing {_editingEntry.KeyCombination} - {_editingEntry.ActionDisplay}. Click Save to apply changes.";
             editText.IsVisible = true;
         }
 
@@ -2850,6 +2937,7 @@ namespace KeyPulse
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = 0;
                 if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = "";
                 if (this.FindControl<CheckBox>("ObfuscateCheck") is CheckBox obfuscateCheck) obfuscateCheck.IsChecked = false;
+                if (this.FindControl<CheckBox>("QuickActionCheck") is CheckBox quickActionCheck) quickActionCheck.IsChecked = false;
             }
             finally
             {
@@ -2894,10 +2982,10 @@ namespace KeyPulse
 
         public async void Remove_Click(object? sender, RoutedEventArgs e)
         {
-            Program.PlaySound("close");
             if (sender is Button btn && btn.DataContext is HotkeyEntry entry)
             {
                 if (!await ConfirmRemoveAsync(entry)) return;
+                Program.PlaySound("close");
                 if (ReferenceEquals(_editingEntry, entry) || (_creatingDuplicate && entry.IsEditing)) ResetEditor();
                 ReleaseRegistration(entry);
                 Hotkeys.Remove(entry);
@@ -2926,6 +3014,8 @@ namespace KeyPulse
                 if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = string.Empty;
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)source.Action;
                 if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = source.Target;
+                if (this.FindControl<CheckBox>("ObfuscateCheck") is CheckBox obfuscateCheck) obfuscateCheck.IsChecked = source.IsTargetObfuscated;
+                if (this.FindControl<CheckBox>("QuickActionCheck") is CheckBox quickActionCheck) quickActionCheck.IsChecked = source.AddToQuickActionMenu;
                 if (this.FindControl<Button>("AddButton") is Button addButton)
                 {
                     addButton.Content = "Add Duplicate";
@@ -3169,6 +3259,12 @@ namespace KeyPulse
             return 0;
         }
 
+        public void DesktopOrganizer_Click(object? sender, RoutedEventArgs e)
+        {
+            Program.PlaySound("click");
+            DesktopOrganizerWindow.OpenOrganizer(this);
+        }
+
         public void Settings_Click(object? sender, RoutedEventArgs e)
         {
             Program.PlaySound("click");
@@ -3350,7 +3446,29 @@ namespace KeyPulse
             panel.Children.Add(restoreBtn);
 
             var statusTxt = new TextBlock { Margin = new Avalonia.Thickness(0,10,0,0), Foreground = AppBrush("AppWarningBrush"), TextWrapping = Avalonia.Media.TextWrapping.Wrap, Classes = { "Muted" } };
-            panel.Children.Add(statusTxt);
+            panel.Children.Add(new TextBlock { Text = "Desktop Organizer", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Save and restore desktop icon arrangements across your displays.",
+                Classes = { "Muted" },
+                FontSize = 11,
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap
+            });
+            var openOrganizerBtn = new Button
+            {
+                Content = "Open Desktop Organizer",
+                Classes = { "Secondary" },
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                Margin = new Avalonia.Thickness(0, 4, 0, 0),
+                TabIndex = 7,
+                IsTabStop = true
+            };
+            openOrganizerBtn.Click += (s, ev) =>
+            {
+                DesktopOrganizerWindow.OpenOrganizer(w);
+            };
+            panel.Children.Add(openOrganizerBtn);
 
             panel.Children.Add(new TextBlock { Text = "About", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
             panel.Children.Add(new TextBlock
@@ -3373,7 +3491,7 @@ namespace KeyPulse
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
                 Margin = new Avalonia.Thickness(0, 4, 0, 0),
-                TabIndex = 7,
+                TabIndex = 8,
                 IsTabStop = true
             };
             var updateButtonOpensDownloadPage = false;
@@ -3422,7 +3540,7 @@ namespace KeyPulse
 
             panel.Children.Add(new TextBlock { Text = "Privileges", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
             bool isAdmin = Program.IsElevated;
-            var adminBtn = new Button { HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center, Margin = new Avalonia.Thickness(0, 4, 0, 0), TabIndex = 8, IsTabStop = true };
+            var adminBtn = new Button { HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center, Margin = new Avalonia.Thickness(0, 4, 0, 0), TabIndex = 9, IsTabStop = true };
             var adminStack = new StackPanel { Orientation = Avalonia.Layout.Orientation.Vertical, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
             var adminTitle = new TextBlock { Text = isAdmin ? "Run As User Level" : "Run As Administrator", FontWeight = Avalonia.Media.FontWeight.SemiBold, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
             var adminSub = new TextBlock { Text = isAdmin ? "(Safer, but might not paste into Admin apps)" : "(To Inject Text Into Older CMD Consoles)", FontSize = 10, Classes = { "Muted" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
@@ -3466,7 +3584,7 @@ namespace KeyPulse
             };
             panel.Children.Add(adminBtn);
 
-            var closeBtn = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 9, IsTabStop = true };
+            var closeBtn = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 10, IsTabStop = true };
             closeBtn.Classes.Add("Secondary");
             closeBtn.Click += (s, ev) => w.Close();
             panel.Children.Add(closeBtn);
@@ -3844,7 +3962,8 @@ namespace KeyPulse
                     KeyCombination = h.KeyCombination,
                     Action = h.Action,
                     Target = h.Target,
-                    IsTargetObfuscated = h.IsTargetObfuscated
+                    IsTargetObfuscated = h.IsTargetObfuscated,
+                    AddToQuickActionMenu = h.AddToQuickActionMenu
                 }).ToList()
             };
         }
@@ -3882,11 +4001,11 @@ namespace KeyPulse
             Grid.SetRow(explain, 1);
             grid.Children.Add(explain);
 
-            var first = new TextBox { PasswordChar = '●', Watermark = "Password" };
+            var first = new TextBox { PasswordChar = '●', PlaceholderText = "Password" };
             Grid.SetRow(first, 2);
             grid.Children.Add(first);
 
-            var second = new TextBox { PasswordChar = '●', Watermark = "Type it again", Margin = new Avalonia.Thickness(0, 8, 0, 0) };
+            var second = new TextBox { PasswordChar = '●', PlaceholderText = "Type it again", Margin = new Avalonia.Thickness(0, 8, 0, 0) };
             Grid.SetRow(second, 3);
             grid.Children.Add(second);
 
@@ -3918,9 +4037,9 @@ namespace KeyPulse
                 Spacing = 8,
                 Margin = new Avalonia.Thickness(0, 12, 0, 0)
             };
-            var cancel = new Button { Content = "Cancel", Classes = { "Secondary" }, MinWidth = 90 };
+            var cancel = new Button { Content = "Cancel", Classes = { "Secondary" }, MinWidth = 90, IsCancel = true };
             var skip = new Button { Content = "Save without a password", Classes = { "Secondary" }, MinWidth = 180 };
-            var protect = new Button { Content = "Encrypt", Classes = { "Primary" }, MinWidth = 100 };
+            var protect = new Button { Content = "Encrypt", Classes = { "Primary" }, MinWidth = 100, IsDefault = true };
             buttons.Children.Add(cancel);
             buttons.Children.Add(skip);
             buttons.Children.Add(protect);
@@ -4021,7 +4140,7 @@ namespace KeyPulse
             var box = new TextBox
             {
                 PasswordChar = '●',
-                Watermark = "Password",
+                PlaceholderText = "Password",
                 Margin = new Avalonia.Thickness(0, 12, 0, 0)
             };
             Grid.SetRow(box, 1);
@@ -4044,7 +4163,7 @@ namespace KeyPulse
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
                 Spacing = 8
             };
-            var cancel = new Button { Content = "Cancel", Classes = { "Secondary" }, MinWidth = 90 };
+            var cancel = new Button { Content = "Cancel", Classes = { "Secondary" }, MinWidth = 90, IsCancel = true };
             var unlock = new Button { Content = "Unlock", Classes = { "Primary" }, MinWidth = 100, IsDefault = true };
             buttons.Children.Add(cancel);
             buttons.Children.Add(unlock);
@@ -4229,7 +4348,8 @@ namespace KeyPulse
                     KeyCombination = item.KeyCombination ?? string.Empty,
                     Action = item.Action,
                     Target = item.Target ?? string.Empty,
-                    IsTargetObfuscated = item.IsTargetObfuscated
+                    IsTargetObfuscated = item.IsTargetObfuscated,
+                    AddToQuickActionMenu = item.AddToQuickActionMenu
                 });
             }
 

@@ -67,6 +67,7 @@
             <GridLength x:Key="ShortcutActionColumnWidth">128</GridLength>
             <GridLength x:Key="ShortcutStatusColumnWidth">128</GridLength>
             <GridLength x:Key="ShortcutTargetColumnWidth">468</GridLength>
+            <GridLength x:Key="ShortcutActionsColumnWidth">252</GridLength>
         </ResourceDictionary>
     </Application.Resources>
 
@@ -318,7 +319,9 @@
                 <TrayIcon.Menu>
                     <NativeMenu>
                         <NativeMenuItem Header="Open KeyPulse" Click="OpenKeybinds_Clicked" />
+                        <NativeMenuItem Header="Desktop Organizer" Click="DesktopOrganizer_Clicked" />
                         <NativeMenuItem Header="Settings" Click="OpenSettings_Clicked" />
+                        <NativeMenuItemSeparator />
                         <NativeMenuItem Header="Exit KeyPulse" Click="Exit_Clicked" />
                     </NativeMenu>
                 </TrayIcon.Menu>

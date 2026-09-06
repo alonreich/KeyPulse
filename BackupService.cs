@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -348,7 +348,8 @@ namespace KeyPulse
                     KeyCombination = h.KeyCombination,
                     Action = h.Action,
                     Target = h.Target,
-                    IsTargetObfuscated = h.IsTargetObfuscated
+                    IsTargetObfuscated = h.IsTargetObfuscated,
+                    AddToQuickActionMenu = h.AddToQuickActionMenu
                 }).ToList()
             };
 

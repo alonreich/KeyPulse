@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -381,6 +381,12 @@ namespace KeyPulse
         [DllImport("shell32.dll")]
         private static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
 
+        [DllImport("shell32.dll")]
+        private static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+        private const uint SHCNE_ASSOCCHANGED = 0x08000000;
+        private const uint SHCNF_IDLIST = 0x0000;
+
         [DllImport("ole32.dll")]
         private static extern void CoTaskMemFree(IntPtr pv);
 
@@ -441,8 +447,10 @@ namespace KeyPulse
                 return fullPath;
             }
 
-            probeSummary = string.Join("; ", probed);
-            return null;
+            var defaultDesktop = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Desktop");
+            try { Directory.CreateDirectory(defaultDesktop); } catch { }
+            probeSummary = string.Join("; ", probed) + "; Fallback: " + defaultDesktop;
+            return defaultDesktop;
         }
 
         private static void AddKnownFolderDesktopCandidate(List<string> candidates)
@@ -559,6 +567,8 @@ namespace KeyPulse
                     IShellLink link = (IShellLink)new ShellLink();
                     link.SetPath(Program.ExePath);
                     link.SetWorkingDirectory(Program.InstallDir);
+                    link.SetDescription("KeyPulse - Global Hotkey & Shortcut Manager");
+                    link.SetIconLocation(Program.ExePath, 0);
                     IPersistFile file = (IPersistFile)link;
                     file.Save(startMenuShortcut, false);
                 }
@@ -574,6 +584,8 @@ namespace KeyPulse
                         IShellLink link2 = (IShellLink)new ShellLink();
                         link2.SetPath(Program.ExePath);
                         link2.SetWorkingDirectory(Program.InstallDir);
+                        link2.SetDescription("KeyPulse - Global Hotkey & Shortcut Manager");
+                        link2.SetIconLocation(Program.ExePath, 0);
                         IPersistFile file2 = (IPersistFile)link2;
                         file2.Save(desktopShortcut, false);
                     }
@@ -586,6 +598,12 @@ namespace KeyPulse
                 {
                     warnings.Add("Desktop shortcut skipped because no writable Desktop folder could be resolved.");
                 }
+
+                try
+                {
+                    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+                }
+                catch { }
             });
 
             if (!File.Exists(startMenuShortcut))
@@ -1144,7 +1162,7 @@ namespace KeyPulse
 
                 var registrySucceeded = true;
                 try { Registry.CurrentUser.DeleteSubKeyTree($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{Program.AppName}", false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Uninstall registry key", ex); }
-                try { Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)?.DeleteValue(Program.AppName, false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Startup registry key", ex); }
+                try { using var runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true); runKey?.DeleteValue(Program.AppName, false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Startup registry key", ex); }
 
                 // ISSUE_19: take the "Add to KeyPulse" right-click entries back out.
                 RemoveExplorerContextMenu();
@@ -1239,8 +1257,6 @@ namespace KeyPulse
                     _actionButton.Focus();
                     _actionButton.Click += (s, ev) =>
                     {
-                        var selfDeleteScript = $"/c ping 127.0.0.1 -n 3 > nul & del /F /q \"{Environment.ProcessPath}\"";
-                        using var cleanup = Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
                         ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
                     };
                 });
@@ -1258,8 +1274,6 @@ namespace KeyPulse
                     _actionButton.Focus();
                     _actionButton.Click += (s, ev) =>
                     {
-                        var selfDeleteScript = $"/c ping 127.0.0.1 -n 3 > nul & del /F /q \"{Environment.ProcessPath}\"";
-                        using var cleanup = Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript) { CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
                         ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
                     };
                 });
