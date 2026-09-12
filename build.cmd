@@ -18,6 +18,11 @@ if "%RC%"=="1" (
   echo ###########################################################
   pause
 )
+
+  popd >nul
+
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%developer_tools\SetConsoleFont.ps1" <nul
+
 exit /b %RC%
 
 :run_logged

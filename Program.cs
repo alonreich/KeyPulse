@@ -32,6 +32,60 @@ class Program
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
 
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr TokenHandle, int TokenInformationClass, IntPtr TokenInformation, uint TokenInformationLength, out uint ReturnLength);
+
+    private const uint TOKEN_QUERY = 0x0008;
+    private const int TokenElevation = 20;
+
+    public static bool IsProcessElevated(Process process)
+    {
+        try
+        {
+            if (OpenProcessToken(process.Handle, TOKEN_QUERY, out var tokenHandle))
+            {
+                try
+                {
+                    var elevation = Marshal.AllocHGlobal(sizeof(int));
+                    try
+                    {
+                        if (GetTokenInformation(tokenHandle, TokenElevation, elevation, sizeof(int), out _))
+                        {
+                            return Marshal.ReadInt32(elevation) != 0;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(elevation);
+                    }
+                }
+                finally
+                {
+                    CloseHandle(tokenHandle);
+                }
+            }
+            else
+            {
+                // Error 5 = ERROR_ACCESS_DENIED. An unelevated process querying an elevated process
+                // is denied token access, which indicates the target process is elevated.
+                if (Marshal.GetLastWin32Error() == 5) return true;
+            }
+        }
+        catch
+        {
+            // Access denied on process.Handle also indicates higher integrity
+            return true;
+        }
+
+        return false;
+    }
+
     private static Mutex? _mutex;
     private static bool _mutexOwned;
     private static EventWaitHandle? _openWindowEvent;
@@ -792,13 +846,66 @@ class Program
         return null;
     }
 
-    private static void RunSetupAdminTask(string[] args)
+    public static bool EnsureAdminTaskBatterySettings()
     {
-        // ISSUE_9: tri-state. Only touch the registry when the previous state is actually known.
-        var startupState = QueryStartupState();
+        try
+        {
+            if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var xml) || string.IsNullOrWhiteSpace(xml))
+            {
+                return false;
+            }
 
-        var user = GetArgumentValue(args, "--for-user")
-                   ?? System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+            var needsUpdate = xml.Contains("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase)
+                           || xml.Contains("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>", StringComparison.OrdinalIgnoreCase)
+                           || xml.Contains("<StopOnIdleEnd>true</StopOnIdleEnd>", StringComparison.OrdinalIgnoreCase)
+                           || !xml.Contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase);
+
+            if (!needsUpdate) return true;
+
+            var updatedXml = xml;
+            if (updatedXml.Contains("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedXml = updatedXml.Replace("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>", "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase);
+            }
+            else if (!updatedXml.Contains("<DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase) && updatedXml.Contains("<Settings>"))
+            {
+                updatedXml = updatedXml.Replace("<Settings>", "<Settings>\n    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (updatedXml.Contains("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedXml = updatedXml.Replace("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>", "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>", StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (updatedXml.Contains("<StopOnIdleEnd>true</StopOnIdleEnd>", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedXml = updatedXml.Replace("<StopOnIdleEnd>true</StopOnIdleEnd>", "<StopOnIdleEnd>false</StopOnIdleEnd>", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var tempXmlPath = Path.Combine(Path.GetTempPath(), $"keypulse_task_heal_{Guid.NewGuid():N}.xml");
+            try
+            {
+                File.WriteAllText(tempXmlPath, updatedXml, System.Text.Encoding.Unicode);
+                var fixedOk = RunSchtasks($"/Create /TN \"{AdminTaskName}\" /XML \"{tempXmlPath}\" /F", out _, out _);
+                InvalidateAdminTaskState();
+                return fixedOk;
+            }
+            finally
+            {
+                try { if (File.Exists(tempXmlPath)) File.Delete(tempXmlPath); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug("EnsureAdminTaskBatterySettings failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    public static bool CreateOrUpdateAdminTask(bool enable, out string error, string? forUser = null)
+    {
+        error = string.Empty;
+        var user = forUser ?? System.Security.Principal.WindowsIdentity.GetCurrent().Name;
 
         var xmlTemplate = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
 <Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
@@ -830,6 +937,7 @@ class Program
       <Interval>PT1M</Interval>
       <Count>3</Count>
     </RestartOnFailure>
+    {(enable ? "<Enabled>true</Enabled>" : "<Enabled>false</Enabled>")}
   </Settings>
   <Triggers>
     <LogonTrigger>
@@ -857,6 +965,7 @@ class Program
         catch (Exception ex)
         {
             LogCrash($"XML task creation error: {ex.Message}");
+            error = ex.Message;
         }
         finally
         {
@@ -867,13 +976,41 @@ class Program
         {
             var taskCmd = $"/Create /F /TN \"{AdminTaskName}\" /TR \"\\\"{ExePath}\\\" --hidden\" /SC ONLOGON /RL HIGHEST /RU \"{user}\"";
             created = RunSchtasks(taskCmd, out exitCode, out output);
+            if (created)
+            {
+                EnsureAdminTaskBatterySettings();
+                if (!enable)
+                {
+                    RunSchtasks($"/Change /TN \"{AdminTaskName}\" /DISABLE", out _, out _);
+                }
+            }
         }
+
+        InvalidateAdminTaskState();
 
         if (!created)
         {
-            LogCrash($"schtasks create failed ({exitCode}): {output}");
+            error = string.IsNullOrWhiteSpace(output) ? $"Error code {exitCode}" : output.Trim();
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void RunSetupAdminTask(string[] args)
+    {
+        // ISSUE_9: tri-state. Only touch the registry when the previous state is actually known.
+        var startupState = QueryStartupState();
+
+        var user = GetArgumentValue(args, "--for-user")
+                   ?? System.Security.Principal.WindowsIdentity.GetCurrent().Name;
+
+        var enable = startupState != StartupState.Off;
+        if (!CreateOrUpdateAdminTask(enable, out var createError, user))
+        {
+            LogCrash($"schtasks create failed: {createError}");
             MessageBox(IntPtr.Zero,
-                "KeyPulse could not switch to Administrator mode.\n\nWindows refused to create the scheduled task (error " + exitCode + ").\nThis is usually blocked by company policy or security software.\n\nNothing was changed. KeyPulse will start normally.",
+                "KeyPulse could not switch to Administrator mode.\n\nWindows refused to create the scheduled task (" + createError + ").\nThis is usually blocked by company policy or security software.\n\nNothing was changed. KeyPulse will start normally.",
                 "KeyPulse", 0x10);
 
             try { using var relaunch = Process.Start(new ProcessStartInfo { FileName = ExePath, UseShellExecute = true }); } catch { }
@@ -1276,6 +1413,11 @@ class Program
             {
                 error = "The KeyPulse logon task did not accept the change.";
                 return false;
+            }
+
+            if (enable)
+            {
+                EnsureAdminTaskBatterySettings();
             }
 
             MirrorLaunchOnBoot(enable);

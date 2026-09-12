@@ -26,6 +26,7 @@ namespace KeyPulse
         private Grid _mainGrid;
         private bool _isUninstall;
         private readonly bool _elevatedRetry;
+        private bool _preserveAdminPrivilege;
         private readonly ObservableCollection<string> _logLines = new();
 
         private AppConfig _config = new AppConfig();
@@ -809,6 +810,29 @@ namespace KeyPulse
                 try { if (Directory.Exists(Program.LegacyLogDir)) Directory.Delete(Program.LegacyLogDir, true); } catch { }
                 var installWarnings = new List<string>();
 
+                bool wasRunningAsAdmin = false;
+                var currentInstances = FindInstalledInstances(out bool uninspectableFound);
+                if (uninspectableFound)
+                {
+                    wasRunningAsAdmin = true;
+                }
+                else if (currentInstances.Count > 0)
+                {
+                    foreach (var p in currentInstances)
+                    {
+                        if (Program.IsProcessElevated(p))
+                        {
+                            wasRunningAsAdmin = true;
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    wasRunningAsAdmin = Program.GetAdminTaskState() == Program.AdminTaskState.Enabled;
+                }
+                foreach (var p in currentInstances) p.Dispose();
+
                 bool isUpgrade = File.Exists(Program.ExePath);
                 if (isUpgrade)
                 {
@@ -851,6 +875,7 @@ namespace KeyPulse
                     bool wipe = await tcs.Task;
                     if (wipe)
                     {
+                        _preserveAdminPrivilege = false;
                         Log("User opted for a FRESH INSTALL. Writing a safety copy, then wiping old settings and logs...");
                         var safetyCopy = ConfigStore.SaveWipeSafetyCopy();
                         if (safetyCopy != null)
@@ -868,7 +893,11 @@ namespace KeyPulse
                     }
                     else
                     {
+                        _preserveAdminPrivilege = wasRunningAsAdmin;
                         Log("User opted to UPGRADE. Keeping existing settings.");
+                        Log(wasRunningAsAdmin
+                            ? "  -> Detected previous privilege state: Administrator (will preserve)."
+                            : "  -> Detected previous privilege state: Standard User (will preserve).");
                         Log("Validating existing configuration schema...");
                         var loaded = ConfigStore.Load(out var configError, out var quarantined);
                         if (string.IsNullOrEmpty(configError))
@@ -997,22 +1026,53 @@ namespace KeyPulse
                 }
 
                 SetProgress("Step 6 of 6: Finalizing startup settings...", 6, 6);
-                Log("Step 6/6: Updating Launch on Boot script if enabled...");
+                Log("Step 6/6: Updating startup and privilege settings...");
                 try
                 {
-                    if (Program.IsStartupEnabled())
+                    if (_preserveAdminPrivilege)
                     {
-                        if (Program.SetStartup(true, out var startupError))
-                            Log("  -> Start with Windows is on; launcher regenerated.");
+                        if (Program.CreateOrUpdateAdminTask(enable: true, out var taskError))
+                        {
+                            Log("  -> Preserved Administrator privileges (logon task created with battery restrictions disabled).");
+                            try
+                            {
+                                using var runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
+                                runKey?.DeleteValue(Program.AppName, false);
+                                var vbs = Path.Combine(Program.InstallDir, "boot.vbs");
+                                if (File.Exists(vbs)) File.Delete(vbs);
+                            }
+                            catch { }
+                        }
                         else
                         {
-                            Log("  -> Warning: " + startupError);
-                            installWarnings.Add("Start with Windows could not be re-applied: " + startupError);
+                            Log("  -> Warning: Could not configure Administrator task: " + taskError);
+                            installWarnings.Add("Administrator logon task could not be configured: " + taskError);
                         }
                     }
                     else
                     {
-                        Log("  -> Start with Windows is off. Skipping.");
+                        if (Program.GetAdminTaskState() != Program.AdminTaskState.NotPresent)
+                        {
+                            Program.TryRemoveAdminTask(out _);
+                            Log("  -> Preserved Standard User privileges (removed Administrator task).");
+                        }
+
+                        if (Program.IsStartupEnabled() || isUpgrade)
+                        {
+                            if (Program.TrySetRegistryStartup(true, out var startupError))
+                            {
+                                Log("  -> Start with Windows configured for Standard User.");
+                            }
+                            else
+                            {
+                                Log("  -> Warning: " + startupError);
+                                installWarnings.Add("Start with Windows could not be applied: " + startupError);
+                            }
+                        }
+                        else
+                        {
+                            Log("  -> Start with Windows is off. Skipping.");
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -1036,7 +1096,29 @@ namespace KeyPulse
                     _actionButton.Focus();
                     _actionButton.Click += (s, ev) =>
                     {
-                        try { using var launched = Process.Start(new ProcessStartInfo { FileName = Program.ExePath, Arguments = "", UseShellExecute = true }); } catch { }
+                        var psi = new ProcessStartInfo
+                        {
+                            FileName = Program.ExePath,
+                            Arguments = "",
+                            UseShellExecute = true
+                        };
+                        if (_preserveAdminPrivilege)
+                        {
+                            psi.Verb = "runas";
+                        }
+
+                        try
+                        {
+                            using var launched = Process.Start(psi);
+                        }
+                        catch
+                        {
+                            if (_preserveAdminPrivilege)
+                            {
+                                psi.Verb = "";
+                                try { using var fallback = Process.Start(psi); } catch { }
+                            }
+                        }
                         ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
                     };
                 });

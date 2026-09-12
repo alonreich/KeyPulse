@@ -262,7 +262,14 @@ namespace KeyPulse
         {
             try
             {
-                var misleading = await System.Threading.Tasks.Task.Run(Program.IsAdminModeClaimedButNotEffective);
+                var misleading = await System.Threading.Tasks.Task.Run(() =>
+                {
+                    if (Program.IsAdminTaskInstalled())
+                    {
+                        Program.EnsureAdminTaskBatterySettings();
+                    }
+                    return Program.IsAdminModeClaimedButNotEffective();
+                });
                 if (!misleading) return;
 
                 ShowActionMessage("KeyPulse Administrator mode",
@@ -3539,27 +3546,89 @@ namespace KeyPulse
             panel.Children.Add(updateStatus);
 
             panel.Children.Add(new TextBlock { Text = "Privileges", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
-            bool isAdmin = Program.IsElevated;
+            bool isElevated = Program.IsElevated;
+            bool isWiredAdmin = Program.IsAdminTaskInstalled();
+
             var adminBtn = new Button { HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center, Margin = new Avalonia.Thickness(0, 4, 0, 0), TabIndex = 9, IsTabStop = true };
             var adminStack = new StackPanel { Orientation = Avalonia.Layout.Orientation.Vertical, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
-            var adminTitle = new TextBlock { Text = isAdmin ? "Run As User Level" : "Run As Administrator", FontWeight = Avalonia.Media.FontWeight.SemiBold, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
-            var adminSub = new TextBlock { Text = isAdmin ? "(Safer, but might not paste into Admin apps)" : "(To Inject Text Into Older CMD Consoles)", FontSize = 10, Classes = { "Muted" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+            var adminTitle = new TextBlock { FontWeight = Avalonia.Media.FontWeight.SemiBold, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+            var adminSub = new TextBlock { FontSize = 10, Classes = { "Muted" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
 
             adminStack.Children.Add(adminTitle);
             adminStack.Children.Add(adminSub);
             adminBtn.Content = adminStack;
 
-            if (isAdmin) {
-                adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#2e5c46"));
-                ToolTip.SetTip(adminBtn, "Click to revert to standard user permissions. This restores your system security posture, but you will lose the ability to inject hotkeys into Admin-level apps.");
-            } else {
-                adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#7d1d1d"));
-                ToolTip.SetTip(adminBtn, "Some older black windows like CMD block pasting text. Running as Administrator fixes this by elevating the application.");
+            void RefreshAdminButtonState(bool elevated, bool wiredAdmin)
+            {
+                if (elevated)
+                {
+                    adminTitle.Text = "Run As User Level";
+                    adminSub.Text = wiredAdmin
+                        ? "(Administrator active & wired - click to revert to standard user)"
+                        : "(Administrator session active - click to revert to standard user)";
+                    adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#2e5c46"));
+                    ToolTip.SetTip(adminBtn, "Click to revert to standard user permissions. This restores your system security posture, but you will lose the ability to inject hotkeys into Admin-level apps.");
+                }
+                else if (wiredAdmin)
+                {
+                    adminTitle.Text = "Elevate To Match Admin Mode";
+                    adminSub.Text = "(Admin task is wired, but session is not elevated)";
+                    adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8a6d1b"));
+                    ToolTip.SetTip(adminBtn, "The Administrator logon task is configured, but this session is running as standard user. Click to restart as Administrator or revert to standard user.");
+                }
+                else
+                {
+                    adminTitle.Text = "Run As Administrator";
+                    adminSub.Text = "(To Inject Text Into Older CMD Consoles)";
+                    adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#7d1d1d"));
+                    ToolTip.SetTip(adminBtn, "Some older black windows like CMD block pasting text. Running as Administrator fixes this by elevating the application.");
+                }
             }
 
+            RefreshAdminButtonState(isElevated, isWiredAdmin);
+
             adminBtn.Click += async (s, ev) => {
-                if (isAdmin) {
+                var currentElevated = Program.IsElevated;
+                var currentWiredAdmin = Program.IsAdminTaskInstalled();
+
+                if (currentElevated) {
                     RelaunchWithPrivilegeChange(w, "--remove-admin-task", statusTxt);
+                } else if (currentWiredAdmin) {
+                    var dialog = CreateAppDialog("Administrator Mode Status", 440, 250, 440, 250, WindowStartupLocation.CenterOwner, false, true);
+                    var p = CreateDialogPanel();
+                    p.Children.Add(new TextBlock { Text = "Administrator Mode Configured", Classes = { "SectionTitle" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center });
+                    p.Children.Add(new TextBlock
+                    {
+                        Text = "The Administrator logon task is already configured in Windows, but KeyPulse is currently running without Administrator rights.\n\nRestart KeyPulse with Administrator rights, or revert to standard user mode?",
+                        TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                        Margin = new Avalonia.Thickness(0, 8, 0, 12)
+                    });
+
+                    var btnRow = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center, Spacing = 12 };
+                    var btnElevate = new Button { Content = "Restart As Admin", Classes = { "Primary" } };
+                    var btnRevert = new Button { Content = "Revert To User Level", Classes = { "Danger" } };
+                    var btnCancel = new Button { Content = "Cancel", Classes = { "Secondary" } };
+
+                    int choice = 0;
+                    btnElevate.Click += (ds, de) => { choice = 1; dialog.Close(); };
+                    btnRevert.Click += (ds, de) => { choice = 2; dialog.Close(); };
+                    btnCancel.Click += (ds, de) => { choice = 0; dialog.Close(); };
+
+                    btnRow.Children.Add(btnElevate);
+                    btnRow.Children.Add(btnRevert);
+                    btnRow.Children.Add(btnCancel);
+                    p.Children.Add(btnRow);
+                    dialog.Content = p;
+
+                    await ShowDialogOrWindowAsync(dialog);
+                    if (choice == 1)
+                    {
+                        RelaunchWithPrivilegeChange(w, "--setup-admin-task", statusTxt);
+                    }
+                    else if (choice == 2)
+                    {
+                        RelaunchWithPrivilegeChange(w, "--remove-admin-task", statusTxt);
+                    }
                 } else {
                     var warnW = CreateAppDialog("Security Warning", 420, 260, 420, 260, WindowStartupLocation.CenterOwner, false, true);
                     var warnP = CreateDialogPanel();
@@ -3805,12 +3874,12 @@ namespace KeyPulse
                 Content = panel,
                 VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
             };
-            w.Opened += (s, ev) => LoadStartupStateAsync(chk, startupStatus, v => suppressStartupEvent = v);
+            w.Opened += (s, ev) => LoadStartupStateAsync(chk, startupStatus, v => suppressStartupEvent = v, (elev, wired) => RefreshAdminButtonState(elev, wired));
             ShowDialogOrWindow(w);
         }
 
         /// <summary>ISSUE_12: fetches the startup state off the UI thread and fills the box in.</summary>
-        private async void LoadStartupStateAsync(CheckBox chk, TextBlock startupStatus, Action<bool> setSuppress)
+        private async void LoadStartupStateAsync(CheckBox chk, TextBlock startupStatus, Action<bool> setSuppress, Action<bool, bool>? updateAdminBtn = null)
         {
             try
             {
@@ -3820,8 +3889,14 @@ namespace KeyPulse
                     // "close and reopen Settings" would repeat the same stale answer
                     // forever. Re-ask Windows every time Settings opens.
                     Program.InvalidateAdminTaskState();
+                    if (Program.IsAdminTaskInstalled())
+                    {
+                        Program.EnsureAdminTaskBatterySettings();
+                    }
                     return (Program.QueryStartupState(), Program.IsAdminTaskInstalled());
                 });
+
+                updateAdminBtn?.Invoke(Program.IsElevated, adminTaskInstalled);
 
                 // ISSUE_9: a failure to ask Windows is "couldn't check", never "off". The checkbox
                 // stays disabled so nobody can stack a second launcher on top of an unqueryable one.
