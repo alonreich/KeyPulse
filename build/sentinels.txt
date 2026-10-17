@@ -1,0 +1,35 @@
+# ==============================================================================
+# KEYPULSE FIX SENTINELS (SYS-VERIFYTOOL)
+# Format: TAG=relative/path/from/repo/root (forward slashes only)
+# Checked automatically before every dev.cmd, dev_build.cmd, and build.cmd run.
+# ==============================================================================
+
+# Dev Sandbox & Zero Cross-Contamination (DEVDATA_01 / DEVUPDATE_01)
+DEVDATA_01=ConfigStore.cs
+DEVDATA_01=Program.cs
+DEVUPDATE_01=UpdateChecker.cs
+KeyPulse_IPC_DEV_Session_=IpcService.cs
+
+# Single-Instance & Integrity Level Guards
+SharedObjectSddl=Program.cs
+ReleaseSingleInstanceLock=Program.cs
+DisallowStartIfOnBatteries=Program.cs
+
+# Desktop Organizer Persistence & Empty-Overwrite Guards
+allowEmptyProfiles=DesktopOrganizerService.cs
+_suppressConfigEvents=DesktopOrganizerWindow.axaml.cs
+MaxAutoSnapshots=DesktopOrganizerService.cs
+EnsureAutoSnapshotScheduler=DesktopOrganizerService.cs
+
+# Screen Brightness Hardware & Anti-Cheat Guards
+DestroyPhysicalMonitors=ScreenBrightnessService.cs
+IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS=ScreenBrightnessService.cs
+ScreenWriteThrottle=ScreenBrightnessService.cs
+WS_EX_TRANSPARENT=ScreenBrightnessService.cs
+TriggerShortcutCycleStep=ScreenBrightnessService.cs
+
+# Input Simulation, Clipboard & Pre-Wipe Safety Guards
+GetTargetKeyboardLayout=InputSimulator.cs
+GetClipboardSequenceNumber=InputSimulator.cs
+SaveAllWipeSafetyCopies=ConfigStore.cs
+WriteAtomic=AtomicFileWriter.cs

@@ -27,6 +27,7 @@ namespace KeyPulse
         public string CreatedUtc { get; init; } = string.Empty;
         public string CreatedByVersion { get; init; } = string.Empty;
         public int ShortcutCount { get; init; }
+        public int DesktopProfileCount { get; init; }
 
         /// <summary>Set for an unencrypted file; null when a passphrase is still needed.</summary>
         public BackupPayload? Payload { get; init; }
@@ -126,16 +127,10 @@ namespace KeyPulse
 
                 var envelopeJson = JsonSerializer.Serialize(envelope, AppConfigJsonContext.Default.BackupEnvelope);
 
-                var temp = path + ".writing";
-                File.WriteAllText(temp, envelopeJson, new UTF8Encoding(false));
-                try
+                if (!AtomicFileWriter.WriteAtomic(path, envelopeJson, out var writeErr))
                 {
-                    File.Move(temp, path, true);
-                }
-                catch
-                {
-                    File.Copy(temp, path, true);
-                    try { File.Delete(temp); } catch { }
+                    error = "Failed to write backup file atomically: " + writeErr;
+                    return false;
                 }
 
                 var verification = Inspect(path);
@@ -287,6 +282,7 @@ namespace KeyPulse
                 CreatedUtc = envelope.CreatedUtc,
                 CreatedByVersion = envelope.CreatedByVersion,
                 ShortcutCount = opened.Payload!.Shortcuts.Count,
+                DesktopProfileCount = opened.Payload.DesktopOrganizer?.Profiles?.Count ?? 0,
                 Payload = opened.Payload,
                 Envelope = envelope
             };
@@ -345,7 +341,9 @@ namespace KeyPulse
                     Id = h.Id,
                     IsEnabled = h.IsEnabled,
                     AllowRiskyShortcut = h.AllowRiskyShortcut,
+                    DisplayName = h.DisplayName,
                     KeyCombination = h.KeyCombination,
+                    KeyCombinations = new List<string>(h.KeyCombinations),
                     Action = h.Action,
                     Target = h.Target,
                     IsTargetObfuscated = h.IsTargetObfuscated,
@@ -523,29 +521,47 @@ namespace KeyPulse
                     return false;
                 }
 
-                if ((int)item.Action < (int)ActionType.OpenFolder || (int)item.Action > (int)ActionType.InsertText)
+                if ((int)item.Action < (int)ActionType.OpenFolder || (int)item.Action > (int)ActionType.CycleBrightness)
                 {
                     error = $"That backup is damaged (shortcut #{i + 1} has an action code KeyPulse does not recognise).";
                     return false;
                 }
 
-                if (string.IsNullOrWhiteSpace(item.KeyCombination))
+                var title = !string.IsNullOrWhiteSpace(item.DisplayName)
+                    ? item.DisplayName
+                    : (!string.IsNullOrWhiteSpace(item.KeyCombination) ? item.KeyCombination : $"Action #{i + 1}");
+
+                var combos = item.KeyCombinations != null && item.KeyCombinations.Count > 0
+                    ? item.KeyCombinations
+                    : (!string.IsNullOrWhiteSpace(item.KeyCombination) ? new List<string> { item.KeyCombination } : new List<string>());
+
+                foreach (var combo in combos)
                 {
-                    warnings.Add($"Shortcut #{i + 1} has no key combination and will need one.");
-                }
-                else if (!HotkeyManager.TryParseCombo(item.KeyCombination, out _, out _))
-                {
-                    warnings.Add($"\"{item.KeyCombination}\" is not a combination this version understands and will need re-recording.");
+                    if (!string.IsNullOrWhiteSpace(combo) && !HotkeyManager.TryParseCombo(combo, out _, out _))
+                    {
+                        warnings.Add($"\"{combo}\" (for {title}) is not a combination this version understands and will need re-recording.");
+                    }
                 }
 
-                if (string.IsNullOrEmpty(item.Target))
+                if (string.IsNullOrEmpty(item.Target) && item.Action != ActionType.CycleBrightness)
                 {
-                    warnings.Add($"\"{item.KeyCombination}\" has an empty target.");
+                    warnings.Add($"\"{title}\" has an empty target.");
                 }
 
                 if (!string.IsNullOrWhiteSpace(item.Id) && !seenIds.Add(item.Id))
                 {
                     item.Id = string.Empty;
+                }
+            }
+
+            if (payload.DesktopOrganizer?.Profiles != null)
+            {
+                foreach (var p in payload.DesktopOrganizer.Profiles)
+                {
+                    if (p.Icons == null || p.Icons.Count == 0)
+                    {
+                        warnings.Add($"Desktop Organizer profile \"{p.Name}\" contains no icon positions.");
+                    }
                 }
             }
 

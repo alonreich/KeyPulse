@@ -151,11 +151,6 @@ namespace KeyPulse
 
                 while (i < text.Length)
                 {
-                    // ISSUE_18: Escape is the most reflexively pressed key there is - dismissing an
-                    // autocomplete, closing a tooltip, backing out of a menu. Watching it across the
-                    // whole computer cut snippets in half with no notice. Cancelling now happens only
-                    // through CancelTyping(): the Stop button, or Escape while the progress window
-                    // itself is focused.
                     if (_cancelRequested)
                     {
                         cancelled = true;
@@ -462,11 +457,41 @@ namespace KeyPulse
         private const ushort VK_RETURN = 0x0D;
         private const ushort VK_TAB = 0x09;
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr CreateWindowEx(
+           uint dwExStyle, string lpClassName, string lpWindowName, uint dwStyle,
+           int x, int y, int nWidth, int nHeight, IntPtr hWndParent, IntPtr hMenu,
+           IntPtr hInstance, IntPtr lpParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetClipboardSequenceNumber();
+
+        private static readonly object _clipboardHwndLock = new();
+        private static IntPtr _clipboardHwnd = IntPtr.Zero;
+
+        private static IntPtr GetClipboardOwnerHwnd()
+        {
+            if (_clipboardHwnd != IntPtr.Zero) return _clipboardHwnd;
+            lock (_clipboardHwndLock)
+            {
+                if (_clipboardHwnd == IntPtr.Zero)
+                {
+                    _clipboardHwnd = CreateWindowEx(0, "Static", "KeyPulseClipboardWindow", 0, 0, 0, 0, 0, new IntPtr(-3), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                    if (_clipboardHwnd == IntPtr.Zero)
+                    {
+                        _clipboardHwnd = HotkeyManager.MessageWindowHandle;
+                    }
+                }
+                return _clipboardHwnd;
+            }
+        }
+
         private static bool SafeOpenClipboard()
         {
+            var hWnd = GetClipboardOwnerHwnd();
             for (int i = 0; i < 20; i++)
             {
-                if (OpenClipboard(IntPtr.Zero)) return true;
+                if (OpenClipboard(hWnd)) return true;
                 Thread.Sleep(15);
             }
             return false;
@@ -757,7 +782,6 @@ namespace KeyPulse
                     return;
                 }
 
-                // In the initial 30ms, use short sleeps to catch microsecond clipboard opens; then throttle to 5ms
                 if (stopwatch.ElapsedMilliseconds < 30)
                 {
                     Thread.Sleep(1);
@@ -791,6 +815,9 @@ namespace KeyPulse
             }
 
             ClipboardSnapshot? originalClipboard = null;
+            uint sequenceAfterSet = 0;
+            bool textSetSuccessfully = false;
+
             try
             {
                 Program.LogDebug($"InsertText using plain-text clipboard paste for {text.Length} characters.");
@@ -811,6 +838,9 @@ namespace KeyPulse
                     error = "Plain-text clipboard setup failed.";
                     return false;
                 }
+
+                textSetSuccessfully = true;
+                sequenceAfterSet = GetClipboardSequenceNumber();
 
                 Thread.Sleep(50);
 
@@ -834,9 +864,17 @@ namespace KeyPulse
             }
             finally
             {
-                if (originalClipboard != null)
+                if (originalClipboard != null && textSetSuccessfully)
                 {
-                    RestoreClipboard(originalClipboard);
+                    var currentSeq = GetClipboardSequenceNumber();
+                    if (currentSeq != sequenceAfterSet)
+                    {
+                        Program.LogDebug($"Clipboard sequence number changed ({sequenceAfterSet} -> {currentSeq}); external clipboard modification detected, preserving user content.");
+                    }
+                    else
+                    {
+                        RestoreClipboard(originalClipboard);
+                    }
                 }
                 Volatile.Write(ref _typingBusy, 0);
             }

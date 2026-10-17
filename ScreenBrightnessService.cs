@@ -1,0 +1,1405 @@
+﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Threading;
+
+namespace KeyPulse
+{
+    public sealed class ScreenLiveState
+    {
+        public int SlotIndex { get; set; }
+        public string HardwareId { get; set; } = string.Empty;
+        public string DefaultSlotLabel => SlotIndex switch { 0 => "Screen A", 1 => "Screen B", _ => "Screen C" };
+        public string Nickname { get; set; } = string.Empty;
+        public string ModelName { get; set; } = string.Empty;
+        public int Brightness { get; set; } = 65;
+        public int Contrast { get; set; } = 65;
+        public bool LockRatio { get; set; } = true;
+        public bool IsConnected { get; set; }
+        public bool IsPrimary { get; set; }
+        public bool IsInternalLcd { get; set; }
+        public bool SupportsBrightness { get; set; }
+        public bool SupportsContrast { get; set; }
+        public string StatusMessage { get; set; } = string.Empty;
+        public PixelRect Bounds { get; set; }
+    }
+
+    public static class ScreenBrightnessService
+    {
+        public const int MaxScreens = 3;
+        public const int MaxTrayQuickActions = 3;
+        private const int ThrottleIntervalMs = 250;
+
+        private static string AppDataFolder => ConfigStore.ConfigDirectory;
+
+        public static string ConfigFilePath => Path.Combine(AppDataFolder, "screen_brightness.json");
+        public static string BackupConfigFilePath => Path.Combine(AppDataFolder, "screen_brightness.lkg.json");
+
+        private static readonly object ConfigLock = new();
+        private static ScreenBrightnessConfig? _cachedConfig;
+
+        private static readonly object CycleLock = new();
+        private static CancellationTokenSource? _cycleCts;
+        private static bool _hasStartedCycleInSession;
+
+        private sealed class ScreenWriteThrottle
+        {
+            public readonly object Sync = new();
+            public int PendingBrightness = -1;
+            public int PendingContrast = -1;
+            public int LastWrittenBrightness = -1;
+            public int LastWrittenContrast = -1;
+            public DateTime LastWriteUtc = DateTime.MinValue;
+            public bool FlushScheduled;
+        }
+
+        private static readonly ConcurrentDictionary<int, ScreenWriteThrottle> Throttles = new();
+
+        public static event Action? StateChanged;
+
+        public static void NotifyStateChanged()
+        {
+            try
+            {
+                StateChanged?.Invoke();
+            }
+            catch { }
+        }
+
+        #region Config Persistence
+
+        public static ScreenBrightnessConfig LoadConfig()
+        {
+            lock (ConfigLock)
+            {
+                if (_cachedConfig != null)
+                {
+                    return _cachedConfig;
+                }
+
+                var loaded = TryReadConfigFile(ConfigFilePath) ?? TryReadConfigFile(BackupConfigFilePath);
+                if (loaded == null)
+                {
+                    loaded = CreateDefaultConfig();
+                    SaveConfigInternal(loaded);
+                }
+                else
+                {
+                    NormalizeConfig(loaded);
+                }
+
+                _cachedConfig = loaded;
+                return _cachedConfig;
+            }
+        }
+
+        public static bool SaveConfig(ScreenBrightnessConfig config)
+        {
+            lock (ConfigLock)
+            {
+                NormalizeConfig(config);
+                _cachedConfig = config;
+                bool ok = SaveConfigInternal(config);
+                return ok;
+            }
+        }
+
+        public static void ReloadCache()
+        {
+            lock (ConfigLock)
+            {
+                _cachedConfig = null;
+            }
+            NotifyStateChanged();
+        }
+
+        private static ScreenBrightnessConfig? TryReadConfigFile(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                var json = File.ReadAllText(path);
+                if (string.IsNullOrWhiteSpace(json)) return null;
+                return JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.ScreenBrightnessConfig);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool SaveConfigInternal(ScreenBrightnessConfig config)
+        {
+            try
+            {
+                if (!Directory.Exists(AppDataFolder))
+                {
+                    Directory.CreateDirectory(AppDataFolder);
+                }
+
+                var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.ScreenBrightnessConfig);
+                if (string.IsNullOrWhiteSpace(json)) return false;
+
+                var tempPath = ConfigFilePath + ".tmp";
+                File.WriteAllText(tempPath, json);
+
+                if (File.Exists(ConfigFilePath))
+                {
+                    try
+                    {
+                        File.Copy(ConfigFilePath, BackupConfigFilePath, overwrite: true);
+                    }
+                    catch { }
+                }
+
+                File.Move(tempPath, ConfigFilePath, overwrite: true);
+                try
+                {
+                    File.Copy(ConfigFilePath, BackupConfigFilePath, overwrite: true);
+                }
+                catch { }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static ScreenBrightnessConfig CreateDefaultConfig()
+        {
+            var cfg = new ScreenBrightnessConfig
+            {
+                GlobalLockBrightnessContrast = true,
+                LastCycleProfileId = string.Empty,
+                Screens = new List<ScreenHardwareSetting>
+                {
+                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 65, LastContrast = 65 },
+                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = true, LastBrightness = 65, LastContrast = 65 },
+                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = true, LastBrightness = 65, LastContrast = 65 }
+                },
+                Profiles = new List<ScreenBrightnessProfile>
+                {
+                    new ScreenBrightnessProfile
+                    {
+                        Name = "Night / Low",
+                        ShowInTrayQuickActions = true,
+                        IncludeInCycle = true,
+                        Targets = new List<ScreenCycleEntry>
+                        {
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 15, Contrast = 15 },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 15, Contrast = 15 },
+                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 15, Contrast = 15 }
+                        }
+                    },
+                    new ScreenBrightnessProfile
+                    {
+                        Name = "Balanced",
+                        ShowInTrayQuickActions = true,
+                        IncludeInCycle = true,
+                        Targets = new List<ScreenCycleEntry>
+                        {
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 55, Contrast = 55 },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 55, Contrast = 55 },
+                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 55, Contrast = 55 }
+                        }
+                    },
+                    new ScreenBrightnessProfile
+                    {
+                        Name = "Daylight / Competitive",
+                        ShowInTrayQuickActions = true,
+                        IncludeInCycle = true,
+                        Targets = new List<ScreenCycleEntry>
+                        {
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 90, Contrast = 90 },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 90, Contrast = 90 },
+                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 90, Contrast = 90 }
+                        }
+                    }
+                }
+            };
+            return cfg;
+        }
+
+        private static void NormalizeConfig(ScreenBrightnessConfig cfg)
+        {
+            cfg.Screens ??= new List<ScreenHardwareSetting>();
+            cfg.Profiles ??= new List<ScreenBrightnessProfile>();
+
+            for (int i = 0; i < MaxScreens; i++)
+            {
+                var existing = cfg.Screens.FirstOrDefault(s => s.SlotIndex == i);
+                if (existing == null)
+                {
+                    cfg.Screens.Add(new ScreenHardwareSetting
+                    {
+                        SlotIndex = i,
+                        CustomNickname = DefaultSlotName(i),
+                        LockRatio = cfg.GlobalLockBrightnessContrast,
+                        LastBrightness = 65,
+                        LastContrast = 65
+                    });
+                }
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(existing.CustomNickname))
+                    {
+                        existing.CustomNickname = DefaultSlotName(i);
+                    }
+                    existing.LastBrightness = Math.Clamp(existing.LastBrightness, 0, 100);
+                    existing.LastContrast = Math.Clamp(existing.LastContrast, 0, 100);
+                    if (existing.LockRatio)
+                    {
+                        existing.LastContrast = existing.LastBrightness;
+                    }
+                }
+            }
+
+            cfg.Screens = cfg.Screens.OrderBy(s => s.SlotIndex).Take(MaxScreens).ToList();
+
+            foreach (var p in cfg.Profiles)
+            {
+                if (string.IsNullOrWhiteSpace(p.Id)) p.Id = Guid.NewGuid().ToString("N");
+                if (string.IsNullOrWhiteSpace(p.Name)) p.Name = "Brightness Preset";
+                p.Targets ??= new List<ScreenCycleEntry>();
+                for (int i = 0; i < MaxScreens; i++)
+                {
+                    var t = p.Targets.FirstOrDefault(x => x.SlotIndex == i);
+                    if (t == null)
+                    {
+                        p.Targets.Add(new ScreenCycleEntry { SlotIndex = i, Brightness = 50, Contrast = 50 });
+                    }
+                    else
+                    {
+                        t.Brightness = Math.Clamp(t.Brightness, 0, 100);
+                        t.Contrast = Math.Clamp(t.Contrast, 0, 100);
+                    }
+                }
+                p.Targets = p.Targets.OrderBy(x => x.SlotIndex).Take(MaxScreens).ToList();
+            }
+        }
+
+        public static string DefaultSlotName(int slotIndex) => slotIndex switch
+        {
+            0 => "Screen A",
+            1 => "Screen B",
+            _ => "Screen C"
+        };
+
+        #endregion
+
+        #region Monitor Enumeration & Stable Hardware Binding
+
+        private sealed class ConnectedMonitorDescriptor
+        {
+            public IntPtr HMonitor { get; set; }
+            public string DeviceName { get; set; } = string.Empty;
+            public string HardwareId { get; set; } = string.Empty;
+            public string ModelName { get; set; } = string.Empty;
+            public bool IsPrimary { get; set; }
+            public PixelRect Bounds { get; set; }
+        }
+
+        private static List<ConnectedMonitorDescriptor> EnumerateConnectedMonitors()
+        {
+            var raw = new List<ConnectedMonitorDescriptor>();
+
+            MonitorEnumProc callback = (IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData) =>
+            {
+                var mi = new MONITORINFOEX();
+                mi.cbSize = Marshal.SizeOf<MONITORINFOEX>();
+                if (GetMonitorInfo(hMonitor, ref mi))
+                {
+                    string devName = mi.szDevice?.TrimEnd('\0') ?? string.Empty;
+                    string hwId = string.Empty;
+                    string model = string.Empty;
+
+                    var dd = new DISPLAY_DEVICE();
+                    dd.cb = Marshal.SizeOf<DISPLAY_DEVICE>();
+                    if (EnumDisplayDevices(devName, 0, ref dd, 0))
+                    {
+                        hwId = (dd.DeviceID ?? string.Empty).Trim();
+                        model = (dd.DeviceString ?? string.Empty).Trim();
+                    }
+
+                    if (string.IsNullOrWhiteSpace(hwId))
+                    {
+                        hwId = devName;
+                    }
+
+                    raw.Add(new ConnectedMonitorDescriptor
+                    {
+                        HMonitor = hMonitor,
+                        DeviceName = devName,
+                        HardwareId = hwId,
+                        ModelName = string.IsNullOrWhiteSpace(model) ? "Display" : model,
+                        IsPrimary = (mi.dwFlags & 1) != 0,
+                        Bounds = new PixelRect(
+                            mi.rcMonitor.Left,
+                            mi.rcMonitor.Top,
+                            Math.Max(1, mi.rcMonitor.Right - mi.rcMonitor.Left),
+                            Math.Max(1, mi.rcMonitor.Bottom - mi.rcMonitor.Top))
+                    });
+                }
+                return true;
+            };
+
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
+
+            return raw
+                .OrderByDescending(m => m.IsPrimary)
+                .ThenBy(m => m.Bounds.X)
+                .ThenBy(m => m.Bounds.Y)
+                .Take(MaxScreens)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Maps connected physical monitors to stable SlotIndex (0 = Screen A, 1 = Screen B, 2 = Screen C)
+        /// using saved HardwareId + ModelName so Windows never swaps Screen A and Screen B after reboot.
+        /// </summary>
+        private static Dictionary<int, ConnectedMonitorDescriptor> BindMonitorsToSlots(ScreenBrightnessConfig cfg)
+        {
+            var connected = EnumerateConnectedMonitors();
+            var result = new Dictionary<int, ConnectedMonitorDescriptor>();
+            var unassignedMonitors = new List<ConnectedMonitorDescriptor>(connected);
+
+            lock (ConfigLock)
+            {
+                foreach (var slot in cfg.Screens.OrderBy(s => s.SlotIndex))
+                {
+                    if (!string.IsNullOrWhiteSpace(slot.HardwareId))
+                    {
+                        var match = unassignedMonitors.FirstOrDefault(m =>
+                            string.Equals(m.HardwareId, slot.HardwareId, StringComparison.OrdinalIgnoreCase));
+                        if (match != null)
+                        {
+                            result[slot.SlotIndex] = match;
+                            unassignedMonitors.Remove(match);
+                            if (!string.IsNullOrWhiteSpace(match.ModelName))
+                            {
+                                slot.ModelName = match.ModelName;
+                            }
+                        }
+                    }
+                }
+
+                bool changedBinding = false;
+                for (int slotIdx = 0; slotIdx < MaxScreens && unassignedMonitors.Count > 0; slotIdx++)
+                {
+                    if (result.ContainsKey(slotIdx)) continue;
+                    var nextMon = unassignedMonitors[0];
+                    unassignedMonitors.RemoveAt(0);
+                    result[slotIdx] = nextMon;
+
+                    var slotSetting = cfg.Screens.First(s => s.SlotIndex == slotIdx);
+                    if (string.IsNullOrWhiteSpace(slotSetting.HardwareId) || slotSetting.HardwareId != nextMon.HardwareId)
+                    {
+                        slotSetting.HardwareId = nextMon.HardwareId;
+                        slotSetting.ModelName = nextMon.ModelName;
+                        changedBinding = true;
+                    }
+                }
+
+                if (changedBinding)
+                {
+                    SaveConfigInternal(cfg);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Returns immediate cached snapshot for instant (0ms) UI creation before async hardware read completes.
+        /// </summary>
+        public static List<ScreenLiveState> GetImmediateCachedStates()
+        {
+            var cfg = LoadConfig();
+            var bound = BindMonitorsToSlots(cfg);
+            var list = new List<ScreenLiveState>(MaxScreens);
+
+            for (int i = 0; i < MaxScreens; i++)
+            {
+                var s = cfg.Screens.First(x => x.SlotIndex == i);
+                bool isConn = bound.TryGetValue(i, out var mon);
+                int b = Math.Clamp(s.LastBrightness, 0, 100);
+                int c = s.LockRatio ? b : Math.Clamp(s.LastContrast, 0, 100);
+
+                list.Add(new ScreenLiveState
+                {
+                    SlotIndex = i,
+                    HardwareId = s.HardwareId,
+                    Nickname = string.IsNullOrWhiteSpace(s.CustomNickname) ? DefaultSlotName(i) : s.CustomNickname,
+                    ModelName = isConn && !string.IsNullOrWhiteSpace(mon!.ModelName) ? mon.ModelName : s.ModelName,
+                    Brightness = b,
+                    Contrast = c,
+                    LockRatio = s.LockRatio,
+                    IsConnected = isConn,
+                    IsPrimary = isConn && mon!.IsPrimary,
+                    SupportsBrightness = isConn,
+                    SupportsContrast = isConn,
+                    StatusMessage = isConn ? "Reading live hardware level..." : "Display not connected",
+                    Bounds = isConn ? mon!.Bounds : default
+                });
+            }
+
+            return list;
+        }
+
+        /// <summary>
+        /// Reads live hardware Brightness & Contrast across all connected displays in parallel on background threads.
+        /// Strictly releases all PHYSICAL_MONITOR handles in a finally block.
+        /// </summary>
+        public static async Task<List<ScreenLiveState>> ReadAllScreensLiveAsync(CancellationToken ct = default)
+        {
+            var cfg = LoadConfig();
+            var bound = BindMonitorsToSlots(cfg);
+
+            var tasks = new Task<ScreenLiveState>[MaxScreens];
+            for (int i = 0; i < MaxScreens; i++)
+            {
+                int slotIndex = i;
+                var slotCfg = cfg.Screens.First(x => x.SlotIndex == slotIndex);
+                bound.TryGetValue(slotIndex, out var mon);
+
+                tasks[slotIndex] = Task.Run(() => ReadSingleScreenHardware(slotIndex, slotCfg, mon, ct), ct);
+            }
+
+            var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+            lock (ConfigLock)
+            {
+                bool updated = false;
+                foreach (var res in results)
+                {
+                    if (!res.IsConnected || !res.SupportsBrightness) continue;
+                    var slotCfg = cfg.Screens.FirstOrDefault(x => x.SlotIndex == res.SlotIndex);
+                    if (slotCfg != null)
+                    {
+                        if (slotCfg.LastBrightness != res.Brightness || slotCfg.LastContrast != res.Contrast)
+                        {
+                            slotCfg.LastBrightness = res.Brightness;
+                            slotCfg.LastContrast = res.Contrast;
+                            updated = true;
+                        }
+                        if (!string.IsNullOrWhiteSpace(res.ModelName) && slotCfg.ModelName != res.ModelName)
+                        {
+                            slotCfg.ModelName = res.ModelName;
+                            updated = true;
+                        }
+                    }
+
+                    var throttle = Throttles.GetOrAdd(res.SlotIndex, _ => new ScreenWriteThrottle());
+                    lock (throttle.Sync)
+                    {
+                        throttle.LastWrittenBrightness = res.Brightness;
+                        throttle.LastWrittenContrast = res.Contrast;
+                    }
+                }
+
+                if (updated)
+                {
+                    SaveConfigInternal(cfg);
+                }
+            }
+
+            return results.OrderBy(r => r.SlotIndex).ToList();
+        }
+
+        private static ScreenLiveState ReadSingleScreenHardware(
+            int slotIndex,
+            ScreenHardwareSetting slotCfg,
+            ConnectedMonitorDescriptor? mon,
+            CancellationToken ct)
+        {
+            var state = new ScreenLiveState
+            {
+                SlotIndex = slotIndex,
+                HardwareId = slotCfg.HardwareId,
+                Nickname = string.IsNullOrWhiteSpace(slotCfg.CustomNickname) ? DefaultSlotName(slotIndex) : slotCfg.CustomNickname,
+                ModelName = mon != null && !string.IsNullOrWhiteSpace(mon.ModelName) ? mon.ModelName : slotCfg.ModelName,
+                Brightness = Math.Clamp(slotCfg.LastBrightness, 0, 100),
+                Contrast = slotCfg.LockRatio ? Math.Clamp(slotCfg.LastBrightness, 0, 100) : Math.Clamp(slotCfg.LastContrast, 0, 100),
+                LockRatio = slotCfg.LockRatio,
+                IsConnected = mon != null,
+                IsPrimary = mon?.IsPrimary ?? false,
+                Bounds = mon?.Bounds ?? default
+            };
+
+            if (mon == null || ct.IsCancellationRequested)
+            {
+                state.StatusMessage = "Display not connected";
+                return state;
+            }
+
+            if (TryReadDdcMonitor(mon.HMonitor, out int ddcBrightness, out int ddcContrast, out bool hasBrightness, out bool hasContrast, out string ddcDesc))
+            {
+                if (!string.IsNullOrWhiteSpace(ddcDesc) && (string.IsNullOrWhiteSpace(state.ModelName) || state.ModelName == "Generic PnP Monitor" || state.ModelName == "Display"))
+                {
+                    state.ModelName = ddcDesc;
+                }
+                state.SupportsBrightness = hasBrightness;
+                state.SupportsContrast = hasContrast;
+                if (hasBrightness) state.Brightness = ddcBrightness;
+                if (hasContrast)
+                {
+                    state.Contrast = state.LockRatio ? state.Brightness : ddcContrast;
+                }
+                else
+                {
+                    state.Contrast = state.Brightness;
+                }
+                state.StatusMessage = hasContrast ? "DDC/CI Hardware Ready" : "DDC/CI Brightness Ready";
+                return state;
+            }
+
+            if (TryReadInternalLcdBrightness(out int lcdPercent))
+            {
+                state.IsInternalLcd = true;
+                state.SupportsBrightness = true;
+                state.SupportsContrast = false;
+                state.Brightness = lcdPercent;
+                state.Contrast = lcdPercent;
+                state.StatusMessage = "Internal Display Backlight Ready";
+                return state;
+            }
+
+            state.SupportsBrightness = false;
+            state.SupportsContrast = false;
+            state.StatusMessage = "Hardware control unavailable (Enable DDC/CI in monitor buttons)";
+            return state;
+        }
+
+        #endregion
+
+        #region Throttled Hardware Writes (250ms Speed Limiter + Trailing-Edge Flush + Delta-Only)
+
+        /// <summary>
+        /// Queues a hardware update for a specific screen slot, enforcing the 250ms speed limiter,
+        /// trailing-edge final flush, lock-ratio rule, and delta-only writes.
+        /// </summary>
+        public static void RequestScreenLevelChange(int slotIndex, int brightness, int contrast, bool updateContrastFromLock = true)
+        {
+            if (slotIndex < 0 || slotIndex >= MaxScreens) return;
+
+            brightness = Math.Clamp(brightness, 0, 100);
+            contrast = Math.Clamp(contrast, 0, 100);
+
+            var cfg = LoadConfig();
+            lock (ConfigLock)
+            {
+                var slotCfg = cfg.Screens.First(s => s.SlotIndex == slotIndex);
+                if (slotCfg.LockRatio && updateContrastFromLock)
+                {
+                    contrast = brightness;
+                }
+                slotCfg.LastBrightness = brightness;
+                slotCfg.LastContrast = contrast;
+                SaveConfigInternal(cfg);
+            }
+
+            QueueThrottledHardwareWrite(slotIndex, brightness, contrast);
+        }
+
+        private static void QueueThrottledHardwareWrite(int slotIndex, int brightness, int contrast)
+        {
+            var throttle = Throttles.GetOrAdd(slotIndex, _ => new ScreenWriteThrottle());
+            bool fireImmediately = false;
+            int delayMs = ThrottleIntervalMs;
+
+            lock (throttle.Sync)
+            {
+                throttle.PendingBrightness = brightness;
+                throttle.PendingContrast = contrast;
+
+                var elapsedMs = (DateTime.UtcNow - throttle.LastWriteUtc).TotalMilliseconds;
+                if (elapsedMs >= ThrottleIntervalMs && !throttle.FlushScheduled)
+                {
+                    throttle.LastWriteUtc = DateTime.UtcNow;
+                    fireImmediately = true;
+                }
+                else if (!throttle.FlushScheduled)
+                {
+                    throttle.FlushScheduled = true;
+                    delayMs = Math.Max(25, ThrottleIntervalMs - (int)Math.Max(0, elapsedMs));
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            if (fireImmediately)
+            {
+                _ = Task.Run(() => ExecutePendingWriteForSlot(slotIndex, throttle));
+            }
+            else
+            {
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+                    ExecutePendingWriteForSlot(slotIndex, throttle);
+                });
+            }
+        }
+
+        private static void ExecutePendingWriteForSlot(int slotIndex, ScreenWriteThrottle throttle)
+        {
+            int targetB;
+            int targetC;
+            int prevB;
+            int prevC;
+
+            lock (throttle.Sync)
+            {
+                throttle.FlushScheduled = false;
+                throttle.LastWriteUtc = DateTime.UtcNow;
+                targetB = throttle.PendingBrightness;
+                targetC = throttle.PendingContrast;
+                prevB = throttle.LastWrittenBrightness;
+                prevC = throttle.LastWrittenContrast;
+
+                if (targetB == prevB && targetC == prevC)
+                {
+                    return;
+                }
+
+                throttle.LastWrittenBrightness = targetB;
+                throttle.LastWrittenContrast = targetC;
+            }
+
+            bool changeB = targetB != prevB && targetB >= 0;
+            bool changeC = targetC != prevC && targetC >= 0;
+
+            WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, changeB, changeC);
+
+            bool needsFollowUp = false;
+            lock (throttle.Sync)
+            {
+                if (throttle.PendingBrightness != throttle.LastWrittenBrightness ||
+                    throttle.PendingContrast != throttle.LastWrittenContrast)
+                {
+                    if (!throttle.FlushScheduled)
+                    {
+                        throttle.FlushScheduled = true;
+                        needsFollowUp = true;
+                    }
+                }
+            }
+
+            if (needsFollowUp)
+            {
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(ThrottleIntervalMs).ConfigureAwait(false);
+                    ExecutePendingWriteForSlot(slotIndex, throttle);
+                });
+            }
+        }
+
+        private static void WriteSingleScreenHardwareWithRetry(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast)
+        {
+            var cfg = LoadConfig();
+            var bound = BindMonitorsToSlots(cfg);
+            if (!bound.TryGetValue(slotIndex, out var mon)) return;
+
+            if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, writeBrightness, writeContrast))
+            {
+                return;
+            }
+
+            if (writeBrightness && TryWriteInternalLcdBrightness(brightness))
+            {
+                return;
+            }
+
+            var refreshed = BindMonitorsToSlots(cfg);
+            if (refreshed.TryGetValue(slotIndex, out var freshMon))
+            {
+                TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
+            }
+        }
+
+        #endregion
+
+        #region Presets & Rapid Shortcut Key Cycling (Lowest-First + Latest-Step Wins)
+
+        public static List<ScreenBrightnessProfile> GetOrderedCycleProfiles(ScreenBrightnessConfig cfg)
+        {
+            return cfg.Profiles
+                .Where(p => p.IncludeInCycle)
+                .OrderBy(p => p.Targets.FirstOrDefault(t => t.SlotIndex == 0)?.Brightness ?? 50)
+                .ThenBy(p => p.Targets.Average(t => t.Brightness))
+                .ToList();
+        }
+
+        public static List<ScreenBrightnessProfile> GetTrayQuickActionProfiles(ScreenBrightnessConfig cfg)
+        {
+            return cfg.Profiles
+                .Where(p => p.ShowInTrayQuickActions)
+                .OrderBy(p => p.Targets.FirstOrDefault(t => t.SlotIndex == 0)?.Brightness ?? 50)
+                .Take(MaxTrayQuickActions)
+                .ToList();
+        }
+
+        public static string FormatProfileSummary(ScreenBrightnessProfile profile, ScreenBrightnessConfig cfg)
+        {
+            var parts = new List<string>(MaxScreens);
+            for (int i = 0; i < MaxScreens; i++)
+            {
+                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == i);
+                if (target != null)
+                {
+                    string letter = i switch { 0 => "A", 1 => "B", _ => "C" };
+                    parts.Add($"{letter}:{target.Brightness}%");
+                }
+            }
+            return $"{profile.Name} ({string.Join(" | ", parts)})";
+        }
+
+        /// <summary>
+        /// Advances the brightness cycle step immediately in memory (Lowest first on initial press, then climbing up, then wrapping to lowest).
+        /// Cancels any in-flight hardware command when mashed rapidly in a game and sends only the final target step.
+        /// Zero UI/OSD popups so fullscreen games (Fortnite, Valorant, etc.) never lose focus.
+        /// </summary>
+        public static void TriggerShortcutCycleStep()
+        {
+            ScreenBrightnessProfile? targetProfile = null;
+            CancellationToken token;
+
+            lock (CycleLock)
+            {
+                var cfg = LoadConfig();
+                var ordered = GetOrderedCycleProfiles(cfg);
+                if (ordered.Count == 0) return;
+
+                int nextIndex = 0;
+                if (_hasStartedCycleInSession && !string.IsNullOrWhiteSpace(cfg.LastCycleProfileId))
+                {
+                    int currentIndex = ordered.FindIndex(p => p.Id == cfg.LastCycleProfileId);
+                    if (currentIndex >= 0)
+                    {
+                        nextIndex = (currentIndex + 1) % ordered.Count;
+                    }
+                }
+
+                _hasStartedCycleInSession = true;
+                targetProfile = ordered[nextIndex];
+                cfg.LastCycleProfileId = targetProfile.Id;
+
+                ApplyProfileToMemory(cfg, targetProfile);
+                SaveConfigInternal(cfg);
+
+                _cycleCts?.Cancel();
+                _cycleCts?.Dispose();
+                _cycleCts = new CancellationTokenSource();
+                token = _cycleCts.Token;
+            }
+
+            NotifyStateChanged();
+
+            if (targetProfile != null)
+            {
+                var capturedProfile = targetProfile;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(65, token).ConfigureAwait(false);
+                        if (token.IsCancellationRequested) return;
+                        ApplyProfileToHardwareDeltaOnly(capturedProfile, token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                });
+            }
+        }
+
+        public static void ApplyProfileAsync(ScreenBrightnessProfile profile)
+        {
+            if (profile == null) return;
+            CancellationToken token;
+
+            lock (CycleLock)
+            {
+                var cfg = LoadConfig();
+                cfg.LastCycleProfileId = profile.Id;
+                _hasStartedCycleInSession = true;
+                ApplyProfileToMemory(cfg, profile);
+                SaveConfigInternal(cfg);
+
+                _cycleCts?.Cancel();
+                _cycleCts?.Dispose();
+                _cycleCts = new CancellationTokenSource();
+                token = _cycleCts.Token;
+            }
+
+            NotifyStateChanged();
+
+            _ = Task.Run(() =>
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    ApplyProfileToHardwareDeltaOnly(profile, token);
+                }
+            });
+        }
+
+        private static void ApplyProfileToMemory(ScreenBrightnessConfig cfg, ScreenBrightnessProfile profile)
+        {
+            for (int i = 0; i < MaxScreens; i++)
+            {
+                var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == i);
+                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == i);
+                if (screen != null && target != null)
+                {
+                    int b = Math.Clamp(target.Brightness, 0, 100);
+                    int c = screen.LockRatio ? b : Math.Clamp(target.Contrast, 0, 100);
+                    screen.LastBrightness = b;
+                    screen.LastContrast = c;
+                }
+            }
+        }
+
+        private static void ApplyProfileToHardwareDeltaOnly(ScreenBrightnessProfile profile, CancellationToken token)
+        {
+            var cfg = LoadConfig();
+            Parallel.For(0, MaxScreens, slotIndex =>
+            {
+                if (token.IsCancellationRequested) return;
+                var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
+                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == slotIndex);
+                if (screenCfg == null || target == null) return;
+
+                int targetB = Math.Clamp(target.Brightness, 0, 100);
+                int targetC = screenCfg.LockRatio ? targetB : Math.Clamp(target.Contrast, 0, 100);
+
+                var throttle = Throttles.GetOrAdd(slotIndex, _ => new ScreenWriteThrottle());
+                bool writeB;
+                bool writeC;
+
+                lock (throttle.Sync)
+                {
+                    writeB = targetB != throttle.LastWrittenBrightness;
+                    writeC = targetC != throttle.LastWrittenContrast;
+                    if (!writeB && !writeC)
+                    {
+                        return;
+                    }
+                    throttle.PendingBrightness = targetB;
+                    throttle.PendingContrast = targetC;
+                    throttle.LastWrittenBrightness = targetB;
+                    throttle.LastWrittenContrast = targetC;
+                    throttle.LastWriteUtc = DateTime.UtcNow;
+                }
+
+                WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, writeB, writeC);
+            });
+        }
+
+        #endregion
+
+        #region Non-Activating Click-Through "Identify Screens" Banners
+
+        public static void ShowIdentifyBanners()
+        {
+            Dispatcher.UIThread.Post(async () =>
+            {
+                var cfg = LoadConfig();
+                var bound = BindMonitorsToSlots(cfg);
+                var banners = new List<Window>();
+
+                foreach (var kvp in bound.OrderBy(k => k.Key))
+                {
+                    int slotIndex = kvp.Key;
+                    var mon = kvp.Value;
+                    var slotCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
+                    string slotLabel = DefaultSlotName(slotIndex);
+                    string customName = slotCfg?.CustomNickname ?? slotLabel;
+                    string displayTitle = string.Equals(customName, slotLabel, StringComparison.OrdinalIgnoreCase)
+                        ? slotLabel
+                        : $"{slotLabel} • {customName}";
+
+                    var banner = new Window
+                    {
+                        Width = 360,
+                        Height = 130,
+                        WindowDecorations = WindowDecorations.None,
+                        ShowInTaskbar = false,
+                        ShowActivated = false,
+                        Topmost = true,
+                        CanResize = false,
+                        Background = Brushes.Transparent,
+                        TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent },
+                        WindowStartupLocation = WindowStartupLocation.Manual
+                    };
+
+                    int centerX = mon.Bounds.X + (mon.Bounds.Width - 360) / 2;
+                    int centerY = mon.Bounds.Y + 80;
+                    banner.Position = new PixelPoint(centerX, centerY);
+
+                    banner.Content = new Border
+                    {
+                        Background = new SolidColorBrush(Color.Parse("#EB0F172A")),
+                        BorderBrush = new SolidColorBrush(Color.Parse("#38BDF8")),
+                        BorderThickness = new Thickness(2.5),
+                        CornerRadius = new CornerRadius(14),
+                        Padding = new Thickness(20, 16),
+                        Child = new StackPanel
+                        {
+                            VerticalAlignment = VerticalAlignment.Center,
+                            HorizontalAlignment = HorizontalAlignment.Center,
+                            Spacing = 6,
+                            Children =
+                            {
+                                new TextBlock
+                                {
+                                    Text = displayTitle,
+                                    FontSize = 24,
+                                    FontWeight = FontWeight.Bold,
+                                    Foreground = Brushes.White,
+                                    HorizontalAlignment = HorizontalAlignment.Center
+                                },
+                                new TextBlock
+                                {
+                                    Text = string.IsNullOrWhiteSpace(mon.ModelName) ? mon.DeviceName : mon.ModelName,
+                                    FontSize = 13,
+                                    Foreground = new SolidColorBrush(Color.Parse("#94A3B8")),
+                                    HorizontalAlignment = HorizontalAlignment.Center
+                                }
+                            }
+                        }
+                    };
+
+                    banner.Opened += (_, _) =>
+                    {
+                        var handle = banner.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+                        if (handle != IntPtr.Zero)
+                        {
+                            int exStyle = GetWindowLong(handle, GWL_EXSTYLE);
+                            SetWindowLong(handle, GWL_EXSTYLE, exStyle | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW);
+                        }
+                    };
+
+                    banners.Add(banner);
+                    banner.Show();
+                }
+
+                await Task.Delay(2200);
+                foreach (var b in banners)
+                {
+                    try { b.Close(); } catch { }
+                }
+            });
+        }
+
+        #endregion
+
+        #region Win32 DDC/CI (dxva2.dll) & Internal Backlight (\\.\LCD) Interop
+
+        private static bool TryReadDdcMonitor(
+            IntPtr hMonitor,
+            out int normBrightness,
+            out int normContrast,
+            out bool supportsBrightness,
+            out bool supportsContrast,
+            out string description)
+        {
+            normBrightness = 65;
+            normContrast = 65;
+            supportsBrightness = false;
+            supportsContrast = false;
+            description = string.Empty;
+
+            if (hMonitor == IntPtr.Zero) return false;
+            if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
+            {
+                return false;
+            }
+
+            var physicalMonitors = new PHYSICAL_MONITOR[count];
+            bool gotHandles = false;
+            try
+            {
+                gotHandles = GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicalMonitors);
+                if (!gotHandles) return false;
+
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr hPhys = physicalMonitors[i].hPhysicalMonitor;
+                    if (hPhys == IntPtr.Zero) continue;
+
+                    if (string.IsNullOrWhiteSpace(description) && !string.IsNullOrWhiteSpace(physicalMonitors[i].szPhysicalMonitorDescription))
+                    {
+                        description = physicalMonitors[i].szPhysicalMonitorDescription.Trim();
+                    }
+
+                    if (GetMonitorBrightness(hPhys, out uint minB, out uint curB, out uint maxB) && maxB > minB)
+                    {
+                        supportsBrightness = true;
+                        normBrightness = NormalizeTo100(curB, minB, maxB);
+                    }
+
+                    if (GetMonitorContrast(hPhys, out uint minC, out uint curC, out uint maxC) && maxC > minC)
+                    {
+                        supportsContrast = true;
+                        normContrast = NormalizeTo100(curC, minC, maxC);
+                    }
+
+                    if (supportsBrightness)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (gotHandles)
+                {
+                    try { DestroyPhysicalMonitors(count, physicalMonitors); } catch { }
+                }
+            }
+        }
+
+        private static bool TryWriteDdcMonitor(IntPtr hMonitor, int brightnessPercent, int contrastPercent, bool writeBrightness, bool writeContrast)
+        {
+            if (hMonitor == IntPtr.Zero) return false;
+            if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
+            {
+                return false;
+            }
+
+            var physicalMonitors = new PHYSICAL_MONITOR[count];
+            bool gotHandles = false;
+            try
+            {
+                gotHandles = GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicalMonitors);
+                if (!gotHandles) return false;
+
+                bool anySuccess = false;
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr hPhys = physicalMonitors[i].hPhysicalMonitor;
+                    if (hPhys == IntPtr.Zero) continue;
+
+                    if (writeBrightness)
+                    {
+                        uint minB = 0, curB = 0, maxB = 100;
+                        GetMonitorBrightness(hPhys, out minB, out curB, out maxB);
+                        if (maxB <= minB) { minB = 0; maxB = 100; }
+                        uint rawB = DenormalizeFrom100(brightnessPercent, minB, maxB);
+                        if (SetMonitorBrightness(hPhys, rawB))
+                        {
+                            anySuccess = true;
+                        }
+                    }
+
+                    if (writeContrast)
+                    {
+                        uint minC = 0, curC = 0, maxC = 100;
+                        if (GetMonitorContrast(hPhys, out minC, out curC, out maxC) && maxC > minC)
+                        {
+                            uint rawC = DenormalizeFrom100(contrastPercent, minC, maxC);
+                            if (SetMonitorContrast(hPhys, rawC))
+                            {
+                                anySuccess = true;
+                            }
+                        }
+                    }
+                }
+                return anySuccess;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (gotHandles)
+                {
+                    try { DestroyPhysicalMonitors(count, physicalMonitors); } catch { }
+                }
+            }
+        }
+
+        private static int NormalizeTo100(uint current, uint min, uint max)
+        {
+            if (max <= min) return (int)Math.Clamp(current, 0, 100);
+            uint clamped = Math.Clamp(current, min, max);
+            double ratio = (double)(clamped - min) / (max - min);
+            return (int)Math.Clamp(Math.Round(ratio * 100.0), 0, 100);
+        }
+
+        private static uint DenormalizeFrom100(int percent, uint min, uint max)
+        {
+            int p = Math.Clamp(percent, 0, 100);
+            if (max <= min) return (uint)p;
+            double raw = min + (p / 100.0) * (max - min);
+            return (uint)Math.Clamp((int)Math.Round(raw), (int)min, (int)max);
+        }
+
+        private const uint GENERIC_READ = 0x80000000;
+        private const uint GENERIC_WRITE = 0x40000000;
+        private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint OPEN_EXISTING = 3;
+        private const uint IOCTL_VIDEO_QUERY_SUPPORTED_BRIGHTNESS = 0x00230494;
+        private const uint IOCTL_VIDEO_QUERY_DISPLAY_BRIGHTNESS = 0x00230498;
+        private const uint IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS = 0x0023049C;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DISPLAY_BRIGHTNESS
+        {
+            public byte ucDisplayPolicy;
+            public byte ucACBrightness;
+            public byte ucDCBrightness;
+        }
+
+        private static bool TryReadInternalLcdBrightness(out int percent)
+        {
+            percent = 65;
+            IntPtr hLcd = CreateFileW(@"\\.\LCD", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (hLcd == IntPtr.Zero || hLcd == new IntPtr(-1)) return false;
+
+            try
+            {
+                var db = new DISPLAY_BRIGHTNESS();
+                if (!DeviceIoControl(hLcd, IOCTL_VIDEO_QUERY_DISPLAY_BRIGHTNESS, IntPtr.Zero, 0, ref db, Marshal.SizeOf<DISPLAY_BRIGHTNESS>(), out _, IntPtr.Zero))
+                {
+                    return false;
+                }
+
+                byte rawLevel = db.ucACBrightness != 0 ? db.ucACBrightness : db.ucDCBrightness;
+                byte minLevel = 0;
+                byte maxLevel = 100;
+
+                byte[] supported = new byte[256];
+                if (DeviceIoControlBytes(hLcd, IOCTL_VIDEO_QUERY_SUPPORTED_BRIGHTNESS, IntPtr.Zero, 0, supported, supported.Length, out uint bytesReturned, IntPtr.Zero) && bytesReturned > 1)
+                {
+                    minLevel = supported[0];
+                    maxLevel = supported[bytesReturned - 1];
+                    for (int i = 0; i < bytesReturned; i++)
+                    {
+                        if (supported[i] < minLevel) minLevel = supported[i];
+                        if (supported[i] > maxLevel) maxLevel = supported[i];
+                    }
+                }
+
+                percent = NormalizeTo100(rawLevel, minLevel, maxLevel);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                CloseHandle(hLcd);
+            }
+        }
+
+        private static bool TryWriteInternalLcdBrightness(int percent)
+        {
+            IntPtr hLcd = CreateFileW(@"\\.\LCD", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (hLcd == IntPtr.Zero || hLcd == new IntPtr(-1)) return false;
+
+            try
+            {
+                byte targetByte = (byte)Math.Clamp(percent, 0, 100);
+                byte[] supported = new byte[256];
+                if (DeviceIoControlBytes(hLcd, IOCTL_VIDEO_QUERY_SUPPORTED_BRIGHTNESS, IntPtr.Zero, 0, supported, supported.Length, out uint bytesReturned, IntPtr.Zero) && bytesReturned > 0)
+                {
+                    byte minLevel = supported[0];
+                    byte maxLevel = supported[bytesReturned - 1];
+                    for (int i = 0; i < bytesReturned; i++)
+                    {
+                        if (supported[i] < minLevel) minLevel = supported[i];
+                        if (supported[i] > maxLevel) maxLevel = supported[i];
+                    }
+                    uint denorm = DenormalizeFrom100(percent, minLevel, maxLevel);
+                    byte closest = supported[0];
+                    int bestDiff = Math.Abs(closest - (int)denorm);
+                    for (int i = 1; i < bytesReturned; i++)
+                    {
+                        int d = Math.Abs(supported[i] - (int)denorm);
+                        if (d < bestDiff)
+                        {
+                            bestDiff = d;
+                            closest = supported[i];
+                        }
+                    }
+                    targetByte = closest;
+                }
+
+                var db = new DISPLAY_BRIGHTNESS
+                {
+                    ucDisplayPolicy = 0x03,
+                    ucACBrightness = targetByte,
+                    ucDCBrightness = targetByte
+                };
+
+                return DeviceIoControl(hLcd, IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS, ref db, Marshal.SizeOf<DISPLAY_BRIGHTNESS>(), IntPtr.Zero, 0, out _, IntPtr.Zero);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                CloseHandle(hLcd);
+            }
+        }
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct PHYSICAL_MONITOR
+        {
+            public IntPtr hPhysicalMonitor;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string szPhysicalMonitorDescription;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct MONITORINFOEX
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string szDevice;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct DISPLAY_DEVICE
+        {
+            public int cb;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string DeviceName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string DeviceString;
+            public uint StateFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string DeviceID;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string DeviceKey;
+        }
+
+        private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, out uint pdwNumberOfPhysicalMonitors);
+
+        [DllImport("dxva2.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool GetPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, uint dwPhysicalMonitorArraySize, [Out] PHYSICAL_MONITOR[] pPhysicalMonitorArray);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool DestroyPhysicalMonitors(uint dwPhysicalMonitorArraySize, [In] PHYSICAL_MONITOR[] pPhysicalMonitorArray);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool GetMonitorBrightness(IntPtr hMonitor, out uint pdwMinimumBrightness, out uint pdwCurrentBrightness, out uint pdwMaximumBrightness);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool SetMonitorBrightness(IntPtr hMonitor, uint dwNewBrightness);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool GetMonitorContrast(IntPtr hMonitor, out uint pdwMinimumContrast, out uint pdwCurrentContrast, out uint pdwMaximumContrast);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool SetMonitorContrast(IntPtr hMonitor, uint dwNewContrast);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFileW(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(
+            IntPtr hDevice,
+            uint dwIoControlCode,
+            IntPtr lpInBuffer,
+            int nInBufferSize,
+            ref DISPLAY_BRIGHTNESS lpOutBuffer,
+            int nOutBufferSize,
+            out uint lpBytesReturned,
+            IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(
+            IntPtr hDevice,
+            uint dwIoControlCode,
+            ref DISPLAY_BRIGHTNESS lpInBuffer,
+            int nInBufferSize,
+            IntPtr lpOutBuffer,
+            int nOutBufferSize,
+            out uint lpBytesReturned,
+            IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", EntryPoint = "DeviceIoControl", SetLastError = true)]
+        private static extern bool DeviceIoControlBytes(
+            IntPtr hDevice,
+            uint dwIoControlCode,
+            IntPtr lpInBuffer,
+            int nInBufferSize,
+            [Out] byte[] lpOutBuffer,
+            int nOutBufferSize,
+            out uint lpBytesReturned,
+            IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        #endregion
+    }
+}

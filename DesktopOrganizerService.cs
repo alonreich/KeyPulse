@@ -3,11 +3,30 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 
 namespace KeyPulse
 {
+    public enum DesktopOrganizerLoadStatus
+    {
+        Success,
+        NotFound,
+        Inaccessible,
+        Corrupt,
+        Recovered
+    }
+
+    public sealed class DesktopOrganizerLoadResult
+    {
+        public DesktopOrganizerLoadStatus Status { get; init; }
+        public DesktopOrganizerConfig Config { get; init; } = new();
+        public string ErrorMessage { get; init; } = string.Empty;
+        public string? RecoveryPath { get; init; }
+        public bool IsReadOnly => Status == DesktopOrganizerLoadStatus.Inaccessible || Status == DesktopOrganizerLoadStatus.Corrupt;
+    }
+
     public static class DesktopOrganizerService
     {
         private const uint LVM_FIRST = 0x1000;
@@ -29,6 +48,7 @@ namespace KeyPulse
         private const uint PAGE_READWRITE = 0x04;
 
         private const uint MONITORINFOF_PRIMARY = 0x00000001;
+        private const uint SMTO_ABORTIFHUNG = 0x0002;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
@@ -94,7 +114,15 @@ namespace KeyPulse
         private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string? lpszWindow);
 
         [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        private static extern IntPtr SendMessageTimeout(
+            IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+        private static bool SafeSendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint timeoutMs, out IntPtr result)
+        {
+            result = IntPtr.Zero;
+            var ret = SendMessageTimeout(hWnd, Msg, wParam, lParam, SMTO_ABORTIFHUNG, timeoutMs, out result);
+            return ret != IntPtr.Zero;
+        }
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -137,7 +165,9 @@ namespace KeyPulse
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
-        private static readonly string ConfigPath = Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json");
+        public static readonly string ConfigPath = Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json");
+        public static readonly string LkgConfigPath = Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.lkg.json");
+
         private static DesktopLayoutProfile? _lastUndoSnapshot;
         private static System.Threading.Timer? _displayChangeDebounceTimer;
         private static readonly object SyncLock = new();
@@ -145,63 +175,296 @@ namespace KeyPulse
         public static bool HasUndo => _lastUndoSnapshot != null;
         public static string LastUndoProfileName => _lastUndoSnapshot?.Name ?? string.Empty;
 
+        public static DesktopOrganizerLoadResult LoadConfigDetailed()
+        {
+            lock (SyncLock)
+            {
+                if (!File.Exists(ConfigPath))
+                {
+                    if (File.Exists(LkgConfigPath))
+                    {
+                        if (TryReadValidConfig(LkgConfigPath, out var lkgConfig, out _))
+                        {
+                            Program.LogDebug("DesktopOrganizer: primary file missing, recovered from last-known-good.");
+                            return new DesktopOrganizerLoadResult
+                            {
+                                Status = DesktopOrganizerLoadStatus.Recovered,
+                                Config = lkgConfig!,
+                                RecoveryPath = LkgConfigPath
+                            };
+                        }
+                    }
+
+                    return new DesktopOrganizerLoadResult
+                    {
+                        Status = DesktopOrganizerLoadStatus.NotFound,
+                        Config = new DesktopOrganizerConfig()
+                    };
+                }
+
+                string json;
+                try
+                {
+                    using var fs = new FileStream(ConfigPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var reader = new StreamReader(fs, Encoding.UTF8);
+                    json = reader.ReadToEnd();
+                }
+                catch (Exception ex)
+                {
+                    Program.LogCrash($"DesktopOrganizer: failed to read config ({ex.Message}). Activating protective mode.");
+                    return new DesktopOrganizerLoadResult
+                    {
+                        Status = DesktopOrganizerLoadStatus.Inaccessible,
+                        ErrorMessage = ex.Message,
+                        Config = new DesktopOrganizerConfig()
+                    };
+                }
+
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    var quarantine = QuarantineDamagedFile();
+                    if (File.Exists(LkgConfigPath) && TryReadValidConfig(LkgConfigPath, out var lkgConfig, out _))
+                    {
+                        return new DesktopOrganizerLoadResult
+                        {
+                            Status = DesktopOrganizerLoadStatus.Recovered,
+                            Config = lkgConfig!,
+                            RecoveryPath = LkgConfigPath,
+                            ErrorMessage = $"Primary layout file was empty. Quarantined to {quarantine} and recovered from last-known-good copy."
+                        };
+                    }
+
+                    return new DesktopOrganizerLoadResult
+                    {
+                        Status = DesktopOrganizerLoadStatus.Corrupt,
+                        ErrorMessage = "Primary layout file was empty and no recovery copy was available.",
+                        Config = new DesktopOrganizerConfig()
+                    };
+                }
+
+                try
+                {
+                    var cfg = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.DesktopOrganizerConfig);
+                    if (cfg == null || cfg.Profiles == null)
+                    {
+                        throw new InvalidDataException("Deserialized layout configuration was empty or malformed.");
+                    }
+
+                    if (cfg.Profiles.Count == 0
+                        && File.Exists(LkgConfigPath)
+                        && TryReadValidConfig(LkgConfigPath, out var lkgWithProfiles, out _)
+                        && lkgWithProfiles != null
+                        && lkgWithProfiles.Profiles.Count > 0)
+                    {
+                        Program.LogDebug("DesktopOrganizer: primary file had 0 profiles while last-known-good had saved layouts; restoring from last-known-good.");
+                        cfg.Profiles = lkgWithProfiles.Profiles;
+                        if (string.IsNullOrEmpty(cfg.ActiveProfileId))
+                        {
+                            cfg.ActiveProfileId = lkgWithProfiles.ActiveProfileId;
+                        }
+                    }
+
+                    return new DesktopOrganizerLoadResult
+                    {
+                        Status = DesktopOrganizerLoadStatus.Success,
+                        Config = cfg
+                    };
+                }
+                catch (Exception ex)
+                {
+                    var quarantine = QuarantineDamagedFile();
+                    Program.LogCrash($"DesktopOrganizer: corrupt layout JSON ({ex.Message}). Quarantined to {quarantine}.");
+
+                    if (File.Exists(LkgConfigPath) && TryReadValidConfig(LkgConfigPath, out var lkgConfig, out _))
+                    {
+                        return new DesktopOrganizerLoadResult
+                        {
+                            Status = DesktopOrganizerLoadStatus.Recovered,
+                            Config = lkgConfig!,
+                            RecoveryPath = LkgConfigPath,
+                            ErrorMessage = $"Layout configuration could not be read. Recovered from verified previous copy."
+                        };
+                    }
+
+                    return new DesktopOrganizerLoadResult
+                    {
+                        Status = DesktopOrganizerLoadStatus.Corrupt,
+                        ErrorMessage = $"Layout configuration could not be read ({ex.Message}). Existing file protected from overwrite.",
+                        Config = new DesktopOrganizerConfig()
+                    };
+                }
+            }
+        }
+
         public static DesktopOrganizerConfig LoadConfig()
         {
+            var res = LoadConfigDetailed();
+            return res.Config;
+        }
+
+        public static bool SaveConfig(DesktopOrganizerConfig config, out string error, bool allowEmptyProfiles = false)
+        {
+            error = string.Empty;
+            if (config == null)
+            {
+                error = "Configuration cannot be null.";
+                return false;
+            }
+
             lock (SyncLock)
             {
                 try
                 {
-                    if (File.Exists(ConfigPath))
+                    config.Profiles ??= new List<DesktopLayoutProfile>();
+
+                    if (config.Profiles.Count == 0 && !allowEmptyProfiles)
                     {
-                        var json = File.ReadAllText(ConfigPath);
-                        var cfg = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.DesktopOrganizerConfig);
-                        if (cfg != null)
+                        if ((TryReadValidConfig(ConfigPath, out var existingOnDisk, out _) && existingOnDisk != null && existingOnDisk.Profiles.Count > 0)
+                            || (TryReadValidConfig(LkgConfigPath, out existingOnDisk, out _) && existingOnDisk != null && existingOnDisk.Profiles.Count > 0))
                         {
-                            cfg.Profiles ??= new List<DesktopLayoutProfile>();
-                            return cfg;
+                            Program.LogDebug("DesktopOrganizer: prevented accidental overwrite of non-empty saved profiles with an empty list.");
+                            config.Profiles = existingOnDisk.Profiles;
+                            if (string.IsNullOrEmpty(config.ActiveProfileId))
+                            {
+                                config.ActiveProfileId = existingOnDisk.ActiveProfileId;
+                            }
                         }
                     }
+
+                    var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.DesktopOrganizerConfig);
+
+                    if (!AtomicFileWriter.WriteAtomic(ConfigPath, json, out error))
+                    {
+                        return false;
+                    }
+
+                    if (!AtomicFileWriter.TryVerifyReadableJson(ConfigPath, AppConfigJsonContext.Default.DesktopOrganizerConfig, out var verified, out var verifyErr))
+                    {
+                        error = $"Verification of written layout file failed: {verifyErr}";
+                        Program.LogCrash(error);
+                        return false;
+                    }
+
+                    if (verified?.Profiles == null || verified.Profiles.Count != config.Profiles.Count)
+                    {
+                        error = "Verification failed: on-disk profile count mismatch.";
+                        Program.LogCrash(error);
+                        return false;
+                    }
+
+                    if (config.Profiles.Count > 0 || allowEmptyProfiles)
+                    {
+                        AtomicFileWriter.WriteAtomic(LkgConfigPath, json, out _);
+                    }
+                    return true;
                 }
                 catch (Exception ex)
                 {
-                    Program.LogDebug($"DesktopOrganizer LoadConfig failed: {ex.Message}");
+                    error = ex.Message;
+                    Program.LogCrash($"DesktopOrganizer SaveConfig exception: {ex.Message}");
+                    return false;
                 }
-
-                return new DesktopOrganizerConfig();
             }
         }
 
         public static void SaveConfig(DesktopOrganizerConfig config)
         {
+            SaveConfig(config, out _);
+        }
+
+        private static bool TryReadValidConfig(string path, out DesktopOrganizerConfig? config, out string error)
+        {
+            config = null;
+            error = string.Empty;
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    error = "File does not exist.";
+                    return false;
+                }
+
+                var json = File.ReadAllText(path);
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    error = "File is empty.";
+                    return false;
+                }
+
+                config = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.DesktopOrganizerConfig);
+                if (config == null || config.Profiles == null)
+                {
+                    error = "Parsed config or profiles were null.";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static string? QuarantineDamagedFile()
+        {
+            try
+            {
+                if (!File.Exists(ConfigPath)) return null;
+                var target = Path.Combine(ConfigStore.ConfigDirectory,
+                    $"desktop_organizer.damaged-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+                File.Move(ConfigPath, target, true);
+                return target;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static string? SaveWipeSafetyCopy()
+        {
             lock (SyncLock)
             {
                 try
                 {
-                    Directory.CreateDirectory(ConfigStore.ConfigDirectory);
-                    var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.DesktopOrganizerConfig);
-                    var temp = ConfigPath + ".tmp";
-                    File.WriteAllText(temp, json);
+                    var sourcePath = File.Exists(ConfigPath) ? ConfigPath : (File.Exists(LkgConfigPath) ? LkgConfigPath : null);
+                    if (sourcePath == null) return null;
 
-                    if (File.Exists(ConfigPath))
+                    var parent = Directory.GetParent(ConfigStore.ConfigDirectory)?.FullName;
+                    if (string.IsNullOrEmpty(parent)) return null;
+
+                    var target = Path.Combine(parent,
+                        $"KeyPulse.desktop_organizer.before-wipe-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+                    File.Copy(sourcePath, target, true);
+
+                    if (!File.Exists(target) || new FileInfo(target).Length != new FileInfo(sourcePath).Length)
                     {
-                        try
+                        Program.LogCrash("DesktopOrganizer pre-wipe safety copy verification failed.");
+                        return null;
+                    }
+
+                    try
+                    {
+                        var existing = Directory.GetFiles(parent, "KeyPulse.desktop_organizer.before-wipe-*.json");
+                        if (existing.Length > 3)
                         {
-                            File.Replace(temp, ConfigPath, null);
-                        }
-                        catch
-                        {
-                            File.Copy(temp, ConfigPath, true);
-                            try { File.Delete(temp); } catch { }
+                            Array.Sort(existing, StringComparer.OrdinalIgnoreCase);
+                            for (var i = 0; i < existing.Length - 3; i++)
+                            {
+                                try { File.Delete(existing[i]); } catch { }
+                            }
                         }
                     }
-                    else
-                    {
-                        File.Move(temp, ConfigPath);
-                    }
+                    catch { }
+
+                    return target;
                 }
                 catch (Exception ex)
                 {
-                    Program.LogCrash($"DesktopOrganizer SaveConfig failed: {ex.Message}");
+                    Program.LogDebug($"DesktopOrganizer SaveWipeSafetyCopy failed: {ex.Message}");
+                    return null;
                 }
             }
         }
@@ -276,7 +539,7 @@ namespace KeyPulse
             return (style & LVS_AUTOARRANGE) != 0;
         }
 
-        public static DesktopLayoutProfile? CaptureCurrentLayout(string profileName, out string error)
+        public static DesktopLayoutProfile? CaptureCurrentLayout(string profileName, out string error, CancellationToken cancellationToken = default)
         {
             error = string.Empty;
             IntPtr hwnd = GetDesktopListView();
@@ -333,16 +596,29 @@ namespace KeyPulse
                     });
                 }
 
-                IntPtr spacing = SendMessage(hwnd, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero);
-                profile.IconSpacingX = (int)(spacing.ToInt64() & 0xFFFF);
-                profile.IconSpacingY = (int)((spacing.ToInt64() >> 16) & 0xFFFF);
+                if (SafeSendMessageTimeout(hwnd, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero, 1000, out var spacing))
+                {
+                    profile.IconSpacingX = (int)(spacing.ToInt64() & 0xFFFF);
+                    profile.IconSpacingY = (int)((spacing.ToInt64() >> 16) & 0xFFFF);
+                }
                 if (profile.IconSpacingX <= 0) profile.IconSpacingX = 76;
                 if (profile.IconSpacingY <= 0) profile.IconSpacingY = 100;
 
-                int itemCount = (int)SendMessage(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
+                if (!SafeSendMessageTimeout(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero, 1000, out var itemCountPtr))
+                {
+                    error = "Windows Explorer did not answer desktop icon queries in time.";
+                    return null;
+                }
+                int itemCount = (int)itemCountPtr;
 
                 for (int i = 0; i < itemCount; i++)
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        error = "Operation cancelled.";
+                        return null;
+                    }
+
                     var lvi = new LVITEM
                     {
                         cchTextMax = 512,
@@ -355,14 +631,14 @@ namespace KeyPulse
                     WriteProcessMemory(hProcess, pLvItem, pLocalLvi, lvItemSize, out _);
                     Marshal.FreeHGlobal(pLocalLvi);
 
-                    SendMessage(hwnd, LVM_GETITEMTEXTW, (IntPtr)i, pLvItem);
+                    SafeSendMessageTimeout(hwnd, LVM_GETITEMTEXTW, (IntPtr)i, pLvItem, 1000, out _);
 
                     IntPtr pLocalText = Marshal.AllocHGlobal(1024);
                     ReadProcessMemory(hProcess, pTextBuffer, pLocalText, 1024, out _);
                     string? text = Marshal.PtrToStringUni(pLocalText);
                     Marshal.FreeHGlobal(pLocalText);
 
-                    SendMessage(hwnd, LVM_GETITEMPOSITION, (IntPtr)i, pPoint);
+                    SafeSendMessageTimeout(hwnd, LVM_GETITEMPOSITION, (IntPtr)i, pPoint, 1000, out _);
                     IntPtr pLocalPoint = Marshal.AllocHGlobal(pointSize);
                     ReadProcessMemory(hProcess, pPoint, pLocalPoint, pointSize, out _);
                     var pt = Marshal.PtrToStructure<POINT>(pLocalPoint);
@@ -389,6 +665,12 @@ namespace KeyPulse
                     }
                 }
 
+                if (profile.Icons.Count == 0)
+                {
+                    error = "No desktop icons were found to capture.";
+                    return null;
+                }
+
                 return profile;
             }
             catch (Exception ex)
@@ -403,20 +685,13 @@ namespace KeyPulse
             }
         }
 
-        public static bool RestoreLayout(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, out string report)
+        public static bool RestoreLayout(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, out string report, CancellationToken cancellationToken = default, bool isUndoOperation = false)
         {
             report = string.Empty;
             if (profile == null || profile.Icons == null || profile.Icons.Count == 0)
             {
                 report = "The selected profile contains no icon positions.";
                 return false;
-            }
-
-            // Capture automatic undo snapshot before touching anything
-            var preRestoreSnapshot = CaptureCurrentLayout("Pre-Restore Snapshot (" + DateTime.Now.ToString("HH:mm:ss") + ")", out _);
-            if (preRestoreSnapshot != null)
-            {
-                _lastUndoSnapshot = preRestoreSnapshot;
             }
 
             IntPtr hwnd = GetDesktopListView();
@@ -435,6 +710,19 @@ namespace KeyPulse
             {
                 report = "Windows desktop icons are currently hidden. Right-click the desktop, select View, and check 'Show desktop icons'.";
                 return false;
+            }
+
+            var monitors = GetMonitors();
+            if (monitors.Count == 0)
+            {
+                report = "No active monitors detected.";
+                return false;
+            }
+
+            DesktopLayoutProfile? preRestoreSnapshot = null;
+            if (!isUndoOperation)
+            {
+                preRestoreSnapshot = CaptureCurrentLayout("Pre-Restore Snapshot (" + DateTime.Now.ToString("HH:mm:ss") + ")", out _, cancellationToken);
             }
 
             GetWindowThreadProcessId(hwnd, out uint processId);
@@ -463,15 +751,18 @@ namespace KeyPulse
 
             try
             {
-                var monitors = GetMonitors();
-                if (monitors.Count == 0)
+                var primaryMonitor = monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
+                if (!SafeSendMessageTimeout(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero, 1000, out var itemCountPtr))
                 {
-                    report = "No active monitors detected.";
+                    report = "Windows Explorer did not answer desktop icon queries in time.";
                     return false;
                 }
+                int itemCount = (int)itemCountPtr;
 
-                var primaryMonitor = monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
-                int itemCount = (int)SendMessage(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
+                if (!isUndoOperation && preRestoreSnapshot != null)
+                {
+                    _lastUndoSnapshot = preRestoreSnapshot;
+                }
 
                 var occupiedSlots = new HashSet<(int X, int Y)>();
                 var consumedSavedIndices = new HashSet<int>();
@@ -483,6 +774,12 @@ namespace KeyPulse
 
                 for (int i = 0; i < itemCount; i++)
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        report = "Restore cancelled.";
+                        return false;
+                    }
+
                     var lvi = new LVITEM
                     {
                         cchTextMax = 512,
@@ -495,7 +792,7 @@ namespace KeyPulse
                     WriteProcessMemory(hProcess, pLvItem, pLocalLvi, lvItemSize, out _);
                     Marshal.FreeHGlobal(pLocalLvi);
 
-                    SendMessage(hwnd, LVM_GETITEMTEXTW, (IntPtr)i, pLvItem);
+                    SafeSendMessageTimeout(hwnd, LVM_GETITEMTEXTW, (IntPtr)i, pLvItem, 1000, out _);
 
                     IntPtr pLocalText = Marshal.AllocHGlobal(1024);
                     ReadProcessMemory(hProcess, pTextBuffer, pLocalText, 1024, out _);
@@ -504,7 +801,6 @@ namespace KeyPulse
 
                     if (string.IsNullOrEmpty(text)) continue;
 
-                    // Match by name, skipping already consumed duplicate entries
                     int matchIdx = -1;
                     for (int s = 0; s < profile.Icons.Count; s++)
                     {
@@ -520,21 +816,21 @@ namespace KeyPulse
                         consumedSavedIndices.Add(matchIdx);
                         var saved = profile.Icons[matchIdx];
 
-                        // Match monitor or fallback to primary monitor if disconnected
                         var targetMon = monitors.FirstOrDefault(m => m.Index == saved.MonitorIndex) ?? primaryMonitor;
 
-                        // Calculate destination coordinates relative to target work area
                         int destX = targetMon.WorkRect.left + saved.RelativeX;
                         int destY = targetMon.WorkRect.top + saved.RelativeY;
 
-                        // Clamp safely inside visible work area (preventing off-screen icons)
                         destX = Math.Clamp(destX, targetMon.WorkRect.left + 4, Math.Max(targetMon.WorkRect.left + 4, targetMon.WorkRect.right - spaceX));
                         destY = Math.Clamp(destY, targetMon.WorkRect.top + 4, Math.Max(targetMon.WorkRect.top + 4, targetMon.WorkRect.bottom - spaceY));
 
-                        // Anti-collision: if coordinate is already taken by another icon, shift down one grid slot
                         int maxX = Math.Max(targetMon.WorkRect.left + 4, targetMon.WorkRect.right - spaceX);
-                        while (occupiedSlots.Contains((destX, destY)))
+                        int maxSlots = Math.Max(1, (targetMon.WorkRect.Width / Math.Max(1, spaceX)) * (targetMon.WorkRect.Height / Math.Max(1, spaceY)));
+                        int slotSearchAttempts = 0;
+
+                        while (occupiedSlots.Contains((destX, destY)) && slotSearchAttempts < maxSlots)
                         {
+                            slotSearchAttempts++;
                             destY += spaceY;
                             if (destY > targetMon.WorkRect.bottom - spaceY)
                             {
@@ -557,7 +853,6 @@ namespace KeyPulse
                     }
                 }
 
-                // Handle unfamiliar (new) icons
                 int newArranged = 0;
                 if (unsavedItems.Count > 0 && behavior != UnsavedIconBehavior.LeaveInPlace)
                 {
@@ -573,9 +868,12 @@ namespace KeyPulse
                         int startX = centerX - (cols * spaceX) / 2;
                         int startY = centerY - (rowCount * spaceY) / 2;
                         int maxCenterGridX = Math.Max(targetMon.WorkRect.left + 4, targetMon.WorkRect.right - spaceX);
+                        int maxCenterSlots = Math.Max(1, (targetMon.WorkRect.Width / Math.Max(1, spaceX)) * (targetMon.WorkRect.Height / Math.Max(1, spaceY)));
 
                         for (int k = 0; k < unsavedItems.Count; k++)
                         {
+                            if (cancellationToken.IsCancellationRequested) break;
+
                             int r = k / cols;
                             int c = k % cols;
                             int destX = startX + c * spaceX;
@@ -584,8 +882,10 @@ namespace KeyPulse
                             destX = Math.Clamp(destX, targetMon.WorkRect.left + 4, maxCenterGridX);
                             destY = Math.Clamp(destY, targetMon.WorkRect.top + 4, Math.Max(targetMon.WorkRect.top + 4, targetMon.WorkRect.bottom - spaceY));
 
-                            while (occupiedSlots.Contains((destX, destY)))
+                            int centerAttempts = 0;
+                            while (occupiedSlots.Contains((destX, destY)) && centerAttempts < maxCenterSlots)
                             {
+                                centerAttempts++;
                                 destY += spaceY;
                                 if (destY > targetMon.WorkRect.bottom - spaceY)
                                 {
@@ -609,11 +909,16 @@ namespace KeyPulse
                         int resetCurX = Math.Max(minCurX, primaryMonitor.WorkRect.right - (spaceX * 2));
                         int curX = resetCurX;
                         int curY = primaryMonitor.WorkRect.top + 10;
+                        int maxSideSlots = Math.Max(1, (primaryMonitor.WorkRect.Width / Math.Max(1, spaceX)) * (primaryMonitor.WorkRect.Height / Math.Max(1, spaceY)));
 
                         for (int k = 0; k < unsavedItems.Count; k++)
                         {
-                            while (occupiedSlots.Contains((curX, curY)))
+                            if (cancellationToken.IsCancellationRequested) break;
+
+                            int sideAttempts = 0;
+                            while (occupiedSlots.Contains((curX, curY)) && sideAttempts < maxSideSlots)
                             {
+                                sideAttempts++;
                                 curY += spaceY;
                                 if (curY > primaryMonitor.WorkRect.bottom - spaceY)
                                 {
@@ -655,7 +960,7 @@ namespace KeyPulse
             }
         }
 
-        public static bool UndoLastRestore(out string report)
+        public static bool UndoLastRestore(out string report, CancellationToken cancellationToken = default)
         {
             if (_lastUndoSnapshot == null)
             {
@@ -664,8 +969,13 @@ namespace KeyPulse
             }
 
             var snapshot = _lastUndoSnapshot;
-            _lastUndoSnapshot = null;
-            return RestoreLayout(snapshot, UnsavedIconBehavior.LeaveInPlace, out report);
+            if (RestoreLayout(snapshot, UnsavedIconBehavior.LeaveInPlace, out report, cancellationToken, isUndoOperation: true))
+            {
+                _lastUndoSnapshot = null;
+                return true;
+            }
+
+            return false;
         }
 
         private static void SetItemPosition(IntPtr hwnd, IntPtr hProcess, IntPtr pPoint, int index, int x, int y)
@@ -676,7 +986,7 @@ namespace KeyPulse
             WriteProcessMemory(hProcess, pPoint, pLocalPoint, Marshal.SizeOf<POINT>(), out _);
             Marshal.FreeHGlobal(pLocalPoint);
 
-            SendMessage(hwnd, LVM_SETITEMPOSITION32, (IntPtr)index, pPoint);
+            SafeSendMessageTimeout(hwnd, LVM_SETITEMPOSITION32, (IntPtr)index, pPoint, 1000, out _);
         }
 
         public static void HandleDisplayChangeDebounced()
@@ -708,6 +1018,161 @@ namespace KeyPulse
                     }
                 }, null, 3000, Timeout.Infinite);
             }
+        }
+
+        public const int MaxAutoSnapshots = 5;
+        private static System.Threading.Timer? _periodicSnapshotTimer;
+        public static event Action? ProfilesChanged;
+
+        public static void RaiseProfilesChanged()
+        {
+            try { ProfilesChanged?.Invoke(); } catch { }
+        }
+
+        public static void EnsureAutoSnapshotScheduler()
+        {
+            lock (SyncLock)
+            {
+                if (_periodicSnapshotTimer != null) return;
+                _periodicSnapshotTimer = new System.Threading.Timer(_ =>
+                {
+                    try
+                    {
+                        TryTakePeriodicAutoSnapshot(forceImmediateIfNone: false, out var _);
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.LogDebug($"Periodic auto-snapshot check failed: {ex.Message}");
+                    }
+                }, null, TimeSpan.FromMinutes(15), TimeSpan.FromHours(6));
+            }
+        }
+
+        public static bool TryTakePeriodicAutoSnapshot(bool forceImmediateIfNone, out string statusMessage)
+        {
+            statusMessage = string.Empty;
+            var loadRes = LoadConfigDetailed();
+            if (loadRes.IsReadOnly)
+            {
+                statusMessage = "Config is read-only.";
+                return false;
+            }
+
+            var cfg = loadRes.Config;
+            if (!cfg.AutoPeriodicSnapshotEnabled)
+            {
+                statusMessage = "Periodic auto-snapshots are disabled.";
+                return false;
+            }
+
+            var existingAuto = cfg.Profiles.Where(p => p.IsAutoSnapshot).ToList();
+            var intervalDays = Math.Max(1, cfg.AutoSnapshotIntervalDays);
+
+            if (!forceImmediateIfNone || existingAuto.Count > 0)
+            {
+                if (!string.IsNullOrWhiteSpace(cfg.LastAutoSnapshotUtc)
+                    && DateTime.TryParse(cfg.LastAutoSnapshotUtc, null, System.Globalization.DateTimeStyles.RoundtripKind, out var lastUtc))
+                {
+                    if ((DateTime.UtcNow - lastUtc.ToUniversalTime()).TotalDays < intervalDays)
+                    {
+                        statusMessage = "Next periodic snapshot is not due yet.";
+                        return false;
+                    }
+                }
+            }
+
+            if (IsAutoArrangeActive(out var desktopVisible) || !desktopVisible)
+            {
+                statusMessage = "Skipped auto-snapshot because Auto-Arrange is active or desktop icons are hidden.";
+                return false;
+            }
+
+            var monitors = GetMonitors();
+            if (monitors.Count == 0)
+            {
+                statusMessage = "Skipped auto-snapshot because no monitors were detected.";
+                return false;
+            }
+
+            var activeProfile = cfg.Profiles.FirstOrDefault(p => p.Id == cfg.ActiveProfileId)
+                                ?? cfg.Profiles.FirstOrDefault(p => !p.IsAutoSnapshot);
+            if (activeProfile != null && activeProfile.DisplayCount > 0 && monitors.Count < activeProfile.DisplayCount)
+            {
+                statusMessage = $"Skipped auto-snapshot because only {monitors.Count} of {activeProfile.DisplayCount} expected screen(s) are connected.";
+                return false;
+            }
+
+            var captured = CaptureCurrentLayout($"Auto-Snapshot ({DateTime.Now:MMM d, HH:mm})", out var capErr);
+            if (captured == null || captured.Icons.Count == 0)
+            {
+                statusMessage = "Could not capture layout for auto-snapshot: " + capErr;
+                return false;
+            }
+
+            captured.IsAutoSnapshot = true;
+
+            var latestAuto = existingAuto.LastOrDefault();
+            if (latestAuto != null && IsLayoutIdentical(captured, latestAuto))
+            {
+                cfg.LastAutoSnapshotUtc = DateTime.UtcNow.ToString("O");
+                SaveConfig(cfg, out _);
+                statusMessage = "Icons have not moved since the last auto-snapshot; skipped duplicate.";
+                return false;
+            }
+
+            cfg.Profiles.Add(captured);
+            cfg.LastAutoSnapshotUtc = DateTime.UtcNow.ToString("O");
+
+            PruneOldestAutoSnapshots(cfg);
+
+            if (SaveConfig(cfg, out var saveErr))
+            {
+                statusMessage = $"Saved automatic layout snapshot ({cfg.Profiles.Count(p => p.IsAutoSnapshot)}/{MaxAutoSnapshots}).";
+                RaiseProfilesChanged();
+                return true;
+            }
+
+            statusMessage = "Could not save auto-snapshot: " + saveErr;
+            return false;
+        }
+
+        public static void PruneOldestAutoSnapshots(DesktopOrganizerConfig cfg)
+        {
+            if (cfg?.Profiles == null) return;
+            var autoList = cfg.Profiles.Where(p => p.IsAutoSnapshot).ToList();
+            while (autoList.Count > MaxAutoSnapshots)
+            {
+                var oldest = autoList[0];
+                cfg.Profiles.Remove(oldest);
+                autoList.RemoveAt(0);
+            }
+        }
+
+        private static bool IsLayoutIdentical(DesktopLayoutProfile a, DesktopLayoutProfile b)
+        {
+            if (a.DisplayCount != b.DisplayCount) return false;
+            if (a.Icons.Count != b.Icons.Count) return false;
+
+            var bMap = new Dictionary<string, DesktopIconSnapshot>(StringComparer.OrdinalIgnoreCase);
+            foreach (var icon in b.Icons)
+            {
+                if (!string.IsNullOrEmpty(icon.Name) && !bMap.ContainsKey(icon.Name))
+                {
+                    bMap[icon.Name] = icon;
+                }
+            }
+
+            foreach (var iconA in a.Icons)
+            {
+                if (!bMap.TryGetValue(iconA.Name, out var iconB)) return false;
+                if (iconA.MonitorIndex != iconB.MonitorIndex) return false;
+                if (Math.Abs(iconA.RelativeX - iconB.RelativeX) > 4 || Math.Abs(iconA.RelativeY - iconB.RelativeY) > 4)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 }

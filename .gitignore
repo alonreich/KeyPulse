@@ -487,3 +487,7 @@ $RECYCLE.BIN/
 compiled/
 test_coreclr/
 test_out/
+.devlogs/
+build.result.txt
+developer_tools/redundant_code_report.html
+developer_tools/redundant_code_report.jsonl

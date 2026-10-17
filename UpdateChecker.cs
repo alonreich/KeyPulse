@@ -32,6 +32,7 @@ namespace KeyPulse
         public bool UpdateAvailable { get; init; }
         public string LatestVersion { get; init; }
         public string Message { get; init; }
+        public string? LocalInstallerPath { get; init; }
     }
 
     public static class UpdateChecker
@@ -50,6 +51,37 @@ namespace KeyPulse
         {
             try
             {
+                // DEVUPDATE_01: In dev mode, inspect local .\compiled\KeyPulse.exe instead of querying GitHub.
+                var devUpdateSource = Environment.GetEnvironmentVariable("KEYPULSE_DEV_UPDATE_SOURCE");
+                if (!string.IsNullOrWhiteSpace(devUpdateSource))
+                {
+                    var localExe = System.IO.Path.Combine(devUpdateSource.Trim(), "compiled", "KeyPulse.exe");
+                    if (!System.IO.File.Exists(localExe))
+                    {
+                        return new UpdateCheckResult
+                        {
+                            Succeeded = false,
+                            Message = $"Dev update source active, but '{localExe}' does not exist yet. Run .\\dev_build.cmd first."
+                        };
+                    }
+
+                    var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(localExe);
+                    var rawVer = info.FileVersion ?? "unknown";
+                    var latestLocal = rawVer.EndsWith(".0", StringComparison.Ordinal) && System.Linq.Enumerable.Count(rawVer, c => c == '.') == 3
+                        ? rawVer.Substring(0, rawVer.Length - 2)
+                        : rawVer;
+                    var currentVer = Program.AppVersion;
+
+                    return new UpdateCheckResult
+                    {
+                        Succeeded = true,
+                        UpdateAvailable = CompareVersions(latestLocal, currentVer) > 0,
+                        LatestVersion = latestLocal,
+                        LocalInstallerPath = localExe,
+                        Message = string.Empty
+                    };
+                }
+
                 using var response = await Client.GetAsync(Program.LatestReleaseApiUrl, cancellationToken);
                 if (!response.IsSuccessStatusCode)
                 {

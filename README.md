@@ -6,15 +6,18 @@
 
 - ⚡ **NativeAOT Compiled**: A single, self-contained binary. No .NET runtime installation required.
 - 🪝 **Global Hardware Hooks**: Intercepts keyboard events at the lowest OS level using Win32 API.
-- 🎯 **Dynamic Key Capture**: Automatically records complex shortcut combinations (e.g., `Ctrl+Alt+Shift+X`).
-- 🛠️ **5 Core Actions**:
+- 🎯 **Dynamic Multi-Key Capture**: Record zero (manual-only), one, or multiple shortcut combinations per action, plus one-click System Tray Quick Actions (`⚡`).
+- 🛠️ **6 Core Actions**:
   1. **Open Folder**: Instantly launch Windows Explorer to any path.
   2. **Launch Program**: Start any executable or script dynamically.
-  3. **Browse Chrome**: Open URLs directly in Google Chrome.
-  4. **Type Text**: Simulates hardware-level fast-typing for predefined text.
-  5. **Insert Text (Paste)**: Injects large chunks of text instantly using a temporary clipboard payload.
+  3. **Browse Web**: Open URLs in your configured browser (Default, Chrome, Edge, Brave, Firefox).
+  4. **Type Text**: Simulates hardware-level scan-code typing for predefined text (works in games, RDP, and VMs).
+  5. **Insert Text (Paste)**: Injects large chunks of text instantly while preserving and restoring HGLOBAL clipboard formats.
+  6. **Cycle Screen Brightness**: Cycles physical monitor Brightness & Contrast presets in-game with zero OSD popups and zero focus stealing.
+- ☀️ **Screen Brightness & Contrast Control**: Up to 3 displays (`Screen A`, `Screen B`, `Screen C`) with dual vertical sliders, locked or independent Brightness/Contrast ratio, hardware DDC/CI (`dxva2.dll`) + internal laptop backlight (`\\.\LCD`), 250 ms hardware speed limiter with trailing-edge flush, and stable Hardware ID binding.
+- 🖥️ **Desktop Organizer**: Save, rename, and restore multi-monitor desktop icon layouts with atomic LKG persistence and optional periodic auto-snapshots (retains the latest 5 auto-snapshots while protecting manual layouts forever).
 - 🛡️ **Conflict Probing**: Actively probes and validates your custom hotkeys against existing OS/App shortcuts to prevent collisions.
-- 💾 **State Persistence**: Remembers your window layouts, sizes, and specific configurations across reboots.
+- 💾 **Encrypted Backup & State Persistence**: Remembers your window layouts, sizes, shortcuts, desktop layouts, and brightness presets across reboots, with optional AES-256-GCM encrypted backup/restore.
 - 🚀 **Self-Installing Architecture**: Installs seamlessly into `%LOCALAPPDATA%`, sets up Start Menu shortcuts, registers safely into `appwiz.cpl` (Programs & Features), and operates silently from the System Tray.
 
 ## Installation

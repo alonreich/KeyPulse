@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -11,15 +11,46 @@ namespace KeyPulse;
 
 class Program
 {
-    private const string SingleInstanceMutexName = @"Local\KeyPulse_SingleInstance";
-    private const string OpenWindowEventName = "KeyPulse_OpenWindow";
+    public static readonly bool IsDevMode = DetectDevMode();
+
+    private static bool DetectDevMode()
+    {
+        if (string.Equals(Environment.GetEnvironmentVariable("KEYPULSE_DEV_MODE"), "1", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KEYPULSE_DEV_HOME")))
+            return true;
+        try
+        {
+            var cmdArgs = Environment.GetCommandLineArgs();
+            return cmdArgs.Any(a =>
+                string.Equals(a, "run-ui", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(a, "--dev", StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static readonly string DevHomeDir = ResolveDevHomeDir();
+
+    private static string ResolveDevHomeDir()
+    {
+        var envHome = Environment.GetEnvironmentVariable("KEYPULSE_DEV_HOME");
+        if (!string.IsNullOrWhiteSpace(envHome))
+            return Path.GetFullPath(envHome);
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "KeyPulse_DEV");
+    }
+
+    private static string SingleInstanceMutexName => IsDevMode ? @"Local\KeyPulse_SingleInstance_DEV" : @"Local\KeyPulse_SingleInstance";
+    private static string OpenWindowEventName => IsDevMode ? "KeyPulse_OpenWindow_DEV" : "KeyPulse_OpenWindow";
 
     /// <summary>
     /// ISSUE_12: the installer signals this named event to ask a running KeyPulse to shut down
     /// cleanly. Closing the main window just hides it (by design), so WM_CLOSE could never work and
     /// every upgrade stalled for a second and then hard-killed the app.
     /// </summary>
-    private const string ExitAppEventName = "KeyPulse_ExitApp";
+    private static string ExitAppEventName => IsDevMode ? "KeyPulse_ExitApp_DEV" : "KeyPulse_ExitApp";
 
     /// <summary>ISSUE_19: target handed over from the Explorer "Add to KeyPulse" context menu.</summary>
     public static readonly string StagedAddPath = Path.Combine(ConfigStore.ConfigDirectory, "staged-add.txt");
@@ -72,14 +103,11 @@ class Program
             }
             else
             {
-                // Error 5 = ERROR_ACCESS_DENIED. An unelevated process querying an elevated process
-                // is denied token access, which indicates the target process is elevated.
                 if (Marshal.GetLastWin32Error() == 5) return true;
             }
         }
         catch
         {
-            // Access denied on process.Handle also indicates higher integrity
             return true;
         }
 
@@ -101,8 +129,9 @@ class Program
     /// %TEMP% is writable by anything else running as this user, and the app told Windows to load
     /// code from it. Living under the install directory also means the uninstaller's recursive
     /// delete removes them, instead of leaving them behind forever.
+    /// In Dev Mode (DEVDATA_01), native libraries unpack to %LOCALAPPDATA%\KeyPulse_DEV\runtime.
     /// </summary>
-    public static string RuntimeLibDir = Path.Combine(InstallDir, "runtime");
+    public static string RuntimeLibDir = IsDevMode ? Path.Combine(DevHomeDir, "runtime") : Path.Combine(InstallDir, "runtime");
 
     /// <summary>ISSUE_21 / ISSUE_8: folders earlier builds used. The setup pipeline must delete these.</summary>
     public static string LegacyNativeLibDir = Path.Combine(Path.GetTempPath(), AppName + "_NativeLibs");
@@ -112,15 +141,24 @@ class Program
     /// The uninstall self-delete script cleans this AND LegacyNativeLibDir - the legacy folder is
     /// still targeted on purpose, because an upgrade from an old build leaves one behind.
     /// </summary>
-    public static string RuntimeFallbackDir = Path.Combine(Path.GetTempPath(), AppName + "_Runtime");
+    public static string RuntimeFallbackDir = Path.Combine(Path.GetTempPath(), IsDevMode ? AppName + "_DEV_Runtime" : AppName + "_Runtime");
     public static string LegacyLogDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
 
     /// <summary>
     /// ISSUE_8: logs live inside %APPDATA%\KeyPulse so the uninstaller's existing purge of that
-    /// folder removes them. They used to sit in %LOCALAPPDATA%\KeyPulse, which nothing ever deleted,
-    /// leaving a permanent record of every shortcut the user pressed behind after uninstalling.
+    /// folder removes them. In Dev Mode (DEVDATA_01), logs go to KEYPULSE_DEV_LOG_DIR (%TMP%\KeyPulse_DEV or .devlogs).
     /// </summary>
-    public static string LogDir = Path.Combine(ConfigStore.ConfigDirectory, "logs");
+    public static string LogDir = ResolveLogDir();
+
+    private static string ResolveLogDir()
+    {
+        var devLogDir = Environment.GetEnvironmentVariable("KEYPULSE_DEV_LOG_DIR");
+        if (!string.IsNullOrWhiteSpace(devLogDir))
+            return Path.GetFullPath(devLogDir);
+        if (IsDevMode)
+            return Path.Combine(Path.GetTempPath(), "KeyPulse_DEV");
+        return Path.Combine(ConfigStore.ConfigDirectory, "logs");
+    }
 
     /// <summary>ISSUE_19: mirrors AppConfig.SoundEnabled so PlaySound can be muted.</summary>
     public static volatile bool SoundEnabled = true;
@@ -231,15 +269,10 @@ class Program
             e.Handled = true;
         };
 
-        // ISSUE_19: "Add to KeyPulse" from Explorer's right-click menu. When a copy is already
-        // running the target is staged in a file and the running instance is signalled; otherwise
-        // it is handed to the window this launch creates.
         var addTarget = GetArgumentValue(args, "--add-target");
 
         if (args.Contains("--setup-admin-task"))
         {
-            // ISSUE_11: the elevated helpers never start Avalonia, so they no longer unpack or
-            // verify ~30 MB of graphics libraries first. They also never touch the settings file.
             RunSetupAdminTask(args);
             return;
         }
@@ -252,7 +285,7 @@ class Program
 
         if (isUninstall)
         {
-            if (!TryAcquireSetupLock())
+            if (!TryAcquireSetupLock(10000))
             {
                 MessageBox(IntPtr.Zero,
                     "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
@@ -300,9 +333,6 @@ class Program
                 }
                 return;
             }
-            // ISSUE_11: extraction now happens AFTER the single-instance check, so a second launch
-            // that only brings the window forward costs nothing. Setup windows still need the
-            // graphics libraries before Avalonia boots.
             try
             {
                 ExtractNativeLibs();
@@ -317,7 +347,7 @@ class Program
 
         if (isInstallWorker)
         {
-            if (!TryAcquireSetupLock())
+            if (!TryAcquireSetupLock(10000))
             {
                 MessageBox(IntPtr.Zero,
                     "KeyPulse setup is already running.\n\nFinish or close the setup window that is already open, then try again.",
@@ -337,7 +367,7 @@ class Program
             return;
         }
 
-        if (!IsRunningFromInstallPath())
+        if (!IsRunningFromInstallPath() && !IsDevMode)
         {
             if (!TryAcquireSetupLock())
             {
@@ -404,8 +434,15 @@ class Program
 
             if (!createdNew)
             {
-                // ISSUE_19: hand the Explorer "Add to KeyPulse" target to the running copy.
-                if (addTarget != null) WriteStagedAddTarget(addTarget);
+                var ipcDelivered = false;
+                if (addTarget != null)
+                {
+                    ipcDelivered = IpcService.TrySendAddTarget(addTarget);
+                    if (!ipcDelivered)
+                    {
+                        WriteStagedAddTarget(addTarget);
+                    }
+                }
 
                 if (!SignalExistingInstance())
                 {
@@ -423,7 +460,6 @@ class Program
 
         try
         {
-            // ISSUE_19: remember the Explorer-requested target for the window about to open.
             if (addTarget != null) PendingAddTarget = addTarget;
 
             ExtractNativeLibs();
@@ -440,7 +476,7 @@ class Program
     }
 
 
-    private const string SetupMutexName = @"Local\KeyPulse_Setup";
+    private static string SetupMutexName => IsDevMode ? @"Local\KeyPulse_Setup_DEV" : @"Local\KeyPulse_Setup";
     private static Mutex? _setupMutex;
     private static bool _setupMutexOwned;
 
@@ -541,12 +577,12 @@ class Program
     }
 
     /// <summary>ISSUE_3: one setup window at a time, whatever the user double-clicks.</summary>
-    private static bool TryAcquireSetupLock()
+    private static bool TryAcquireSetupLock(int timeoutMs = 0)
     {
         try
         {
             _setupMutex = CreateSharedMutex(SetupMutexName);
-            try { _setupMutexOwned = _setupMutex.WaitOne(0, false); }
+            try { _setupMutexOwned = _setupMutex.WaitOne(timeoutMs, false); }
             catch (AbandonedMutexException) { _setupMutexOwned = true; }
 
             if (!_setupMutexOwned)
@@ -573,11 +609,15 @@ class Program
     /// INSTALLER is also called "KeyPulse", and treating that as a running app would be wrong.
     /// A process we cannot inspect is assumed to be a KeyPulse at a higher integrity level - which
     /// is precisely the case the mutex label is there to fix, so it counts.
+    /// In Dev Mode (DEVDATA_01), only another process running this exact dev binary path counts.
     /// </summary>
     public static bool IsAnotherInstalledInstanceRunning()
     {
         try
         {
+            var expectedPath = IsDevMode ? Environment.ProcessPath : ExePath;
+            if (string.IsNullOrWhiteSpace(expectedPath)) return false;
+
             foreach (var process in Process.GetProcessesByName(AppName))
             {
                 using (process)
@@ -587,8 +627,12 @@ class Program
                     string? path = null;
                     try { path = process.MainModule?.FileName; } catch { /* higher integrity, or exited */ }
 
-                    if (path == null) return true;
-                    if (path.Equals(ExePath, StringComparison.OrdinalIgnoreCase)) return true;
+                    if (path == null)
+                    {
+                        if (!IsDevMode) return true;
+                        continue;
+                    }
+                    if (path.Equals(expectedPath, StringComparison.OrdinalIgnoreCase)) return true;
                 }
             }
         }
@@ -727,16 +771,10 @@ class Program
 
     private static AdminTaskState QueryAdminTaskState()
     {
-        // ISSUE_33: this used to pass "/XML ONELINE" - ONELINE is not an schtasks option, so
-        // EVERY query failed with "Improper display format type specified" and came back as
-        // AdminTaskState.Unknown. Settings then froze the checkbox with "Windows did not
-        // answer..." while the real task kept launching KeyPulse at every logon, so the
-        // checkbox and reality could never agree. Plain /XML is the documented form; an
-        // enabled task may omit <Enabled> entirely, which the check below already treats
-        // as enabled.
+        if (IsDevMode) return AdminTaskState.NotPresent;
+
         if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var xml))
         {
-            // Language-independent check: the task definition file resides in System32\Tasks
             var taskFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "Tasks", AdminTaskName);
             var notFound = !File.Exists(taskFilePath)
                 || xml.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase)
@@ -808,18 +846,19 @@ class Program
     /// <summary>ISSUE_9: one truthful answer, whether startup is driven by the Run key or the logon task.</summary>
     public static StartupState QueryStartupState()
     {
+        if (IsDevMode)
+        {
+            var devCfg = ConfigStore.Load(out _, out _);
+            return devCfg.LaunchOnBoot ? StartupState.On : StartupState.Off;
+        }
+
         var taskState = GetAdminTaskState();
         if (taskState == AdminTaskState.Enabled) return StartupState.On;
-        // ISSUE_33: a disabled (or absent) task launches nothing, but a leftover Run-key
-        // launcher still would - so fall through to the registry check instead of
-        // answering "off" while Windows keeps starting KeyPulse.
 
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false);
             if (key?.GetValue(AppName) != null) return StartupState.On;
-            // ISSUE_9: when the task state could not be determined, absence of a Run-key entry is
-            // NOT proof that startup is off - the task might exist but be unqueryable.
             return taskState == AdminTaskState.Unknown ? StartupState.Unknown : StartupState.Off;
         }
         catch
@@ -999,7 +1038,6 @@ class Program
 
     private static void RunSetupAdminTask(string[] args)
     {
-        // ISSUE_9: tri-state. Only touch the registry when the previous state is actually known.
         var startupState = QueryStartupState();
 
         var user = GetArgumentValue(args, "--for-user")
@@ -1037,22 +1075,15 @@ class Program
         }
         else
         {
-            // ISSUE_9: the previous state could not be determined. Touching nothing here is the only
-            // choice that cannot leave the user with zero - or two - startup launchers.
             LogDebug("Previous startup state unknown; registry and task enablement left untouched.");
         }
 
-        // ISSUE_3: this helper may run as a DIFFERENT administrator account (over-the-shoulder UAC).
-        // It must never open, decrypt or rewrite the user's settings file: every target used to be
-        // read under the wrong account, fail to decrypt, and get saved back blank. Its only job is
-        // the scheduled task above; the relaunched app updates the LaunchOnBoot mirror itself.
 
         try { using var relaunch = Process.Start(new ProcessStartInfo { FileName = ExePath, UseShellExecute = true }); } catch { }
     }
 
     private static void RunRemoveAdminTask()
     {
-        // ISSUE_9: only restore the registry launcher when startup is CONFIRMED on.
         var startupState = QueryStartupState();
 
         var deleted = RunSchtasks($"/Delete /TN \"{AdminTaskName}\" /F", out var exitCode, out var output);
@@ -1067,8 +1098,6 @@ class Program
         }
         else if (startupState == StartupState.On)
         {
-            // ISSUE_3: registry only. This helper can run as a different administrator account, so
-            // it must not open or rewrite the user's settings file the way SetStartup would.
             if (!TrySetRegistryStartup(true, out var startupError))
             {
                 LogDebug($"Failed to restore Run-key startup after de-elevating: {startupError}");
@@ -1251,35 +1280,26 @@ class Program
         catch (Exception ex)
         {
             LogCrash($"Could not create the runtime library folder '{outDir}': {ex.Message}. Falling back to TEMP.");
-                outDir = RuntimeFallbackDir;
+            outDir = RuntimeFallbackDir;
             try { Directory.CreateDirectory(outDir); } catch { }
         }
 
-        SetDllDirectory(outDir);
+        var failedLibs = new List<string>();
 
         foreach (var res in resources)
         {
             if (!res.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
 
-            var target = Path.Combine(outDir, res.Split('.').SkipLast(1).Last() + ".dll");
+            var dllFileName = res.Split('.').SkipLast(1).Last() + ".dll";
+            var target = Path.Combine(outDir, dllFileName);
             var stampPath = target + ".stamp";
 
             try
             {
                 using var stream = asm.GetManifestResourceStream(res);
-                if (stream == null) continue;
-
-                // ISSUE_11: a file that was verified on a PREVIOUS launch is re-verified cheaply.
-                // The stamp records the resource length and the SHA-256 that was verified (or
-                // written) last time; if the on-disk length still matches both, accept it. Reading
-                // and hashing ~30 MB of libraries on every single start made the window take a
-                // visible beat to appear. Any mismatch falls through to the full content check.
-                if (File.Exists(target) && File.Exists(stampPath)
-                    && TryReadStamp(stampPath, out var stampedLength, out var stampedHash)
-                    && stampedLength == stream.Length
-                    && new FileInfo(target).Length == stampedLength)
+                if (stream == null)
                 {
-                    LogDebug($"{Path.GetFileName(target)} verified by stamp ({stampedHash[..8]}…).");
+                    failedLibs.Add($"{dllFileName} (embedded resource stream missing)");
                     continue;
                 }
 
@@ -1288,38 +1308,67 @@ class Program
 
                 if (File.Exists(target) && FileHashMatches(target, expectedHash))
                 {
-                    LogDebug($"{Path.GetFileName(target)} verified.");
+                    LogDebug($"{dllFileName} verified by SHA-256 content hash.");
                     WriteStamp(stampPath, stream.Length, expectedHashHex);
                     continue;
                 }
 
-                LogDebug($"Extracting {target}");
+                LogDebug($"Extracting or repairing native component {target}");
                 stream.Position = 0;
 
-                var tempTarget = target + ".tmp";
+                var tempTarget = Path.Combine(outDir, $"{dllFileName}.tmp-{Guid.NewGuid():N}");
                 using (var fs = File.Create(tempTarget))
                 {
                     stream.CopyTo(fs);
                 }
 
+                if (!FileHashMatches(tempTarget, expectedHash))
+                {
+                    try { File.Delete(tempTarget); } catch { }
+                    failedLibs.Add($"{dllFileName} (extracted temporary file corrupted)");
+                    continue;
+                }
+
                 try
                 {
-                    File.Move(tempTarget, target, true);
+                    if (File.Exists(target))
+                    {
+                        File.Replace(tempTarget, target, null);
+                    }
+                    else
+                    {
+                        File.Move(tempTarget, target);
+                    }
                     WriteStamp(stampPath, stream.Length, expectedHashHex);
+                    LogDebug($"{dllFileName} extracted and verified.");
                 }
                 catch (Exception moveEx)
                 {
-                    LogDebug($"Could not replace {Path.GetFileName(target)}: {moveEx.Message}");
+                    LogCrash($"Could not install native library {dllFileName}: {moveEx.Message}");
                     try { File.Delete(tempTarget); } catch { }
+                    failedLibs.Add($"{dllFileName} ({moveEx.Message})");
                 }
             }
             catch (Exception ex)
             {
-                LogDebug($"Failed to extract {res}: {ex}");
+                LogCrash($"Failed to extract and verify native component {res}: {ex}");
+                failedLibs.Add($"{dllFileName} ({ex.Message})");
             }
         }
 
-        LogDebug("ExtractNativeLibs finished");
+        if (failedLibs.Count > 0)
+        {
+            var msg = "KeyPulse could not safely verify or extract its required native components:\n\n"
+                    + string.Join("\n", failedLibs)
+                    + "\n\nThe application cannot proceed securely and will exit. Check disk space and folder permissions.";
+            LogCrash(msg);
+            MessageBox(IntPtr.Zero, msg, "KeyPulse - Component Verification Error", 0x10 /* MB_ICONERROR */);
+            Environment.Exit(1);
+            return;
+        }
+
+        SetDllDirectory(outDir);
+        LogDebug("ExtractNativeLibs finished: all native libraries verified.");
     }
 
     /// <summary>ISSUE_11: "<length>|<sha256-hex>" sidecar that makes a repeat launch cheap.</summary>
@@ -1387,12 +1436,15 @@ class Program
     {
         error = string.Empty;
 
+        if (IsDevMode)
+        {
+            MirrorLaunchOnBoot(enable);
+            return true;
+        }
+
         var taskState = GetAdminTaskState();
         if (taskState == AdminTaskState.Unknown)
         {
-            // ISSUE_9: if Windows would not tell us whether the logon task exists, switching
-            // startup on must NOT fall through to the registry - that wrote a second launcher
-            // next to the unqueryable task, and two KeyPulse copies started at the next login.
             error = "Windows did not answer when KeyPulse asked about its own startup entry, so nothing was changed. Wait a moment and try again.";
             return false;
         }
@@ -1424,8 +1476,6 @@ class Program
             return true;
         }
 
-        // taskState == NotPresent: the plain per-user registry launcher. Extracted so elevated
-        // helpers (ISSUE_3) can set it without ever touching the user's settings file.
         if (!TrySetRegistryStartup(enable, out error)) return false;
 
         MirrorLaunchOnBoot(enable);
@@ -1439,6 +1489,7 @@ class Program
     public static bool TrySetRegistryStartup(bool enable, out string error)
     {
         error = string.Empty;
+        if (IsDevMode) return true;
 
         try
         {

@@ -16,7 +16,8 @@ namespace KeyPulse
         LaunchProgram,
         BrowseChrome,
         TypeText,
-        InsertText
+        InsertText,
+        CycleBrightness
     }
 
     public class HotkeyEntry : INotifyPropertyChanged
@@ -65,16 +66,110 @@ namespace KeyPulse
             }
         }
 
-        public string KeyCombination
+        private string? _displayName;
+        public string? DisplayName
         {
-            get => _keyCombination;
+            get => _displayName;
             set
             {
-                if (_keyCombination == value) return;
-                _keyCombination = value;
+                if (_displayName == value) return;
+                _displayName = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(ActionTitle));
             }
         }
+
+        private List<string> _keyCombinations = new();
+        [JsonPropertyName("KeyCombinations")]
+        public List<string> KeyCombinations
+        {
+            get => _keyCombinations;
+            set
+            {
+                _keyCombinations = value ?? new List<string>();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(KeyCombination));
+                OnPropertyChanged(nameof(KeyCombinationsDisplay));
+                OnPropertyChanged(nameof(KeyCombinationsTooltip));
+            }
+        }
+
+        [JsonPropertyName("KeyCombination")]
+        public string? LegacyKeyCombination
+        {
+            get => _keyCombinations.Count > 0 ? _keyCombinations[0] : null;
+            set
+            {
+                if (!string.IsNullOrWhiteSpace(value) && _keyCombinations.Count == 0)
+                {
+                    _keyCombinations.Add(value.Trim());
+                    OnPropertyChanged(nameof(KeyCombinations));
+                    OnPropertyChanged(nameof(KeyCombination));
+                    OnPropertyChanged(nameof(KeyCombinationsDisplay));
+                    OnPropertyChanged(nameof(KeyCombinationsTooltip));
+                }
+            }
+        }
+
+        [JsonIgnore]
+        public string KeyCombination
+        {
+            get => _keyCombinations.Count > 0 ? _keyCombinations[0] : string.Empty;
+            set
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    if (_keyCombinations.Count > 0)
+                    {
+                        _keyCombinations.RemoveAt(0);
+                    }
+                }
+                else
+                {
+                    if (_keyCombinations.Count == 0)
+                    {
+                        _keyCombinations.Add(value.Trim());
+                    }
+                    else
+                    {
+                        _keyCombinations[0] = value.Trim();
+                    }
+                }
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(KeyCombinations));
+                OnPropertyChanged(nameof(KeyCombinationsDisplay));
+                OnPropertyChanged(nameof(KeyCombinationsTooltip));
+            }
+        }
+
+        [JsonIgnore]
+        public string KeyCombinationsDisplay
+        {
+            get
+            {
+                if (_keyCombinations == null || _keyCombinations.Count == 0) return "No hotkey";
+                if (_keyCombinations.Count == 1) return _keyCombinations[0];
+                return $"{_keyCombinations[0]} (+{_keyCombinations.Count - 1} more)";
+            }
+        }
+
+        [JsonIgnore]
+        public string KeyCombinationsTooltip
+        {
+            get
+            {
+                if (_keyCombinations == null || _keyCombinations.Count == 0)
+                    return "No keyboard shortcut assigned. Run manually or from Quick Actions.";
+                if (_keyCombinations.Count == 1)
+                    return _keyCombinations[0];
+                return string.Join("\n", _keyCombinations);
+            }
+        }
+
+        [JsonIgnore]
+        public string ActionTitle => !string.IsNullOrWhiteSpace(DisplayName)
+            ? DisplayName
+            : ActionDisplay;
 
         public ActionType Action
         {
@@ -139,13 +234,7 @@ namespace KeyPulse
         {
             get
             {
-                // ISSUE_1: while the target cannot be decrypted, hand back the ORIGINAL cipher text.
-                // Re-protecting the now-empty _target here used to overwrite the stored value with an
-                // empty string the first time anything saved, destroying the shortcut forever right
-                // after the app had promised "Nothing was deleted".
                 if (TargetUnreadable && UnreadableTargetCipher.Length > 0) return UnreadableTargetCipher;
-                // ISSUE_10: never re-protect a value that could not be protected - it would fail again
-                // anyway, and quietly re-writing plain text hides the problem from the user.
                 if (TargetProtectionFailed && _target.Length > 0) return _target;
                 return CryptoHelper.Protect(_target);
             }
@@ -155,8 +244,6 @@ namespace KeyPulse
                 {
                     TargetUnreadable = false;
                     UnreadableTargetCipher = string.Empty;
-                    // ISSUE_10: a value stored without the DPAPI/legacy prefix was written in plain
-                    // text because Windows could not protect it. Flag it so the row is honest.
                     TargetProtectionFailed = value.Length > 0 && !CryptoHelper.IsProtectedValue(value);
                     Target = plain;
                 }
@@ -182,6 +269,18 @@ namespace KeyPulse
         [JsonIgnore]
         public string SuggestedForCombo { get; set; } = string.Empty;
 
+        /// <summary>Mapping of Normalized Combination -> Win32 Hotkey ID for multiple bindings.</summary>
+        [JsonIgnore]
+        public Dictionary<string, int> RegisteredHotkeyIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Per-combination status (Active, Conflict, etc.).</summary>
+        [JsonIgnore]
+        public Dictionary<string, string> ComboStatuses { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Per-combination hints or suggestions.</summary>
+        [JsonIgnore]
+        public Dictionary<string, string> ComboHints { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         [JsonIgnore]
         public bool HasLongTarget => !string.IsNullOrWhiteSpace(Target) && Target.Length > 80;
 
@@ -198,6 +297,7 @@ namespace KeyPulse
             ActionType.BrowseChrome => "Open web link",
             ActionType.TypeText => "Type text",
             ActionType.InsertText => "Paste text",
+            ActionType.CycleBrightness => "Cycle brightness",
             _ => Action.ToString()
         };
 
@@ -264,8 +364,6 @@ namespace KeyPulse
             get
             {
                 if (!IsTargetHidden) return Target;
-                // ISSUE_10: when Windows could not encrypt the value, say so instead of implying
-                // the blur means the file on disk is protected.
                 return TargetProtectionFailed
                     ? "Hidden from the list, but stored UNENCRYPTED in the settings file because Windows could not protect it. Anyone who opens that file can read it."
                     : "Hidden. Select this row to view or change the value.";
@@ -286,9 +384,11 @@ namespace KeyPulse
         {
             get
             {
-                if (RegistrationStatus.StartsWith("Active", StringComparison.OrdinalIgnoreCase)) return AppBrush("AppSuccessSoftBrush");
+                if (RegistrationStatus.StartsWith("Active", StringComparison.OrdinalIgnoreCase)
+                    || RegistrationStatus.StartsWith("Ready", StringComparison.OrdinalIgnoreCase)) return AppBrush("AppSuccessSoftBrush");
                 if (RegistrationStatus.StartsWith("Disabled", StringComparison.OrdinalIgnoreCase)) return AppBrush("AppDisabledForegroundBrush");
-                if (RegistrationStatus.StartsWith("Waiting", StringComparison.OrdinalIgnoreCase)) return AppBrush("AppWarningBrush");
+                if (RegistrationStatus.StartsWith("Waiting", StringComparison.OrdinalIgnoreCase)
+                    || RegistrationStatus.StartsWith("Partial", StringComparison.OrdinalIgnoreCase)) return AppBrush("AppWarningBrush");
                 return AppBrush("AppDangerBrush");
             }
         }
@@ -456,9 +556,44 @@ namespace KeyPulse
     public class BackupShortcut
     {
         public string Id { get; set; } = string.Empty;
+        public string? DisplayName { get; set; }
         public bool IsEnabled { get; set; } = true;
         public bool AllowRiskyShortcut { get; set; }
-        public string KeyCombination { get; set; } = string.Empty;
+
+        [JsonPropertyName("KeyCombinations")]
+        public List<string> KeyCombinations { get; set; } = new();
+
+        [JsonPropertyName("KeyCombination")]
+        public string? LegacyKeyCombination
+        {
+            get => KeyCombinations.Count > 0 ? KeyCombinations[0] : null;
+            set
+            {
+                if (!string.IsNullOrWhiteSpace(value) && KeyCombinations.Count == 0)
+                {
+                    KeyCombinations.Add(value.Trim());
+                }
+            }
+        }
+
+        [JsonIgnore]
+        public string KeyCombination
+        {
+            get => KeyCombinations.Count > 0 ? KeyCombinations[0] : string.Empty;
+            set
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    if (KeyCombinations.Count > 0) KeyCombinations.RemoveAt(0);
+                }
+                else
+                {
+                    if (KeyCombinations.Count == 0) KeyCombinations.Add(value.Trim());
+                    else KeyCombinations[0] = value.Trim();
+                }
+            }
+        }
+
         public ActionType Action { get; set; }
         public string Target { get; set; } = string.Empty;
         public bool IsTargetObfuscated { get; set; }
@@ -510,6 +645,9 @@ namespace KeyPulse
 
         public BackupWindowLayout Window { get; set; } = new();
 
+        public DesktopOrganizerConfig? DesktopOrganizer { get; set; }
+
+        public ScreenBrightnessConfig? ScreenBrightness { get; set; }
     }
 
     public class BackupEnvelope
@@ -576,6 +714,7 @@ namespace KeyPulse
         public int DisplayCount { get; set; }
         public int IconSpacingX { get; set; } = 76;
         public int IconSpacingY { get; set; } = 100;
+        public bool IsAutoSnapshot { get; set; } = false;
         public List<DesktopMonitorSnapshot> Monitors { get; set; } = new();
         public List<DesktopIconSnapshot> Icons { get; set; } = new();
 
@@ -589,11 +728,51 @@ namespace KeyPulse
     public class DesktopOrganizerConfig
     {
         public bool AutoRestoreOnDisplayChange { get; set; } = false;
+        public bool AutoPeriodicSnapshotEnabled { get; set; } = false;
+        public int AutoSnapshotIntervalDays { get; set; } = 3;
+        public string LastAutoSnapshotUtc { get; set; } = string.Empty;
         public UnsavedIconBehavior NewIconBehavior { get; set; } = UnsavedIconBehavior.CenterGrid;
         public string ActiveProfileId { get; set; } = string.Empty;
         public List<DesktopLayoutProfile> Profiles { get; set; } = new();
     }
 
+    public class ScreenHardwareSetting
+    {
+        public int SlotIndex { get; set; }
+        public string HardwareId { get; set; } = string.Empty;
+        public string ModelName { get; set; } = string.Empty;
+        public string CustomNickname { get; set; } = string.Empty;
+        public bool LockRatio { get; set; } = true;
+        public int LastBrightness { get; set; } = 65;
+        public int LastContrast { get; set; } = 65;
+    }
+
+    public class ScreenCycleEntry
+    {
+        public int SlotIndex { get; set; }
+        public string HardwareId { get; set; } = string.Empty;
+        public int Brightness { get; set; } = 50;
+        public int Contrast { get; set; } = 50;
+    }
+
+    public class ScreenBrightnessProfile
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string Name { get; set; } = "Preset";
+        public bool ShowInTrayQuickActions { get; set; } = true;
+        public bool IncludeInCycle { get; set; } = true;
+        public List<ScreenCycleEntry> Targets { get; set; } = new();
+    }
+
+    public class ScreenBrightnessConfig
+    {
+        public bool GlobalLockBrightnessContrast { get; set; } = true;
+        public string LastCycleProfileId { get; set; } = string.Empty;
+        public List<ScreenHardwareSetting> Screens { get; set; } = new();
+        public List<ScreenBrightnessProfile> Profiles { get; set; } = new();
+    }
+
+    [JsonSourceGenerationOptions(NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals)]
     [JsonSerializable(typeof(AppConfig))]
     [JsonSerializable(typeof(BackupEnvelope))]
     [JsonSerializable(typeof(BackupPayload))]
@@ -605,5 +784,17 @@ namespace KeyPulse
     [JsonSerializable(typeof(List<DesktopLayoutProfile>))]
     [JsonSerializable(typeof(List<DesktopIconSnapshot>))]
     [JsonSerializable(typeof(List<DesktopMonitorSnapshot>))]
+    [JsonSerializable(typeof(ScreenBrightnessConfig))]
+    [JsonSerializable(typeof(ScreenBrightnessProfile))]
+    [JsonSerializable(typeof(ScreenCycleEntry))]
+    [JsonSerializable(typeof(ScreenHardwareSetting))]
+    [JsonSerializable(typeof(List<ScreenBrightnessProfile>))]
+    [JsonSerializable(typeof(List<ScreenCycleEntry>))]
+    [JsonSerializable(typeof(List<ScreenHardwareSetting>))]
+    [JsonSerializable(typeof(List<string>))]
+    [JsonSerializable(typeof(List<HotkeyEntry>))]
+    [JsonSerializable(typeof(List<BackupShortcut>))]
+    [JsonSerializable(typeof(IpcMessage))]
+    [JsonSerializable(typeof(IpcResponse))]
     public partial class AppConfigJsonContext : JsonSerializerContext { }
 }

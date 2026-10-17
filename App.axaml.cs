@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
@@ -79,6 +79,7 @@ public partial class App : Application
     }
 
     private static List<HotkeyEntry>? _lastQuickActionHotkeys;
+    private static bool _brightnessHookRegistered;
 
     public static void UpdateTrayQuickActions(IEnumerable<HotkeyEntry>? hotkeys)
     {
@@ -86,6 +87,15 @@ public partial class App : Application
         {
             var current = Current as App;
             if (current == null) return;
+
+            if (!_brightnessHookRegistered)
+            {
+                _brightnessHookRegistered = true;
+                ScreenBrightnessService.StateChanged += () =>
+                {
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() => UpdateTrayQuickActions(null));
+                };
+            }
 
             if (hotkeys != null)
             {
@@ -102,6 +112,45 @@ public partial class App : Application
             }
 
             trayIcon.Menu.Items.Clear();
+
+            var brightnessSubMenu = new NativeMenu();
+            var sbConfig = ScreenBrightnessService.LoadConfig();
+            var sbQuickProfiles = ScreenBrightnessService.GetTrayQuickActionProfiles(sbConfig);
+
+            if (sbQuickProfiles.Count > 0)
+            {
+                brightnessSubMenu.Items.Add(new NativeMenuItem("QUICK ACTIONS") { IsEnabled = false });
+                foreach (var profile in sbQuickProfiles)
+                {
+                    var capturedProfile = profile;
+                    bool isCurrent = profile.Id == sbConfig.LastCycleProfileId;
+                    string prefix = isCurrent ? "✓ " : "  ";
+                    var pItem = new NativeMenuItem(prefix + ScreenBrightnessService.FormatProfileSummary(capturedProfile, sbConfig));
+                    pItem.Click += (s, e) => ScreenBrightnessService.ApplyProfileAsync(capturedProfile);
+                    brightnessSubMenu.Items.Add(pItem);
+                }
+                brightnessSubMenu.Items.Add(new NativeMenuItemSeparator());
+            }
+
+            var quickSlidersItem = new NativeMenuItem("Quick Sliders (Overlay)");
+            quickSlidersItem.Click += current.ScreenBrightnessOverlay_Clicked;
+            brightnessSubMenu.Items.Add(quickSlidersItem);
+
+            var openBrightnessItem = new NativeMenuItem("Open Screen Brightness");
+            openBrightnessItem.Click += current.ScreenBrightnessWindow_Clicked;
+            brightnessSubMenu.Items.Add(openBrightnessItem);
+
+            var brightnessRootItem = new NativeMenuItem("Screen Brightness")
+            {
+                Menu = brightnessSubMenu
+            };
+            trayIcon.Menu.Items.Add(brightnessRootItem);
+            trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
+
+            var orgItem = new NativeMenuItem("Desktop Organizer");
+            orgItem.Click += current.DesktopOrganizer_Clicked;
+            trayIcon.Menu.Items.Add(orgItem);
+            trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
 
             var quickActions = (_lastQuickActionHotkeys ?? Enumerable.Empty<HotkeyEntry>())
                 .Where(h => h.AddToQuickActionMenu && h.IsEnabled)
@@ -127,10 +176,6 @@ public partial class App : Application
             var openItem = new NativeMenuItem("Open KeyPulse");
             openItem.Click += current.OpenKeybinds_Clicked;
             trayIcon.Menu.Items.Add(openItem);
-
-            var orgItem = new NativeMenuItem("Desktop Organizer");
-            orgItem.Click += current.DesktopOrganizer_Clicked;
-            trayIcon.Menu.Items.Add(orgItem);
 
             var settingsItem = new NativeMenuItem("Settings");
             settingsItem.Click += current.OpenSettings_Clicked;
@@ -162,29 +207,38 @@ public partial class App : Application
                         Task.Run(async () =>
                         {
                             await Task.Delay(180);
-                            Avalonia.Threading.Dispatcher.UIThread.Post(() => mw.ExecuteAction(entry));
+                            mw.ExecuteAction(entry);
                         });
                     }
                     else
                     {
-                        mw.ExecuteAction(entry);
+                        Task.Run(() => mw.ExecuteAction(entry));
                     }
                 }
             }
         }
         catch (Exception ex)
         {
-            KeyPulse.Program.LogCrash($"ExecuteQuickAction failed for {entry.KeyCombination}: {ex}");
+            KeyPulse.Program.LogCrash($"ExecuteQuickAction failed for {entry.ActionTitle}: {ex}");
         }
     }
 
     private static string FormatQuickActionTitle(HotkeyEntry entry)
     {
+        if (!string.IsNullOrWhiteSpace(entry.DisplayName))
+        {
+            var comboHint = entry.KeyCombinationsDisplay;
+            return !string.IsNullOrWhiteSpace(comboHint) && comboHint != "No hotkey (Manual)"
+                ? $"{entry.DisplayName} ({comboHint})"
+                : entry.DisplayName;
+        }
+
         if (entry.IsTargetObfuscated)
         {
-            return string.IsNullOrWhiteSpace(entry.KeyCombination)
+            var comboHint = entry.KeyCombinationsDisplay;
+            return string.IsNullOrWhiteSpace(comboHint) || comboHint == "No hotkey (Manual)"
                 ? $"{entry.ActionDisplay} (Protected)"
-                : $"{entry.ActionDisplay} ({entry.KeyCombination})";
+                : $"{entry.ActionDisplay} ({comboHint})";
         }
 
         string actionDesc;
@@ -251,9 +305,10 @@ public partial class App : Application
                 break;
         }
 
-        return string.IsNullOrWhiteSpace(entry.KeyCombination)
+        var combosDisplay = entry.KeyCombinationsDisplay;
+        return string.IsNullOrWhiteSpace(combosDisplay) || combosDisplay == "No hotkey (Manual)"
             ? actionDesc
-            : $"{actionDesc} ({entry.KeyCombination})";
+            : $"{actionDesc} ({combosDisplay})";
     }
 
     public override void OnFrameworkInitializationCompleted()
@@ -283,9 +338,6 @@ public partial class App : Application
                 if (startHidden) HiddenWindow = mw;
                 desktop.MainWindow = mw;
 
-                // ISSUE_12: the installer asks a running KeyPulse to shut down through this event.
-                // A window close request is deliberately ignored by MainWindow (it hides instead),
-                // so this is the one "please exit now" channel the app actually honours.
                 Program.StartExitRequestListener(() =>
                 {
                     Avalonia.Threading.Dispatcher.UIThread.Post(() => Exit_Clicked(null, System.EventArgs.Empty));
@@ -296,13 +348,22 @@ public partial class App : Application
                     Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                     {
                         OpenKeybinds_Clicked(null, System.EventArgs.Empty);
-                        // ISSUE_19: if Explorer's "Add to KeyPulse" staged a target for us, load it
-                        // into the editor now that the window is coming forward.
                         mw.ConsumeStagedAdd();
                     });
                 });
 
-                // ISSUE_19: launched directly from the Explorer context menu - stage immediately.
+                IpcService.StartServer(target =>
+                {
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        OpenKeybinds_Clicked(null, System.EventArgs.Empty);
+                        if (!string.IsNullOrWhiteSpace(target))
+                        {
+                            mw.StageExternalAdd(target);
+                        }
+                    });
+                });
+
                 if (Program.PendingAddTarget != null)
                 {
                     var staged = Program.PendingAddTarget;
@@ -310,6 +371,7 @@ public partial class App : Application
                     mw.StageExternalAdd(staged);
                 }
 
+                DesktopOrganizerService.EnsureAutoSnapshotScheduler();
                 KeyPulse.Program.LogDebug("Set MainWindow");
             }
         }
@@ -330,13 +392,19 @@ public partial class App : Application
             if (mw != null)
             {
                 if (desktop.MainWindow == null) desktop.MainWindow = mw;
-                // ISSUE_32: BringToFront marks the user request BEFORE Show(), so the first
-                // open after a --hidden boot can no longer be re-hidden by MainWindow_Opened
-                // (the half-second flash-then-close). It also leaves a maximized window
-                // maximized instead of forcing it back to Normal.
                 mw.BringToFront();
             }
         }
+    }
+
+    public void ScreenBrightnessOverlay_Clicked(object? sender, System.EventArgs e)
+    {
+        ScreenBrightnessOverlayWindow.ShowOverlay();
+    }
+
+    public void ScreenBrightnessWindow_Clicked(object? sender, System.EventArgs e)
+    {
+        ScreenBrightnessWindow.OpenWindow(ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop ? desktop.MainWindow : null);
     }
 
     public void DesktopOrganizer_Clicked(object? sender, System.EventArgs e)
@@ -355,6 +423,7 @@ public partial class App : Application
     public void Exit_Clicked(object? sender, System.EventArgs e)
     {
         IsExiting = true;
+        IpcService.StopServer();
         InputSimulator.CancelTyping();
         HotkeyManager.DisableCaptureHook();
         Program.StopOpenWindowRequestListener();

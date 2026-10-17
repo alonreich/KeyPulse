@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -8,6 +8,8 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
 using Microsoft.Win32;
 
 namespace KeyPulse
@@ -43,11 +45,12 @@ namespace KeyPulse
         private string? _configQuarantinePath;
         private bool _startupNoticeShown;
         private HotkeyEntry? _editingEntry;
+        private readonly List<string> _editorCombos = new();
         private bool _loadingEditorFields;
         private bool _creatingDuplicate;
         private string? _duplicateSourceCombo;
         private bool _showingRiskyShortcutWarning;
-        private string? _approvedNewRiskyCombo;
+        private readonly HashSet<string> _approvedNewRiskyCombos = new(StringComparer.OrdinalIgnoreCase);
         private bool _shortcutColumnResizeActive;
         private Grid? _shortcutColumnResizeGrid;
         private string? _shortcutColumnResizeLeftKey;
@@ -89,6 +92,10 @@ namespace KeyPulse
             this.Opened += MainWindow_Opened;
             
             InitializeComponent();
+            if (Program.IsDevMode)
+            {
+                this.Title = "KeyPulse [DEV SANDBOX]";
+            }
             DataContext = this;
             WireShortcutColumnSplitters();
             UpdateActionUi();
@@ -144,12 +151,8 @@ namespace KeyPulse
             InputSimulator.TypingProgressChanged += OnTypingProgress;
             InputSimulator.TypingFinished += OnTypingFinished;
 
-            // ISSUE_10: say so plainly the FIRST time Windows cannot protect a target, instead of
-            // leaving the only trace in a log file while the blur keeps implying protection.
             CryptoHelper.ProtectionFailed += OnTargetProtectionFailed;
 
-            // ISSUE_33: captured BEFORE LoadConfig - any later save writes config.json, so
-            // "did the settings file exist a moment ago" is the reliable first-run signal.
             var firstRun = !File.Exists(ConfigPath);
             LoadConfig();
             ApplyShortcutColumnResources();
@@ -161,15 +164,10 @@ namespace KeyPulse
                 Program.LogDebug($"{failures} shortcut(s) were inactive after startup registration.");
             }
             RefreshStatusSummary();
+            RefreshComboChips();
             StartRegistrationRetryTimer();
 
-            // ISSUE_33: a brand-new install has no launcher yet and a fresh (default-on)
-            // config. Create the per-user launcher so "starts with Windows" is genuinely
-            // checked by default on a clean machine. Only on the very first run, so an
-            // upgrade or a user's earlier "off" choice is never overridden. Best-effort
-            // and silent: failures only go to the debug log, and Settings always shows
-            // the real Windows state.
-            if (firstRun)
+            if (firstRun && !Program.IsDevMode)
             {
                 System.Threading.Tasks.Task.Run(() =>
                 {
@@ -199,15 +197,8 @@ namespace KeyPulse
         {
             ReportStartupProblems();
 
-            // ISSUE_19: pick up a target staged by a second launch's "Add to KeyPulse" request.
             ConsumeStagedAdd();
 
-            // ISSUE_32: a --hidden start never calls Show(), so this event fires for the FIRST
-            // time exactly when the user opens the window - often hours or days after boot.
-            // The old unconditional `if (_startHidden) Hide();` turned that first open into a
-            // half-second flash: the window appeared, Opened ran, and hid it again. Only a
-            // Show() that no user action asked for may still be re-hidden; every real open
-            // goes through BringToFront(), which sets _userAskedToBeShown first.
             if (_startHidden && !_userAskedToBeShown)
             {
                 Program.LogDebug("Main window shown during hidden startup with no user request; hiding again.");
@@ -324,7 +315,6 @@ namespace KeyPulse
                     + "row and enter its folder, program, link or text again.", true);
             }
 
-            // ISSUE_10: be honest when Windows could not protect targets on this machine.
             var unprotected = Hotkeys.Count(h => h.TargetProtectionFailed);
             if (CryptoHelper.ProtectionUnavailable || unprotected > 0)
             {
@@ -340,10 +330,10 @@ namespace KeyPulse
                     + "open it. Affected rows are marked amber in the list.", true);
             }
 
-            var broken = Hotkeys.Where(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Waiting")).ToList();
+            var broken = Hotkeys.Where(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Ready") && !IsStatus(h, "Waiting")).ToList();
             if (broken.Count == 0) return;
 
-            var lines = broken.Take(8).Select(h => "  " + h.KeyCombination + " - " + h.RegistrationStatus +
+            var lines = broken.Take(8).Select(h => "  " + h.ActionTitle + " (" + h.KeyCombinationsDisplay + ") - " + h.RegistrationStatus +
                                                   (string.IsNullOrWhiteSpace(h.StatusHint) ? string.Empty : " (" + h.StatusHint + ")"));
             var detail = string.Join("\n", lines);
             if (broken.Count > 8) detail += $"\n  ...and {broken.Count - 8} more.";
@@ -382,10 +372,6 @@ namespace KeyPulse
             }
             else
             {
-                // ISSUE_5: Avalonia measures this window in scaled units (DIPs), but Screen.Bounds is
-                // raw pixels. Dividing by screen.Scaling converts properly; the old raw ratio made a
-                // 4K@200% or 150% laptop open roughly twice as large as the display, with the Add and
-                // Settings buttons off-screen. The size is also clamped to the usable work area.
                 var screen = this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
                 if (screen != null)
                 {
@@ -399,8 +385,6 @@ namespace KeyPulse
             }
             if (loaded.MainWindowWidth > 0 && loaded.MainWindowHeight > 0)
             {
-                // ISSUE_5: a saved size from a different scaling setup must still fit the monitor
-                // the window actually lands on.
                 var fitScreen = this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
                 if (fitScreen != null)
                 {
@@ -454,14 +438,11 @@ namespace KeyPulse
         private const double TargetColumnMin = 180, TargetColumnMax = 1600, TargetColumnDefault = 468;
 
         /// <summary>
-        /// Fixed width of the Actions column: ISSUE_6 added the On/Off toggle and ISSUE_15 made the
-        /// buttons readable at 11pt, so it is now 8px cell padding each side, a 48px toggle, a 78px
-        /// REMOVE, a 100px DUPLICATE and two 6px gaps = 252. It is NOT user-resizable and NOT "Auto":
-        /// the header and the rows are two separate grids, so "Auto" sized the heading to the word
-        /// "Actions" and the row to its buttons, which is why the heading did not line up with
-        /// anything.
+        /// Fixed width of the Actions column: 8px cell padding each side, a 48px toggle, a 46px RUN,
+        /// a 76px REMOVE, a 100px DUPLICATE and three 6px gaps = 304 (310 with breathing room).
+        /// It is NOT user-resizable and NOT "Auto": the header and the rows are two separate grids.
         /// </summary>
-        private const double ActionsColumnWidth = 252;
+        private const double ActionsColumnWidth = 310;
 
         private void ApplyShortcutColumnResources()
         {
@@ -653,7 +634,6 @@ namespace KeyPulse
             var columns = headerGrid.ColumnDefinitions;
             if (columns.Count < 9) return;
 
-            // Do not capture if the grid has not been measured/rendered yet (e.g. starting hidden)
             if (columns[0].ActualWidth <= 0 || columns[2].ActualWidth <= 0 || columns[4].ActualWidth <= 0 || columns[6].ActualWidth <= 0) return;
 
             _currentConfig.ShortcutStatusColumnWidth = ClampColumnWidth(columns[0].ActualWidth, StatusColumnDefault, StatusColumnMin, StatusColumnMax);
@@ -733,11 +713,12 @@ namespace KeyPulse
 
         private static HotkeyEntry CloneHotkeyEntry(HotkeyEntry source)
         {
-            return new HotkeyEntry
+            var clone = new HotkeyEntry
             {
                 Id = source.Id,
                 IsEnabled = source.IsEnabled,
                 AllowRiskyShortcut = source.AllowRiskyShortcut,
+                DisplayName = source.DisplayName,
                 KeyCombination = source.KeyCombination,
                 Action = source.Action,
                 Target = source.Target,
@@ -747,6 +728,11 @@ namespace KeyPulse
                 UnreadableTargetCipher = source.UnreadableTargetCipher,
                 TargetProtectionFailed = source.TargetProtectionFailed
             };
+            if (source.KeyCombinations != null && source.KeyCombinations.Count > 0)
+            {
+                clone.KeyCombinations = new List<string>(source.KeyCombinations);
+            }
+            return clone;
         }
 
         /// <summary>Hands back every live registration. Used before the list itself is replaced.</summary>
@@ -802,18 +788,9 @@ namespace KeyPulse
                     blockingStatus = "Inactive: Could not be read";
                     blockingHint = "This shortcut was saved by a different Windows account, or the settings file was edited. Select this row and enter the target again.";
                 }
-                else if (!ValidateHotkeyFormat(h.KeyCombination, false, out var hotkeyError, h.AllowRiskyShortcut))
-                {
-                    blockingStatus = "Inactive: " + hotkeyError;
-                }
                 else if (!ValidateTargetShape(h.Action, h.Target, out var targetError))
                 {
                     blockingStatus = "Inactive: " + targetError;
-                }
-                else if (!claimedCombos.Add(NormalizeComboKey(h.KeyCombination)))
-                {
-                    blockingStatus = "Inactive: Duplicate";
-                    blockingHint = "Another KeyPulse shortcut already uses this combination.";
                 }
 
                 if (blockingStatus != null)
@@ -826,28 +803,137 @@ namespace KeyPulse
                     continue;
                 }
 
-                var normalizedCombo = NormalizeComboKey(h.KeyCombination);
-
-                if (h.RegisteredHotkeyId != 0
-                    && string.Equals(h.RegisteredCombo, normalizedCombo, StringComparison.OrdinalIgnoreCase))
+                if (h.KeyCombinations.Count == 0)
                 {
-                    RefreshLiveStatus(h);
+                    ReleaseRegistration(h);
+                    h.RegistrationStatus = "Ready (Manual)";
+                    h.StatusHint = "Ready to run manually via [RUN] or from tray Quick Actions.";
+                    h.SuggestedForCombo = string.Empty;
+                    QueueAvailabilityCheck(h);
                     continue;
                 }
 
-                ReleaseRegistration(h);
+                var validCombos = new List<(string original, string normalized)>();
+                var rowFormatErrors = new List<string>();
+                var rowDuplicateErrors = new List<string>();
 
-                if (HotkeyManager.Register(h.KeyCombination, () => ExecuteAction(h), out var hotkeyId))
+                foreach (var combo in h.KeyCombinations)
                 {
-                    h.RegisteredHotkeyId = hotkeyId;
-                    h.RegisteredCombo = normalizedCombo;
+                    if (string.IsNullOrWhiteSpace(combo)) continue;
+                    var trimmed = combo.Trim();
+                    if (!ValidateHotkeyFormat(trimmed, false, out var hotkeyError, h.AllowRiskyShortcut))
+                    {
+                        rowFormatErrors.Add($"{trimmed} ({hotkeyError})");
+                        continue;
+                    }
+
+                    var norm = NormalizeComboKey(trimmed);
+                    if (!claimedCombos.Add(norm))
+                    {
+                        rowDuplicateErrors.Add($"{trimmed} (Duplicate)");
+                        continue;
+                    }
+
+                    validCombos.Add((trimmed, norm));
+                }
+
+                if (validCombos.Count == 0 && h.KeyCombinations.Count > 0)
+                {
+                    ReleaseRegistration(h);
+                    if (rowFormatErrors.Count > 0)
+                    {
+                        h.RegistrationStatus = "Inactive: " + rowFormatErrors[0];
+                    }
+                    else if (rowDuplicateErrors.Count > 0)
+                    {
+                        h.RegistrationStatus = "Inactive: Duplicate";
+                        h.StatusHint = "Another KeyPulse shortcut already uses this combination.";
+                    }
+                    else
+                    {
+                        h.RegistrationStatus = "Inactive: No valid keys";
+                    }
+                    h.SuggestedForCombo = string.Empty;
+                    if (h.IsEnabled) failures++;
+                    continue;
+                }
+
+                var currentNormSet = new HashSet<string>(validCombos.Select(v => v.normalized), StringComparer.OrdinalIgnoreCase);
+                var toRemove = h.RegisteredHotkeyIds.Keys.Where(k => !currentNormSet.Contains(k)).ToList();
+                foreach (var k in toRemove)
+                {
+                    if (h.RegisteredHotkeyIds.TryGetValue(k, out var regId) && regId != 0)
+                    {
+                        HotkeyManager.Unregister(regId);
+                    }
+                    h.RegisteredHotkeyIds.Remove(k);
+                    h.ComboStatuses.Remove(k);
+                    h.ComboHints.Remove(k);
+                }
+
+                var successCount = 0;
+                var conflictCount = 0;
+                string? firstConflictCombo = null;
+
+                foreach (var (orig, norm) in validCombos)
+                {
+                    if (h.RegisteredHotkeyIds.TryGetValue(norm, out var existingId) && existingId != 0)
+                    {
+                        successCount++;
+                        h.ComboStatuses[norm] = "Active";
+                        continue;
+                    }
+
+                    if (HotkeyManager.Register(orig, () => ExecuteAction(h), out var newId))
+                    {
+                        h.RegisteredHotkeyIds[norm] = newId;
+                        h.ComboStatuses[norm] = "Active";
+                        h.ComboHints.Remove(norm);
+                        successCount++;
+                    }
+                    else
+                    {
+                        h.ComboStatuses[norm] = "Conflict";
+                        conflictCount++;
+                        firstConflictCombo ??= orig;
+                    }
+                }
+
+                h.RegisteredHotkeyId = h.RegisteredHotkeyIds.Values.FirstOrDefault();
+                h.RegisteredCombo = h.RegisteredHotkeyIds.Keys.FirstOrDefault() ?? string.Empty;
+
+                var totalTargetCombos = h.KeyCombinations.Count;
+                if (conflictCount == 0 && rowFormatErrors.Count == 0 && rowDuplicateErrors.Count == 0)
+                {
                     h.SuggestedForCombo = string.Empty;
                     RefreshLiveStatus(h);
                 }
+                else if (successCount > 0)
+                {
+                    h.RegistrationStatus = $"Partial ({successCount}/{totalTargetCombos})";
+                    var issues = new List<string>();
+                    if (conflictCount > 0) issues.Add($"{conflictCount} conflict(s)");
+                    if (rowDuplicateErrors.Count > 0) issues.Add($"{rowDuplicateErrors.Count} duplicate(s)");
+                    if (rowFormatErrors.Count > 0) issues.Add($"{rowFormatErrors.Count} format error(s)");
+                    h.StatusHint = $"{successCount} combination(s) active. Issues: {string.Join(", ", issues)}.";
+                    failures++;
+                }
                 else
                 {
-                    h.RegistrationStatus = "Inactive: Conflict";
-                    ApplyConflictHint(h, normalizedCombo);
+                    if (conflictCount > 0 && firstConflictCombo != null)
+                    {
+                        h.RegistrationStatus = "Inactive: Conflict";
+                        ApplyConflictHint(h, firstConflictCombo);
+                    }
+                    else if (rowDuplicateErrors.Count > 0)
+                    {
+                        h.RegistrationStatus = "Inactive: Duplicate";
+                        h.StatusHint = "Another KeyPulse shortcut already uses this combination.";
+                    }
+                    else
+                    {
+                        h.RegistrationStatus = "Inactive: Failed to register";
+                    }
                     failures++;
                 }
             }
@@ -856,24 +942,38 @@ namespace KeyPulse
             return failures;
         }
 
-        /// <summary>Hands one row's Win32 hotkey back, leaving every other row registered.</summary>
+        /// <summary>Hands one row's Win32 hotkeys back, leaving every other row registered.</summary>
         private static void ReleaseRegistration(HotkeyEntry entry)
         {
-            if (entry.RegisteredHotkeyId == 0) return;
+            if (entry.RegisteredHotkeyIds.Count > 0)
+            {
+                foreach (var id in entry.RegisteredHotkeyIds.Values)
+                {
+                    if (id != 0) HotkeyManager.Unregister(id);
+                }
+                entry.RegisteredHotkeyIds.Clear();
+            }
 
-            HotkeyManager.Unregister(entry.RegisteredHotkeyId);
-            entry.RegisteredHotkeyId = 0;
+            if (entry.RegisteredHotkeyId != 0)
+            {
+                HotkeyManager.Unregister(entry.RegisteredHotkeyId);
+                entry.RegisteredHotkeyId = 0;
+            }
+
             entry.RegisteredCombo = string.Empty;
+            entry.ComboStatuses.Clear();
+            entry.ComboHints.Clear();
         }
 
         /// <summary>Active vs. Waiting for a registered row, without touching the registration.</summary>
         private void RefreshLiveStatus(HotkeyEntry entry)
         {
-            // ISSUE_4: this runs on the UI thread at startup, on every add/edit/toggle/remove and
-            // every 30 seconds. It answers from the cached background result and never touches a
-            // disk or the network - an offline network share used to block Windows for tens of
-            // seconds per row right here, freezing the window ("Not Responding") forever.
-            if (entry.TargetReachable == true)
+            if (entry.KeyCombinations.Count == 0)
+            {
+                entry.RegistrationStatus = "Ready (Manual)";
+                entry.StatusHint = "Ready to run manually via [RUN] or from tray Quick Actions.";
+            }
+            else if (entry.TargetReachable == true)
             {
                 entry.RegistrationStatus = "Active";
                 entry.StatusHint = string.Empty;
@@ -931,9 +1031,29 @@ namespace KeyPulse
             {
                 entry.TargetReachable = reachable;
 
-                // The background answer only paints a status for rows that are still registered;
-                // ApplyHotkeys owns the status of everything else.
-                if (!entry.IsEnabled || entry.RegisteredHotkeyId == 0) return;
+                if (!entry.IsEnabled) return;
+
+                if (entry.KeyCombinations.Count == 0)
+                {
+                    if (reachable)
+                    {
+                        if (!IsStatus(entry, "Ready"))
+                        {
+                            entry.RegistrationStatus = "Ready (Manual)";
+                            entry.StatusHint = "Ready to run manually via [RUN] or from tray Quick Actions.";
+                            RefreshStatusSummary();
+                        }
+                    }
+                    else if (!IsStatus(entry, "Waiting"))
+                    {
+                        entry.RegistrationStatus = "Waiting (Manual)";
+                        entry.StatusHint = "The folder or program is not reachable right now.";
+                        RefreshStatusSummary();
+                    }
+                    return;
+                }
+
+                if (entry.RegisteredHotkeyIds.Count == 0 && entry.RegisteredHotkeyId == 0) return;
 
                 if (reachable)
                 {
@@ -963,18 +1083,19 @@ namespace KeyPulse
         /// sixteen blocking register/unregister round trips per row; doing that for every conflicted
         /// shortcut every thirty seconds, forever, was pure waste.
         /// </summary>
-        private static void ApplyConflictHint(HotkeyEntry entry, string normalizedCombo)
+        private static void ApplyConflictHint(HotkeyEntry entry, string conflictingCombo)
         {
+            var normalizedCombo = NormalizeComboKey(conflictingCombo);
             if (string.Equals(entry.SuggestedForCombo, normalizedCombo, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrWhiteSpace(entry.StatusHint))
             {
                 return;
             }
 
-            var suggestion = HotkeyManager.SuggestAlternative(entry.KeyCombination);
+            var suggestion = HotkeyManager.SuggestAlternative(conflictingCombo);
             entry.StatusHint = suggestion != null
-                ? $"Another app on this PC already owns {entry.KeyCombination}. {suggestion} is free - try that instead."
-                : $"Another app on this PC already owns {entry.KeyCombination}. Add another modifier key (Shift or Win) and try again.";
+                ? $"Another app on this PC already owns {conflictingCombo}. {suggestion} is free - try that instead."
+                : $"Another app on this PC already owns {conflictingCombo}. Add another modifier key (Shift or Win) and try again.";
             entry.SuggestedForCombo = normalizedCombo;
         }
 
@@ -998,11 +1119,11 @@ namespace KeyPulse
                 (IsStatus(h, "Waiting") || IsStatus(h, "Inactive: Conflict")));
             if (!needsRetry) return;
 
-            var activeBefore = Hotkeys.Count(h => IsStatus(h, "Active"));
+            var activeBefore = Hotkeys.Count(h => IsStatus(h, "Active") || IsStatus(h, "Ready"));
 
             ApplyHotkeys();
 
-            var activeAfter = Hotkeys.Count(h => IsStatus(h, "Active"));
+            var activeAfter = Hotkeys.Count(h => IsStatus(h, "Active") || IsStatus(h, "Ready"));
             if (activeAfter > activeBefore)
             {
                 Program.LogDebug($"Background retry activated {activeAfter - activeBefore} shortcut(s).");
@@ -1011,9 +1132,9 @@ namespace KeyPulse
 
         private void RefreshStatusSummary()
         {
-            var active = Hotkeys.Count(h => IsStatus(h, "Active"));
+            var active = Hotkeys.Count(h => IsStatus(h, "Active") || IsStatus(h, "Ready"));
             var waiting = Hotkeys.Count(h => h.IsEnabled && IsStatus(h, "Waiting"));
-            var broken = Hotkeys.Count(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Waiting"));
+            var broken = Hotkeys.Count(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Ready") && !IsStatus(h, "Waiting"));
             var disabled = Hotkeys.Count(h => !h.IsEnabled);
 
             App.UpdateTrayStatus(active, broken);
@@ -1113,7 +1234,8 @@ namespace KeyPulse
         {
             if (string.IsNullOrWhiteSpace(search)) return true;
 
-            return entry.KeyCombination.Contains(search, StringComparison.OrdinalIgnoreCase)
+            return (!string.IsNullOrEmpty(entry.DisplayName) && entry.DisplayName.Contains(search, StringComparison.OrdinalIgnoreCase))
+                || entry.KeyCombinations.Any(c => c.Contains(search, StringComparison.OrdinalIgnoreCase))
                 || entry.ActionDisplay.Contains(search, StringComparison.OrdinalIgnoreCase)
                 || (!entry.IsTargetObfuscated && entry.Target.Contains(search, StringComparison.OrdinalIgnoreCase))
                 || entry.RegistrationStatus.Contains(search, StringComparison.OrdinalIgnoreCase);
@@ -1127,11 +1249,11 @@ namespace KeyPulse
             query = _sortColumn switch
             {
                 "Shortcut" => _sortDescending
-                    ? query.OrderByDescending(h => h.KeyCombination, StringComparer.OrdinalIgnoreCase)
-                    : query.OrderBy(h => h.KeyCombination, StringComparer.OrdinalIgnoreCase),
+                    ? query.OrderByDescending(h => h.KeyCombinationsDisplay, StringComparer.OrdinalIgnoreCase)
+                    : query.OrderBy(h => h.KeyCombinationsDisplay, StringComparer.OrdinalIgnoreCase),
                 "Action" => _sortDescending
-                    ? query.OrderByDescending(h => h.ActionDisplay, StringComparer.OrdinalIgnoreCase)
-                    : query.OrderBy(h => h.ActionDisplay, StringComparer.OrdinalIgnoreCase),
+                    ? query.OrderByDescending(h => h.ActionTitle, StringComparer.OrdinalIgnoreCase)
+                    : query.OrderBy(h => h.ActionTitle, StringComparer.OrdinalIgnoreCase),
                 "Status" => _sortDescending
                     ? query.OrderByDescending(h => h.RegistrationStatus, StringComparer.OrdinalIgnoreCase)
                     : query.OrderBy(h => h.RegistrationStatus, StringComparer.OrdinalIgnoreCase),
@@ -1217,7 +1339,7 @@ namespace KeyPulse
 
             string[] candidates = { "Ctrl+Alt+D", "Ctrl+Alt+Shift+D", "Ctrl+Alt+W", "Ctrl+Alt+Shift+W", "Ctrl+Alt+F" };
             var combo = candidates.FirstOrDefault(c =>
-                !Hotkeys.Any(h => string.Equals(NormalizeComboKey(h.KeyCombination), NormalizeComboKey(c), StringComparison.OrdinalIgnoreCase))
+                !Hotkeys.Any(h => h.KeyCombinations.Any(k => string.Equals(NormalizeComboKey(k), NormalizeComboKey(c), StringComparison.OrdinalIgnoreCase)))
                 && HotkeyManager.Probe(c));
 
             if (combo == null)
@@ -1370,6 +1492,11 @@ namespace KeyPulse
                 targetText.TextWrapping = isTextAction ? Avalonia.Media.TextWrapping.Wrap : Avalonia.Media.TextWrapping.NoWrap;
                 targetText.MinHeight = isTextAction ? 92 : 34;
                 targetText.MaxHeight = isTextAction ? 180 : 34;
+                targetText.IsEnabled = actionType != ActionType.CycleBrightness;
+                if (actionType == ActionType.CycleBrightness && string.IsNullOrWhiteSpace(targetText.Text))
+                {
+                    targetText.Text = "Cycle Screen Brightness (Lowest -> Highest)";
+                }
             }
 
             if (targetLabel != null)
@@ -1381,6 +1508,7 @@ namespace KeyPulse
                     ActionType.BrowseChrome => "Web URL",
                     ActionType.TypeText => "Text to type out",
                     ActionType.InsertText => "Text to paste",
+                    ActionType.CycleBrightness => "Screen Brightness cycle behavior",
                     _ => "Target"
                 };
             }
@@ -1394,6 +1522,7 @@ namespace KeyPulse
                     ActionType.BrowseChrome => "Type a website address. The https:// part is added for you.",
                     ActionType.TypeText => "Types your text one key at a time, like a person would. Slower, but works in old console windows and anywhere that ignores paste. Long runs show a Stop button.",
                     ActionType.InsertText => "Pastes your text instantly with no formatting, then puts your previous clipboard back. Use this unless the target app refuses paste.",
+                    ActionType.CycleBrightness => "Cycles your Screen Brightness presets starting from the lowest brightness first, climbing up to the highest, then wrapping back to the lowest. Zero OSD popups in fullscreen games.",
                     _ => string.Empty
                 };
             }
@@ -1408,7 +1537,7 @@ namespace KeyPulse
         private ActionType GetSelectedAction()
         {
             var selectedIndex = this.FindControl<ComboBox>("ActionCombo")?.SelectedIndex ?? 0;
-            if (selectedIndex < 0 || selectedIndex > (int)ActionType.InsertText) return ActionType.OpenFolder;
+            if (selectedIndex < 0 || selectedIndex > (int)ActionType.CycleBrightness) return ActionType.OpenFolder;
             return (ActionType)selectedIndex;
         }
 
@@ -1497,8 +1626,8 @@ namespace KeyPulse
 
         private bool IsNewRiskyComboApproved(string combo)
         {
-            return !string.IsNullOrWhiteSpace(_approvedNewRiskyCombo)
-                && string.Equals(_approvedNewRiskyCombo, NormalizeComboKey(combo), StringComparison.OrdinalIgnoreCase);
+            var norm = NormalizeComboKey(combo);
+            return !string.IsNullOrWhiteSpace(norm) && _approvedNewRiskyCombos.Contains(norm);
         }
 
         private async System.Threading.Tasks.Task<bool> ConfirmRiskyShortcutOverrideAsync(string combo, string reason)
@@ -1624,6 +1753,11 @@ namespace KeyPulse
             error = string.Empty;
             var value = rawTarget ?? string.Empty;
 
+            if (actionType == ActionType.CycleBrightness)
+            {
+                return true;
+            }
+
             if (actionType == ActionType.TypeText || actionType == ActionType.InsertText)
             {
                 if (value.Length == 0)
@@ -1688,6 +1822,12 @@ namespace KeyPulse
             normalizedTarget = rawTarget ?? string.Empty;
             error = string.Empty;
             warning = string.Empty;
+
+            if (actionType == ActionType.CycleBrightness)
+            {
+                normalizedTarget = "Cycle Screen Brightness (Lowest -> Highest)";
+                return true;
+            }
 
             if (actionType == ActionType.TypeText || actionType == ActionType.InsertText)
             {
@@ -2035,7 +2175,8 @@ namespace KeyPulse
         {
             try
             {
-                Program.LogDebug($"Executing shortcut {entry.KeyCombination} ({entry.Action}).");
+                var triggerDesc = !string.IsNullOrWhiteSpace(entry.KeyCombination) ? entry.KeyCombination : entry.ActionTitle;
+                Program.LogDebug($"Executing action {triggerDesc} ({entry.Action}).");
                 switch (entry.Action)
                 {
                     case ActionType.OpenFolder:
@@ -2045,9 +2186,9 @@ namespace KeyPulse
                             {
                                 MarkEntryWaiting(entry, "The folder is not available right now.");
                                 throw new InvalidOperationException(
-                                    $"The folder for {entry.KeyCombination} is not available right now:\n{folder}\n\nIf it is on a USB drive, a network share or a VPN, connect it and press the shortcut again.");
+                                    $"The folder for {triggerDesc} is not available right now:\n{folder}\n\nIf it is on a USB drive, a network share or a VPN, connect it and trigger the action again.");
                             }
-                        using var opened = Process.Start("explorer.exe", $"\"{folder}\"");
+                            using var opened = Process.Start("explorer.exe", $"\"{folder}\"");
                             MarkEntryActive(entry);
                             break;
                         }
@@ -2056,7 +2197,7 @@ namespace KeyPulse
                         {
                             MarkEntryWaiting(entry, "The program is not available right now.");
                             throw new InvalidOperationException(
-                                $"The program for {entry.KeyCombination} could not be found right now ({launchError}):\n{entry.Target}");
+                                $"The program for {triggerDesc} could not be found right now ({launchError}):\n{entry.Target}");
                         }
                         {
                             using var launched = Process.Start(new ProcessStartInfo(fileName, arguments) { UseShellExecute = true });
@@ -2069,22 +2210,21 @@ namespace KeyPulse
                     case ActionType.TypeText:
                         if (InputSimulator.IsTyping)
                         {
-                            // ISSUE_17: a busy press is acknowledged out loud, never swallowed.
-                            Program.LogDebug($"Refused {entry.KeyCombination}: typing already in progress.");
+                            Program.LogDebug($"Refused {triggerDesc}: typing already in progress.");
                             Program.PlaySound("error");
                             ShowActionMessage("KeyPulse is busy",
                                 "KeyPulse is still typing the previous snippet",
-                                $"Your press of {entry.KeyCombination} was received, but it was not run because the earlier text has not finished yet. Press it again once this notice is gone.", false);
+                                $"Your trigger of {triggerDesc} was received, but it was not run because the earlier text has not finished yet. Try again once this notice is gone.", false);
                             break;
                         }
-                        if (!InputSimulator.TypeText(entry.Target, out var typeError, out var typeBusy) )
+                        if (!InputSimulator.TypeText(entry.Target, out var typeError, out var typeBusy))
                         {
                             if (typeBusy)
                             {
                                 Program.PlaySound("error");
                                 ShowActionMessage("KeyPulse is busy",
                                     "KeyPulse is still typing the previous snippet",
-                                    $"Your press of {entry.KeyCombination} was received, but it was not run because the earlier text has not finished yet. Press it again once this notice is gone.", false);
+                                    $"Your trigger of {triggerDesc} was received, but it was not run because the earlier text has not finished yet. Try again once this notice is gone.", false);
                             }
                             else
                             {
@@ -2100,7 +2240,7 @@ namespace KeyPulse
                                 Program.PlaySound("error");
                                 ShowActionMessage("KeyPulse is busy",
                                     "KeyPulse is still typing or pasting the previous snippet",
-                                    $"Your press of {entry.KeyCombination} was received, but it was not run because the earlier text has not finished yet. Press it again once this notice is gone.", false);
+                                    $"Your trigger of {triggerDesc} was received, but it was not run because the earlier text has not finished yet. Try again once this notice is gone.", false);
                             }
                             else
                             {
@@ -2112,14 +2252,42 @@ namespace KeyPulse
                             ShowActionMessage("KeyPulse clipboard notice", "Your previous clipboard could not be restored", insertWarning, false);
                         }
                         break;
+                    case ActionType.CycleBrightness:
+                        ScreenBrightnessService.TriggerShortcutCycleStep();
+                        break;
                 }
-                Program.LogDebug($"Shortcut {entry.KeyCombination} completed.");
+                Program.LogDebug($"Action {triggerDesc} completed.");
             }
             catch (Exception ex)
             {
-                Program.LogCrash($"Shortcut action failed ({entry.KeyCombination}, {entry.Action}): {ex}");
-                ShowActionMessage("KeyPulse Action Failed", "That shortcut could not run", ex.Message, true);
+                var triggerDesc = !string.IsNullOrWhiteSpace(entry.KeyCombination) ? entry.KeyCombination : entry.ActionTitle;
+                Program.LogCrash($"Action failed ({triggerDesc}, {entry.Action}): {ex}");
+                ShowActionMessage("KeyPulse Action Failed", "That action could not run", ex.Message, true);
             }
+        }
+
+        public void Run_Click(object? sender, RoutedEventArgs e)
+        {
+            if ((sender as Button)?.DataContext is not HotkeyEntry entry) return;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    if (entry.Action == ActionType.TypeText || entry.Action == ActionType.InsertText)
+                    {
+                        await Task.Delay(150);
+                    }
+                    ExecuteAction(entry);
+                }
+                catch (Exception ex)
+                {
+                    Program.LogDebug($"Manual execution of {entry.ActionTitle} failed: {ex.Message}");
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        ShowActionMessage("Run failed", entry.ActionTitle, ex.Message, isError: true);
+                    });
+                }
+            });
         }
 
         private void MarkEntryWaiting(HotkeyEntry entry, string hint)
@@ -2198,10 +2366,6 @@ namespace KeyPulse
                     };
                     cancelButton.Click += (s, e) => InputSimulator.CancelTyping();
 
-                    // ISSUE_18: Escape cancels ONLY from this window, when it is focused. The old
-                    // global Escape watch fired on any Escape press anywhere on the computer -
-                    // dismissing an autocomplete, closing a tooltip - and silently truncated the
-                    // snippet halfway through.
                     window.KeyDown += (s, e) =>
                     {
                         if (e.Key == Avalonia.Input.Key.Escape)
@@ -2247,8 +2411,6 @@ namespace KeyPulse
                 CloseTypingProgressWindow();
                 if (!cancelled) return;
 
-                // ISSUE_18: tell the user exactly how much landed, so a half-typed signature can be
-                // cleaned up instead of discovered later.
                 Program.PlaySound("close");
                 ShowActionMessage("KeyPulse typing stopped",
                     "Typing was stopped part-way through",
@@ -2315,10 +2477,6 @@ namespace KeyPulse
                     closeButton.Click += (s, e) => errWin.Close();
                     sp.Children.Add(closeButton);
 
-                    // ISSUE_16: behave like a Windows toast - go away on its own. The old notice was
-                    // Topmost with no auto-dismiss, so it sat over every other application until the
-                    // user hunted it down. Hovering pauses the countdown; a repeat restarts it. The
-                    // tray tooltip still carries the "something is not working" signal afterwards.
                     errWin.PointerEntered += (s, e) => _actionErrorPointerInside = true;
                     errWin.PointerExited += (s, e) => _actionErrorPointerInside = false;
 
@@ -2362,7 +2520,6 @@ namespace KeyPulse
             {
                 if (_actionErrorPointerInside)
                 {
-                    // Still reading it - give the user another moment instead of yanking it away.
                     return;
                 }
                 _actionErrorCloseTimer?.Stop();
@@ -2538,10 +2695,6 @@ namespace KeyPulse
             var actionType = GetSelectedAction();
             var target = this.FindControl<TextBox>("TargetText")?.Text;
 
-            // ISSUE_4: live validation is SHAPE-only. The full check resolves programs and probes
-            // folders, which can block for tens of seconds on an offline network share - running it
-            // on the UI thread on every keystroke froze the whole window. The full, off-thread
-            // check runs when Add/Save is pressed.
             if (!ValidateTargetShape(actionType, target, out var targetError))
             {
                 SetFieldError("TargetText", targetError);
@@ -2559,47 +2712,74 @@ namespace KeyPulse
             if (_loadingEditorFields || _editingEntry == null) return false;
 
             var keyText = this.FindControl<TextBox>("KeyCombo")?.Text?.Trim() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(keyText) || keyText.EndsWith("+", StringComparison.Ordinal))
+            if (!string.IsNullOrWhiteSpace(keyText))
             {
-                SetFieldError("KeyCombo", "Enter a complete shortcut");
-                Program.PlaySound("error");
-                return false;
+                if (keyText.EndsWith("+", StringComparison.Ordinal))
+                {
+                    SetFieldError("KeyCombo", "Enter a complete shortcut");
+                    Program.PlaySound("error");
+                    return false;
+                }
+
+                var normalizedNewCombo = NormalizeComboKey(keyText);
+                if (!_editorCombos.Any(c => string.Equals(NormalizeComboKey(c), normalizedNewCombo, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _editorCombos.Add(keyText);
+                }
             }
 
-            var normalizedNewCombo = NormalizeComboKey(keyText);
-            var duplicate = Hotkeys.FirstOrDefault(h => !ReferenceEquals(h, _editingEntry) &&
-                string.Equals(NormalizeComboKey(h.KeyCombination), normalizedNewCombo, StringComparison.OrdinalIgnoreCase));
-            if (duplicate != null)
+            foreach (var combo in _editorCombos)
             {
-                SetFieldError("KeyCombo", "This shortcut is already in use");
-                Program.PlaySound("error");
-                return false;
+                var norm = NormalizeComboKey(combo);
+                var duplicate = Hotkeys.FirstOrDefault(h => !ReferenceEquals(h, _editingEntry) &&
+                    h.KeyCombinations.Any(c => string.Equals(NormalizeComboKey(c), norm, StringComparison.OrdinalIgnoreCase)));
+                if (duplicate != null)
+                {
+                    SetFieldError("KeyCombo", $"Shortcut '{combo}' is already in use");
+                    Program.PlaySound("error");
+                    return false;
+                }
             }
 
             var actionCombo = this.FindControl<ComboBox>("ActionCombo");
-            if (actionCombo == null || actionCombo.SelectedIndex < 0 || actionCombo.SelectedIndex > (int)ActionType.InsertText)
+            if (actionCombo == null || actionCombo.SelectedIndex < 0 || actionCombo.SelectedIndex > (int)ActionType.CycleBrightness)
             {
                 SetFieldError("TargetText", "Choose an action");
                 Program.PlaySound("error");
                 return false;
             }
 
-            if (!await EnsureRiskyShortcutApprovedAsync(keyText))
+            var hasAnyRiskyCombo = false;
+            foreach (var combo in _editorCombos)
             {
-                return false;
+                if (!await EnsureRiskyShortcutApprovedAsync(combo))
+                {
+                    return false;
+                }
+
+                if (IsRiskyTypingShortcut(combo, out _))
+                {
+                    hasAnyRiskyCombo = true;
+                }
+
+                var normCombo = NormalizeComboKey(combo);
+                var alreadyOwnedByThisEntry = _editingEntry.RegisteredHotkeyIds.ContainsKey(normCombo)
+                    || (_editingEntry.RegisteredHotkeyId != 0
+                        && string.Equals(NormalizeComboKey(_editingEntry.RegisteredCombo), normCombo, StringComparison.OrdinalIgnoreCase));
+
+                if (!ValidateHotkeyFormat(combo, !alreadyOwnedByThisEntry, out var formatError, _editingEntry.AllowRiskyShortcut || IsNewRiskyComboApproved(combo)))
+                {
+                    SetFieldError("KeyCombo", formatError ?? $"Invalid shortcut '{combo}'");
+                    Program.PlaySound("error");
+                    return false;
+                }
             }
 
-            if (!ValidateHotkeyFormat(keyText, false, out var formatError, _editingEntry.AllowRiskyShortcut))
-            {
-                SetFieldError("KeyCombo", formatError ?? "Invalid shortcut");
-                Program.PlaySound("error");
-                return false;
-            }
+            _editingEntry.AllowRiskyShortcut = hasAnyRiskyCombo;
 
             var newAction = (ActionType)actionCombo.SelectedIndex;
             var rawTarget = this.FindControl<TextBox>("TargetText")?.Text ?? string.Empty;
 
-            // ISSUE_4: the full check (program resolution, folder probing) runs off the UI thread.
             var normalizedTarget = string.Empty;
             string targetError = string.Empty, targetWarning = string.Empty;
             var targetValid = await System.Threading.Tasks.Task.Run(() =>
@@ -2616,15 +2796,13 @@ namespace KeyPulse
             SetFieldError("TargetText", null);
             SetFieldWarning("TargetText", targetWarning);
 
-            _editingEntry.KeyCombination = keyText;
+            var customName = this.FindControl<TextBox>("ActionNameText")?.Text?.Trim() ?? string.Empty;
+            _editingEntry.DisplayName = customName;
+            _editingEntry.KeyCombinations = new List<string>(_editorCombos);
             _editingEntry.Action = newAction;
             _editingEntry.Target = normalizedTarget;
-            // ISSUE_1: a freshly typed target replaces whatever was stored - including an
-            // undecryptable original that must now stop being written back to disk.
             _editingEntry.TargetUnreadable = false;
             _editingEntry.UnreadableTargetCipher = string.Empty;
-            // ISSUE_10: give the new value a fresh chance at protection instead of pinning it to
-            // plain text forever.
             _editingEntry.TargetProtectionFailed = false;
             _editingEntry.IsTargetObfuscated = this.FindControl<CheckBox>("ObfuscateCheck")?.IsChecked ?? false;
             _editingEntry.AddToQuickActionMenu = this.FindControl<CheckBox>("QuickActionCheck")?.IsChecked ?? false;
@@ -2641,18 +2819,15 @@ namespace KeyPulse
             if (_loadingEditorFields) return true;
             if (!IsRiskyTypingShortcut(combo, out var riskyReason))
             {
-                if (_editingEntry != null) _editingEntry.AllowRiskyShortcut = false;
-                else _approvedNewRiskyCombo = null;
                 return true;
             }
 
-            if (_editingEntry?.AllowRiskyShortcut == true) return true;
-            if (_editingEntry == null && IsNewRiskyComboApproved(combo)) return true;
+            if (_editingEntry?.AllowRiskyShortcut == true || IsNewRiskyComboApproved(combo)) return true;
 
             if (await ConfirmRiskyShortcutOverrideAsync(combo, riskyReason))
             {
+                _approvedNewRiskyCombos.Add(NormalizeComboKey(combo));
                 if (_editingEntry != null) _editingEntry.AllowRiskyShortcut = true;
-                else _approvedNewRiskyCombo = NormalizeComboKey(combo);
                 SetFieldError("KeyCombo", null);
                 return true;
             }
@@ -2671,16 +2846,134 @@ namespace KeyPulse
                 _loadingEditorFields = false;
             }
 
-            if (_editingEntry == null) _approvedNewRiskyCombo = null;
+            _approvedNewRiskyCombos.Remove(NormalizeComboKey(combo));
             SetFieldError("KeyCombo", "Choose a different shortcut");
             return false;
+        }
+
+        private void RefreshComboChips()
+        {
+            if (this.FindControl<WrapPanel>("ComboChipsPanel") is not WrapPanel panel) return;
+            panel.Children.Clear();
+
+            if (_editorCombos.Count == 0)
+            {
+                panel.IsVisible = false;
+                return;
+            }
+
+            panel.IsVisible = true;
+            foreach (var combo in _editorCombos)
+            {
+                var currentCombo = combo;
+                var chip = new Border
+                {
+                    Classes = { "TagBadge" },
+                    Margin = new Thickness(0, 2, 6, 2),
+                    Padding = new Thickness(8, 3, 6, 3),
+                    CornerRadius = new CornerRadius(4),
+                    Background = AppBrush("AppSurfaceHoverBrush"),
+                    BorderBrush = AppBrush("AppBorderSubtleBrush"),
+                    BorderThickness = new Thickness(1)
+                };
+
+                var sp = new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    Spacing = 6,
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+                };
+
+                var text = new TextBlock
+                {
+                    Text = currentCombo,
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                    FontWeight = Avalonia.Media.FontWeight.SemiBold,
+                    FontSize = 12
+                };
+
+                var removeBtn = new Button
+                {
+                    Content = "✕",
+                    Padding = new Thickness(2, 0, 2, 0),
+                    Margin = new Thickness(2, 0, 0, 0),
+                    MinHeight = 16,
+                    MinWidth = 16,
+                    FontSize = 11,
+                    Background = Avalonia.Media.Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+                };
+                ToolTip.SetTip(removeBtn, $"Remove {currentCombo}");
+
+                removeBtn.Click += (s, e) =>
+                {
+                    _editorCombos.Remove(currentCombo);
+                    RefreshComboChips();
+                    UpdateEditorModeText();
+                };
+
+                sp.Children.Add(text);
+                sp.Children.Add(removeBtn);
+                chip.Child = sp;
+                panel.Children.Add(chip);
+            }
+        }
+
+        public async void AddKey_Click(object? sender, RoutedEventArgs e)
+        {
+            var keyBox = this.FindControl<TextBox>("KeyCombo");
+            var combo = keyBox?.Text?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(combo) || combo.EndsWith("+", StringComparison.Ordinal))
+            {
+                SetFieldError("KeyCombo", "Press a complete shortcut combination first");
+                Program.PlaySound("error");
+                return;
+            }
+
+            var normalized = NormalizeComboKey(combo);
+            if (_editorCombos.Any(c => string.Equals(NormalizeComboKey(c), normalized, StringComparison.OrdinalIgnoreCase)))
+            {
+                SetFieldError("KeyCombo", "This combination is already added to this action");
+                Program.PlaySound("error");
+                return;
+            }
+
+            if (Hotkeys.Any(h => !ReferenceEquals(h, _editingEntry) &&
+                h.KeyCombinations.Any(c => string.Equals(NormalizeComboKey(c), normalized, StringComparison.OrdinalIgnoreCase))))
+            {
+                SetFieldError("KeyCombo", "Shortcut already exists in KeyPulse");
+                Program.PlaySound("error");
+                return;
+            }
+
+            if (!await EnsureRiskyShortcutApprovedAsync(combo))
+            {
+                Program.PlaySound("error");
+                return;
+            }
+
+            var allowRiskyShortcut = (_editingEntry?.AllowRiskyShortcut == true) || IsNewRiskyComboApproved(combo);
+            if (!ValidateHotkeyFormat(combo, false, out var hotkeyError, allowRiskyShortcut))
+            {
+                SetFieldError("KeyCombo", hotkeyError);
+                Program.PlaySound("error");
+                return;
+            }
+
+            _editorCombos.Add(combo);
+            RefreshComboChips();
+            ClearFieldErrors();
+            if (keyBox != null) keyBox.Text = string.Empty;
+            UpdateEditorModeText();
+            Program.PlaySound("click");
         }
 
         public async void Add_Click(object? sender, RoutedEventArgs e)
         {
             Program.PlaySound("click");
             ClearFieldErrors();
-            var combo = this.FindControl<TextBox>("KeyCombo")?.Text;
+            var combo = this.FindControl<TextBox>("KeyCombo")?.Text?.Trim() ?? string.Empty;
             var actionCombo = this.FindControl<ComboBox>("ActionCombo");
             var target = this.FindControl<TextBox>("TargetText")?.Text;
             var isEditing = _editingEntry != null;
@@ -2701,42 +2994,66 @@ namespace KeyPulse
                 return;
             }
 
-            var allowRiskyShortcut = !string.IsNullOrWhiteSpace(combo) && IsNewRiskyComboApproved(combo);
-            if (!ValidateHotkeyFormat(combo, !isEditing, out var hotkeyError, allowRiskyShortcut))
+            if (!string.IsNullOrWhiteSpace(combo))
             {
-                if (!IsRiskyTypingShortcut(combo, out _))
+                if (combo.EndsWith("+", StringComparison.Ordinal))
                 {
-                    SetFieldError("KeyCombo", hotkeyError);
+                    SetFieldError("KeyCombo", "Enter a complete shortcut");
+                    Program.PlaySound("error");
+                    return;
+                }
+
+                var normalizedNewCombo = NormalizeComboKey(combo);
+                if (!_editorCombos.Any(c => string.Equals(NormalizeComboKey(c), normalizedNewCombo, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _editorCombos.Add(combo);
+                }
+            }
+
+            foreach (var c in _editorCombos)
+            {
+                var norm = NormalizeComboKey(c);
+                if (Hotkeys.Any(h => !ReferenceEquals(h, _editingEntry) &&
+                    h.KeyCombinations.Any(existing => string.Equals(NormalizeComboKey(existing), norm, StringComparison.OrdinalIgnoreCase))))
+                {
+                    SetFieldError("KeyCombo", $"Shortcut '{c}' already exists in KeyPulse");
                     Program.PlaySound("error");
                     return;
                 }
             }
 
-            if (combo == null || !await EnsureRiskyShortcutApprovedAsync(combo))
+            var allowRiskyShortcut = false;
+            foreach (var c in _editorCombos)
             {
-                Program.PlaySound("error");
-                return;
-            }
+                var isApproved = IsNewRiskyComboApproved(c);
+                if (!ValidateHotkeyFormat(c, !isEditing, out var hotkeyError, isApproved))
+                {
+                    if (!IsRiskyTypingShortcut(c, out _))
+                    {
+                        SetFieldError("KeyCombo", hotkeyError);
+                        Program.PlaySound("error");
+                        return;
+                    }
+                }
 
-            allowRiskyShortcut = IsNewRiskyComboApproved(combo);
-            if (!ValidateHotkeyFormat(combo, !isEditing, out hotkeyError, allowRiskyShortcut))
-            {
-                SetFieldError("KeyCombo", hotkeyError);
-                Program.PlaySound("error");
-                return;
-            }
+                if (!await EnsureRiskyShortcutApprovedAsync(c))
+                {
+                    Program.PlaySound("error");
+                    return;
+                }
 
-            if (Hotkeys.Any(h => !ReferenceEquals(h, _editingEntry) && string.Equals(NormalizeComboKey(h.KeyCombination), NormalizeComboKey(combo!), StringComparison.OrdinalIgnoreCase)))
-            {
-                SetFieldError("KeyCombo", "Shortcut already exists in KeyPulse");
-                Program.PlaySound("error");
-                return;
+                isApproved = IsNewRiskyComboApproved(c);
+                if (!ValidateHotkeyFormat(c, !isEditing, out hotkeyError, isApproved))
+                {
+                    SetFieldError("KeyCombo", hotkeyError);
+                    Program.PlaySound("error");
+                    return;
+                }
+                if (isApproved) allowRiskyShortcut = true;
             }
 
             var actionType = (ActionType)actionCombo.SelectedIndex;
 
-            // ISSUE_4: the full target check (program resolution, folder probing) runs off the UI
-            // thread so an unreachable network location can never freeze the window on Add.
             var normalizedTarget = string.Empty;
             string targetError = string.Empty, targetWarning = string.Empty;
             var targetValid = await System.Threading.Tasks.Task.Run(() =>
@@ -2749,9 +3066,11 @@ namespace KeyPulse
                 return;
             }
 
+            var customName = this.FindControl<TextBox>("ActionNameText")?.Text?.Trim() ?? string.Empty;
             var entry = new HotkeyEntry
             {
-                KeyCombination = combo!,
+                DisplayName = customName,
+                KeyCombinations = new List<string>(_editorCombos),
                 Action = actionType,
                 Target = normalizedTarget,
                 IsEnabled = true,
@@ -2763,7 +3082,7 @@ namespace KeyPulse
             Hotkeys.Add(entry);
             ApplyHotkeys();
 
-            if (!IsStatus(entry, "Active") && !IsStatus(entry, "Waiting"))
+            if (!IsStatus(entry, "Active") && !IsStatus(entry, "Waiting") && !IsStatus(entry, "Ready"))
             {
                 var reason = string.IsNullOrWhiteSpace(entry.StatusHint)
                     ? entry.RegistrationStatus.Replace("Inactive: ", string.Empty)
@@ -2834,10 +3153,18 @@ namespace KeyPulse
             _editingEntry = entry;
             entry.IsEditing = true;
 
+            _editorCombos.Clear();
+            if (entry.KeyCombinations != null && entry.KeyCombinations.Count > 0)
+            {
+                _editorCombos.AddRange(entry.KeyCombinations);
+            }
+            RefreshComboChips();
+
             _loadingEditorFields = true;
             try
             {
-                if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = entry.KeyCombination;
+                if (this.FindControl<TextBox>("ActionNameText") is TextBox actionNameText) actionNameText.Text = entry.DisplayName ?? string.Empty;
+                if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = string.Empty;
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)entry.Action;
                 if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = entry.Target;
                 if (this.FindControl<CheckBox>("ObfuscateCheck") is CheckBox obfuscateCheck) obfuscateCheck.IsChecked = entry.IsTargetObfuscated;
@@ -2885,10 +3212,9 @@ namespace KeyPulse
         {
             if (this.FindControl<TextBlock>("EditorModeText") is not TextBlock editText) return;
 
-            // ISSUE_19: "Add to KeyPulse" from Explorer staged everything except the keys.
             if (_stagedAddTarget != null && _editingEntry == null)
             {
-                editText.Text = "Adding from Explorer: the action and target are filled in. Press the keys you want in the Shortcut box, then press Add.";
+                editText.Text = "Adding from Explorer: the action and target are filled in. Press the keys you want in the Shortcut box (or leave empty for manual trigger), then press Add.";
                 editText.IsVisible = true;
                 return;
             }
@@ -2896,8 +3222,8 @@ namespace KeyPulse
             if (_creatingDuplicate)
             {
                 editText.Text = string.IsNullOrWhiteSpace(_duplicateSourceCombo)
-                    ? "Duplicating shortcut. Choose a new non-conflicting shortcut, then add it."
-                    : $"Duplicating {_duplicateSourceCombo}. Choose a new non-conflicting shortcut, then add it.";
+                    ? "Duplicating action. Choose new keyboard triggers (or leave empty), then add it."
+                    : $"Duplicating {_duplicateSourceCombo}. Choose new keyboard triggers (or leave empty), then add it.";
                 editText.IsVisible = true;
                 return;
             }
@@ -2909,7 +3235,7 @@ namespace KeyPulse
                 return;
             }
 
-            editText.Text = $"Editing {_editingEntry.KeyCombination} - {_editingEntry.ActionDisplay}. Click Save to apply changes.";
+            editText.Text = $"Editing {_editingEntry.ActionTitle} ({_editingEntry.KeyCombinationsDisplay}) - {_editingEntry.ActionDisplay}. Click Save to apply changes.";
             editText.IsVisible = true;
         }
 
@@ -2925,6 +3251,10 @@ namespace KeyPulse
             _editingEntry = null;
             _creatingDuplicate = false;
             _duplicateSourceCombo = null;
+            _approvedNewRiskyCombos.Clear();
+
+            _editorCombos.Clear();
+            RefreshComboChips();
 
             _loadingEditorFields = true;
             try
@@ -2940,6 +3270,7 @@ namespace KeyPulse
                     cancelButton.Content = "Cancel";
                     cancelButton.IsVisible = false;
                 }
+                if (this.FindControl<TextBox>("ActionNameText") is TextBox actionNameText) actionNameText.Text = "";
                 if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = "";
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = 0;
                 if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = "";
@@ -3012,12 +3343,19 @@ namespace KeyPulse
             source.IsEditing = true;
             _editingEntry = null;
             _creatingDuplicate = true;
-            _duplicateSourceCombo = source.KeyCombination;
-            _approvedNewRiskyCombo = null;
+            _duplicateSourceCombo = source.ActionTitle;
+            _approvedNewRiskyCombos.Clear();
+
+            _editorCombos.Clear();
+            RefreshComboChips();
 
             _loadingEditorFields = true;
             try
             {
+                if (this.FindControl<TextBox>("ActionNameText") is TextBox actionNameText)
+                {
+                    actionNameText.Text = string.IsNullOrWhiteSpace(source.DisplayName) ? string.Empty : $"{source.DisplayName} (Copy)";
+                }
                 if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = string.Empty;
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = (int)source.Action;
                 if (this.FindControl<TextBox>("TargetText") is TextBox targetText) targetText.Text = source.Target;
@@ -3064,7 +3402,7 @@ namespace KeyPulse
 
             var details = new TextBlock
             {
-                Text = $"{entry.KeyCombination} - {entry.ActionDisplay}",
+                Text = $"{entry.ActionTitle} ({entry.KeyCombinationsDisplay}) - {entry.ActionDisplay}",
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap,
                 Margin = new Avalonia.Thickness(0, 10, 0, 0)
             };
@@ -3111,9 +3449,6 @@ namespace KeyPulse
 
         public void KeyCombo_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
         {
-            // ISSUE_8: this box used to swallow every key, so Tab was recorded as the literal word
-            // "Tab" and a keyboard-only user could never leave it. Tab now moves focus on like it
-            // does everywhere else in Windows, and Escape/Delete/Backspace clear the box.
             if (e.Key == Avalonia.Input.Key.Tab)
             {
                 e.Handled = false;
@@ -3266,6 +3601,12 @@ namespace KeyPulse
             return 0;
         }
 
+        public void ScreenBrightness_Click(object? sender, RoutedEventArgs e)
+        {
+            Program.PlaySound("click");
+            ScreenBrightnessWindow.OpenWindow(this);
+        }
+
         public void DesktopOrganizer_Click(object? sender, RoutedEventArgs e)
         {
             Program.PlaySound("click");
@@ -3280,8 +3621,6 @@ namespace KeyPulse
             double settingsH = _currentConfig.SettingsWindowHeight;
             if (double.IsNaN(_currentConfig.SettingsWindowX))
             {
-                // ISSUE_5: scale-aware first open, clamped to the usable work area, exactly like the
-                // main window. The old raw-pixel ratio made this window ~2x too big at 150-200% DPI.
                 var screen = this.Screens.ScreenFromWindow(this) ?? this.Screens.Primary ?? this.Screens.All.FirstOrDefault();
                 if (screen != null)
                 {
@@ -3453,6 +3792,48 @@ namespace KeyPulse
             panel.Children.Add(restoreBtn);
 
             var statusTxt = new TextBlock { Margin = new Avalonia.Thickness(0,10,0,0), Foreground = AppBrush("AppWarningBrush"), TextWrapping = Avalonia.Media.TextWrapping.Wrap, Classes = { "Muted" } };
+
+            panel.Children.Add(new TextBlock { Text = "Screen Brightness", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
+            var sbCfg = ScreenBrightnessService.LoadConfig();
+            var sbLockChk = new CheckBox
+            {
+                Content = "Lock Brightness & Contrast Together Tight",
+                IsChecked = sbCfg.GlobalLockBrightnessContrast,
+                Margin = new Avalonia.Thickness(0, 4, 0, 2)
+            };
+            sbLockChk.IsCheckedChanged += (s, ev) =>
+            {
+                var cfg = ScreenBrightnessService.LoadConfig();
+                bool locked = sbLockChk.IsChecked == true;
+                cfg.GlobalLockBrightnessContrast = locked;
+                foreach (var scr in cfg.Screens)
+                {
+                    scr.LockRatio = locked;
+                    if (locked)
+                    {
+                        scr.LastContrast = scr.LastBrightness;
+                        ScreenBrightnessService.RequestScreenLevelChange(scr.SlotIndex, scr.LastBrightness, scr.LastBrightness, updateContrastFromLock: true);
+                    }
+                }
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.NotifyStateChanged();
+            };
+            panel.Children.Add(sbLockChk);
+
+            var openBrightnessBtn = new Button
+            {
+                Content = "Open Screen Brightness & Shortcut Cycling",
+                Classes = { "Secondary" },
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                Margin = new Avalonia.Thickness(0, 4, 0, 0)
+            };
+            openBrightnessBtn.Click += (s, ev) =>
+            {
+                ScreenBrightnessWindow.OpenWindow(w);
+            };
+            panel.Children.Add(openBrightnessBtn);
+
             panel.Children.Add(new TextBlock { Text = "Desktop Organizer", Classes = { "Label" }, Margin = new Avalonia.Thickness(0, 14, 0, 0) });
             panel.Children.Add(new TextBlock
             {
@@ -3502,17 +3883,22 @@ namespace KeyPulse
                 IsTabStop = true
             };
             var updateButtonOpensDownloadPage = false;
+            string? localUpdateExePath = null;
             updateBtn.Click += async (s, ev) =>
             {
                 if (updateButtonOpensDownloadPage)
                 {
-                    try { using var page = Process.Start(new ProcessStartInfo(Program.ReleasesPageUrl) { UseShellExecute = true }); }
-                    catch (Exception ex) { updateStatus.Text = "Could not open the download page: " + ex.Message; }
+                    var targetToOpen = !string.IsNullOrWhiteSpace(localUpdateExePath) ? localUpdateExePath : Program.ReleasesPageUrl;
+                    try { using var page = Process.Start(new ProcessStartInfo(targetToOpen) { UseShellExecute = true }); }
+                    catch (Exception ex) { updateStatus.Text = "Could not open the update target: " + ex.Message; }
                     return;
                 }
 
                 updateBtn.IsEnabled = false;
-                updateStatus.Text = "Checking github.com for a newer release...";
+                var isDevUpdate = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KEYPULSE_DEV_UPDATE_SOURCE"));
+                updateStatus.Text = isDevUpdate
+                    ? "Checking local .\\compiled\\KeyPulse.exe for a newer build..."
+                    : "Checking github.com for a newer release...";
                 updateStatus.Foreground = AppBrush("AppTextMutedBrush");
                 try
                 {
@@ -3524,9 +3910,14 @@ namespace KeyPulse
                     }
                     else if (result.UpdateAvailable)
                     {
-                        updateStatus.Text = $"Version {result.LatestVersion} is available. You have {Program.AppVersion}.";
+                        localUpdateExePath = result.LocalInstallerPath;
+                        updateStatus.Text = !string.IsNullOrWhiteSpace(localUpdateExePath)
+                            ? $"Local dev build {result.LatestVersion} is ready in .\\compiled. You have {Program.AppVersion}."
+                            : $"Version {result.LatestVersion} is available. You have {Program.AppVersion}.";
                         updateStatus.Foreground = AppBrush("AppWarningBrush");
-                        updateBtn.Content = "Open the download page";
+                        updateBtn.Content = !string.IsNullOrWhiteSpace(localUpdateExePath)
+                            ? "Run local dev installer (.\\compiled\\KeyPulse.exe)"
+                            : "Open the download page";
                         updateBtn.Classes.Remove("Secondary");
                         updateBtn.Classes.Add("Primary");
                         updateButtonOpensDownloadPage = true;
@@ -3823,8 +4214,8 @@ namespace KeyPulse
                         else
                         {
                             var names = Hotkeys
-                                .Where(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Waiting"))
-                                .Select(h => h.KeyCombination)
+                                .Where(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Ready") && !IsStatus(h, "Waiting"))
+                                .Select(h => h.ActionTitle)
                                 .Take(6)
                                 .ToList();
 
@@ -3885,9 +4276,6 @@ namespace KeyPulse
             {
                 var (startup, adminTaskInstalled) = await System.Threading.Tasks.Task.Run(() =>
                 {
-                    // ISSUE_33: the task state is cached per process; without this,
-                    // "close and reopen Settings" would repeat the same stale answer
-                    // forever. Re-ask Windows every time Settings opens.
                     Program.InvalidateAdminTaskState();
                     if (Program.IsAdminTaskInstalled())
                     {
@@ -3898,13 +4286,9 @@ namespace KeyPulse
 
                 updateAdminBtn?.Invoke(Program.IsElevated, adminTaskInstalled);
 
-                // ISSUE_9: a failure to ask Windows is "couldn't check", never "off". The checkbox
-                // stays disabled so nobody can stack a second launcher on top of an unqueryable one.
                 if (startup == Program.StartupState.Unknown)
                 {
                     chk.IsEnabled = false;
-                    // ISSUE_33: an honest "not known" square instead of an unchecked box that
-                    // reads as "off" while Windows may still be starting KeyPulse at logon.
                     chk.IsThreeState = true;
                     setSuppress(true);
                     chk.IsChecked = null;
@@ -4034,12 +4418,18 @@ namespace KeyPulse
                     Id = h.Id,
                     IsEnabled = h.IsEnabled,
                     AllowRiskyShortcut = h.AllowRiskyShortcut,
+                    DisplayName = h.DisplayName,
                     KeyCombination = h.KeyCombination,
+                    KeyCombinations = new List<string>(h.KeyCombinations),
                     Action = h.Action,
                     Target = h.Target,
                     IsTargetObfuscated = h.IsTargetObfuscated,
                     AddToQuickActionMenu = h.AddToQuickActionMenu
-                }).ToList()
+                }).ToList(),
+                DesktopOrganizer = DesktopOrganizerService.LoadConfig().Profiles.Count > 0
+                    ? DesktopOrganizerService.LoadConfig()
+                    : null,
+                ScreenBrightness = ScreenBrightnessService.LoadConfig()
             };
         }
 
@@ -4415,17 +4805,28 @@ namespace KeyPulse
 
             foreach (var item in payload.Shortcuts)
             {
-                Hotkeys.Add(new HotkeyEntry
+                var entry = new HotkeyEntry
                 {
                     Id = string.IsNullOrWhiteSpace(item.Id) ? Guid.NewGuid().ToString() : item.Id,
                     IsEnabled = item.IsEnabled,
                     AllowRiskyShortcut = item.AllowRiskyShortcut,
-                    KeyCombination = item.KeyCombination ?? string.Empty,
+                    DisplayName = item.DisplayName ?? string.Empty,
                     Action = item.Action,
                     Target = item.Target ?? string.Empty,
                     IsTargetObfuscated = item.IsTargetObfuscated,
                     AddToQuickActionMenu = item.AddToQuickActionMenu
-                });
+                };
+
+                if (item.KeyCombinations != null && item.KeyCombinations.Count > 0)
+                {
+                    entry.KeyCombinations = new List<string>(item.KeyCombinations);
+                }
+                else if (!string.IsNullOrWhiteSpace(item.KeyCombination))
+                {
+                    entry.KeyCombination = item.KeyCombination;
+                }
+
+                Hotkeys.Add(entry);
             }
 
             _currentConfig.UseGoogleChromeForUrls = payload.UseGoogleChromeForUrls;
@@ -4446,6 +4847,17 @@ namespace KeyPulse
             if (restoreLayout && payload.Window != null)
             {
                 layoutNote = ApplyRestoredWindowLayout(payload.Window);
+            }
+
+            if (payload.DesktopOrganizer != null && payload.DesktopOrganizer.Profiles.Count > 0)
+            {
+                DesktopOrganizerService.SaveConfig(payload.DesktopOrganizer);
+            }
+
+            if (payload.ScreenBrightness != null)
+            {
+                ScreenBrightnessService.SaveConfig(payload.ScreenBrightness);
+                ScreenBrightnessService.NotifyStateChanged();
             }
 
             var problems = ApplyHotkeys();
@@ -4590,10 +5002,6 @@ namespace KeyPulse
                     var path = (rawPath ?? string.Empty).Trim().Trim('"');
                     if (path.Length == 0) return;
 
-                    // Classification avoids touching the disk on the UI thread: an offline network
-                    // path must not freeze the window we are trying to bring forward. A URL is a web
-                    // link; a UNC path or an extension-less path is a folder; everything else is a
-                    // program/file launch.
                     ActionType action;
                     string target;
                     if (Uri.TryCreate(path, UriKind.Absolute, out var uri)
@@ -4631,8 +5039,6 @@ namespace KeyPulse
                     UpdateActionUi();
                     UpdateEditorModeText();
 
-                    // ISSUE_32: go through BringToFront so the hidden-startup logic in
-                    // MainWindow_Opened can never hide this window right after it appears.
                     BringToFront();
                     this.FindControl<TextBox>("KeyCombo")?.Focus();
 
@@ -4760,7 +5166,6 @@ namespace KeyPulse
             InputSimulator.TypingProgressChanged -= OnTypingProgress;
             InputSimulator.TypingFinished -= OnTypingFinished;
 
-            // Static event with an instance handler - must be detached (project rule).
             CryptoHelper.ProtectionFailed -= OnTargetProtectionFailed;
 
             StopActionNoticeTimer();

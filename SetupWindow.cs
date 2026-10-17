@@ -633,9 +633,25 @@ namespace KeyPulse
         private async Task<bool> ConfirmWipeAsync()
         {
             var shortcutCount = 0;
+            var layoutCount = 0;
+            var brightnessCount = 0;
             try
             {
                 shortcutCount = ConfigStore.Load(out _, out _).Hotkeys.Count;
+            }
+            catch { }
+
+            try
+            {
+                var desktopConfig = DesktopOrganizerService.LoadConfig();
+                layoutCount = desktopConfig?.Profiles?.Count ?? 0;
+            }
+            catch { }
+
+            try
+            {
+                var sbConfig = ScreenBrightnessService.LoadConfig();
+                brightnessCount = sbConfig?.Profiles?.Count ?? 0;
             }
             catch { }
 
@@ -650,18 +666,25 @@ namespace KeyPulse
                 Icon = this.Icon
             };
 
+            var details = new List<string>();
+            if (shortcutCount > 0) details.Add($"{shortcutCount} saved shortcut{(shortcutCount == 1 ? "" : "s")}");
+            if (layoutCount > 0) details.Add($"{layoutCount} Desktop Organizer icon layout profile{(layoutCount == 1 ? "" : "s")}");
+            if (brightnessCount > 0) details.Add($"{brightnessCount} Screen Brightness preset{(brightnessCount == 1 ? "" : "s")}");
+
+            string deleteMsg = details.Count > 0
+                ? $"This permanently deletes {string.Join(", ", details)}, every preference, and every rollback copy."
+                : "This permanently deletes every saved preference, desktop layout profile, screen brightness preset, and rollback copy.";
+
             var panel = new StackPanel { Margin = new Thickness(20), Spacing = 10 };
             panel.Children.Add(new TextBlock { Text = "Delete all of it?", Classes = { "SectionTitle" } });
             panel.Children.Add(new TextBlock
             {
-                Text = shortcutCount > 0
-                    ? $"This permanently deletes ALL {shortcutCount} shortcut{(shortcutCount == 1 ? "" : "s")} you have saved, every preference, and every rollback copy."
-                    : "This permanently deletes every saved preference and every rollback copy.",
+                Text = deleteMsg,
                 TextWrapping = TextWrapping.Wrap
             });
             panel.Children.Add(new TextBlock
             {
-                Text = "Before deleting, KeyPulse writes a dated safety copy of your settings next to the KeyPulse folder, so this can be undone by hand if you change your mind.",
+                Text = "Before deleting, KeyPulse writes dated safety copies of your shortcuts, desktop layout profiles, and screen brightness presets next to the KeyPulse folder, so this can be undone by hand if you change your mind.",
                 Classes = { "Muted" },
                 TextWrapping = TextWrapping.Wrap
             });
@@ -851,10 +874,6 @@ namespace KeyPulse
                         btnKeep.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(false); };
                         btnWipe.Click += async (s, e) =>
                         {
-                            // ISSUE_7: one misclick must not destroy everything. Wiping asks a
-                            // second, explicit confirmation that says how many shortcuts are about
-                            // to be destroyed - and a dated safety copy is written aside first, the
-                            // same safety net a restore gets.
                             var confirmed = await ConfirmWipeAsync();
                             if (!confirmed)
                             {
@@ -876,22 +895,53 @@ namespace KeyPulse
                     if (wipe)
                     {
                         _preserveAdminPrivilege = false;
-                        Log("User opted for a FRESH INSTALL. Writing a safety copy, then wiping old settings and logs...");
-                        var safetyCopy = ConfigStore.SaveWipeSafetyCopy();
-                        if (safetyCopy != null)
+                        Log("User opted for a FRESH INSTALL. Terminating running instances before wiping...");
+
+                        SetProgress("Terminating running instances...", 1, 6);
+                        await CloseRunningInstancesAsync();
+                        await Task.Delay(500);
+
+                        var survivors = FindInstalledInstances(out _);
+                        foreach (var p in survivors)
                         {
-                            Log("  -> Safety copy kept as: " + safetyCopy);
+                            try { p.WaitForExit(3000); } catch { }
+                            p.Dispose();
+                        }
+
+                        Log("Writing safety copies of configuration and desktop layouts...");
+                        if (!ConfigStore.SaveAllWipeSafetyCopies(out var safetyCopies, out var copyError))
+                        {
+                            Log("  -> ERROR: Failed to create safety copies: " + copyError);
+                            Log("  -> ABORTING wipe to protect existing user data.");
+                            installWarnings.Add("Settings wipe was aborted because safety copies could not be created (" + copyError + "). Your existing configuration was preserved.");
+                            wipe = false;
+                            _config = ConfigStore.Load(out _, out _);
                         }
                         else
                         {
-                            Log("  -> Warning: no safety copy could be written (there may be no existing settings).");
-                        }
-                        try { Directory.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse"), true); } catch { }
-                        _config = new AppConfig();
+                            foreach (var sc in safetyCopies)
+                            {
+                                Log("  -> Safety copy kept as: " + sc);
+                            }
 
-                        Log("  -> Success.");
+                            try
+                            {
+                                var appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
+                                if (Directory.Exists(appDataDir))
+                                {
+                                    Directory.Delete(appDataDir, true);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Log("  -> Warning while clearing AppData directory: " + ex.Message);
+                            }
+                            _config = new AppConfig();
+                            Log("  -> Wipe completed safely.");
+                        }
                     }
-                    else
+
+                    if (!wipe)
                     {
                         _preserveAdminPrivilege = wasRunningAsAdmin;
                         Log("User opted to UPGRADE. Keeping existing settings.");
@@ -928,10 +978,6 @@ namespace KeyPulse
                 SetProgress("Step 1 of 6: Terminating running instances...", 1, 6);
                 Log("Step 1/6: Terminating running instances...");
 
-                // ISSUE_12: a window close request can never work - the app hides to the tray by
-                // design - so the old polite ask always failed, stalled a second and force-killed.
-                // Ask through the named event the app honours, wait for a clean exit, and only kill
-                // real stragglers.
                 await CloseRunningInstancesAsync();
                 await Task.Delay(500);
                 Log("  -> Success.");
@@ -999,7 +1045,6 @@ namespace KeyPulse
 
                 Log("  -> Success (version " + Program.AppVersion + ").");
 
-                // ISSUE_19: register the per-user "Add to KeyPulse" Explorer menu entries.
                 RegisterExplorerContextMenu();
 
                 SetProgress("Step 5 of 6: Creating shortcuts...", 5, 6);
@@ -1057,7 +1102,7 @@ namespace KeyPulse
                             Log("  -> Preserved Standard User privileges (removed Administrator task).");
                         }
 
-                        if (Program.IsStartupEnabled() || isUpgrade)
+                        if (!isUpgrade || Program.IsStartupEnabled() || _config.LaunchOnBoot)
                         {
                             if (Program.TrySetRegistryStartup(true, out var startupError))
                             {
@@ -1170,7 +1215,6 @@ namespace KeyPulse
 
                 var processFailureCount = failures.Count;
 
-                // ISSUE_12: same as the upgrade path - ask through the exit event, then clean up.
                 await CloseRunningInstancesAsync();
                 await Task.Delay(500);
 
@@ -1246,7 +1290,6 @@ namespace KeyPulse
                 try { Registry.CurrentUser.DeleteSubKeyTree($@"Software\Microsoft\Windows\CurrentVersion\Uninstall\{Program.AppName}", false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Uninstall registry key", ex); }
                 try { using var runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true); runKey?.DeleteValue(Program.AppName, false); } catch (Exception ex) { registrySucceeded = false; RecordFailure("Startup registry key", ex); }
 
-                // ISSUE_19: take the "Add to KeyPulse" right-click entries back out.
                 RemoveExplorerContextMenu();
 
                 if (registrySucceeded) Log("  -> Success.");
@@ -1260,18 +1303,18 @@ namespace KeyPulse
 
                     if (Directory.Exists(Program.LegacyLogDir)) Directory.Delete(Program.LegacyLogDir, true);
 
-                    // ISSUE_7: the dated pre-wipe safety copies live beside the folder so a wipe
-                    // cannot destroy them; the uninstaller is the one that finally removes them.
                     var appDataParent = Directory.GetParent(appDataDir)?.FullName;
                     if (!string.IsNullOrEmpty(appDataParent))
                     {
-                        foreach (var leftover in Directory.GetFiles(appDataParent, "KeyPulse.before-wipe-*.json"))
+                        foreach (var pattern in new[] { "KeyPulse.before-wipe-*.json", "KeyPulse.desktop_organizer.before-wipe-*.json", "desktop_organizer.before-wipe-*.json" })
                         {
-                            try { File.Delete(leftover); } catch { }
+                            foreach (var leftover in Directory.GetFiles(appDataParent, pattern))
+                            {
+                                try { File.Delete(leftover); } catch { }
+                            }
                         }
                     }
 
-                    // ISSUE_19: any staged "Add to KeyPulse" hand-off file goes with the rest.
                     try { if (File.Exists(Program.StagedAddPath)) File.Delete(Program.StagedAddPath); } catch { }
 
                     Log("  -> Success.");

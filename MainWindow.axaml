@@ -23,25 +23,35 @@
                   ColumnDefinitions="*,*,Auto,Auto">
                 <TextBlock Grid.Row="0"
                            Grid.Column="0"
-                           Text="Shortcut"
+                           Text="Shortcuts (Alternative Keys)"
                            Classes="Label"
                            Margin="0,0,8,4" />
                 <TextBlock Grid.Row="0"
                            Grid.Column="1"
-                           Text="Action"
+                           Text="Action Type"
                            Classes="Label"
                            Margin="0,0,8,4" />
 
-                <TextBox Grid.Row="1"
-                         Grid.Column="0"
-                         Name="KeyCombo"
-                         PlaceholderText="Click here, then press your keys"
-                         HorizontalAlignment="Stretch"
-                         IsReadOnly="True"
-                         KeyDown="KeyCombo_KeyDown"
-                         TextChanged="KeyCombo_TextChanged"
-                         TabIndex="0"
-                         Margin="0,0,8,0" />
+                <Grid Grid.Row="1"
+                      Grid.Column="0"
+                      ColumnDefinitions="*,Auto"
+                      Margin="0,0,8,0">
+                    <TextBox Grid.Column="0"
+                             Name="KeyCombo"
+                             PlaceholderText="Press keys here (optional)"
+                             HorizontalAlignment="Stretch"
+                             IsReadOnly="True"
+                             KeyDown="KeyCombo_KeyDown"
+                             TextChanged="KeyCombo_TextChanged"
+                             TabIndex="0"
+                             Margin="0,0,6,0" />
+                    <Button Grid.Column="1"
+                            Name="AddKeyButton"
+                            Content="+ Add Key"
+                            Classes="Secondary"
+                            Click="AddKey_Click"
+                            ToolTip.Tip="Add this keyboard combination as an alternative trigger" />
+                </Grid>
                 <ComboBox Grid.Row="1"
                           Grid.Column="1"
                           Name="ActionCombo"
@@ -54,6 +64,7 @@
                     <ComboBoxItem>Open a web link</ComboBoxItem>
                     <ComboBoxItem>Type text (one key at a time)</ComboBoxItem>
                     <ComboBoxItem>Paste text (instant)</ComboBoxItem>
+                    <ComboBoxItem>Cycle screen brightness</ComboBoxItem>
                 </ComboBox>
                 <!-- tab order walks the editor once, top to bottom, left to right:
                      shortcut(0), action(1), target(2), blur(3), quick action(4), expand(5), browse(6), add(7),
@@ -77,9 +88,15 @@
                         TabIndex="8"
                         MinWidth="86" />
 
-                <StackPanel Grid.Row="2"
+                <!-- Chips displaying all key combinations configured for this action -->
+                <WrapPanel Grid.Row="2"
+                           Grid.ColumnSpan="4"
+                           Name="ComboChipsPanel"
+                           Margin="0,4,0,2" />
+
+                <StackPanel Grid.Row="3"
                             Grid.ColumnSpan="4"
-                            Margin="0,4,0,0">
+                            Margin="0,2,0,0">
                     <TextBlock Name="EditorModeText"
                                Classes="EditModeText"
                                IsVisible="False"
@@ -93,14 +110,31 @@
                                TextWrapping="Wrap" />
                 </StackPanel>
 
-                <TextBlock Grid.Row="3"
+                <!-- Optional Custom Action Name -->
+                <Grid Grid.Row="4"
+                      Grid.ColumnSpan="4"
+                      ColumnDefinitions="Auto,*"
+                      Margin="0,4,0,2">
+                    <TextBlock Grid.Column="0"
+                               Text="Action Name"
+                               Classes="Label"
+                               VerticalAlignment="Center"
+                               Margin="0,0,8,0" />
+                    <TextBox Grid.Column="1"
+                             Name="ActionNameText"
+                             PlaceholderText="Optional label (e.g. 'My Work Signature', 'Dev Dashboard')"
+                             HorizontalAlignment="Stretch"
+                             MaxHeight="32" />
+                </Grid>
+
+                <TextBlock Grid.Row="5"
                            Grid.ColumnSpan="4"
                            Name="TargetLabel"
                            Text="Folder path"
                            Classes="Label"
-                           Margin="0,10,0,4" />
+                           Margin="0,8,0,4" />
 
-                <Grid Grid.Row="4"
+                <Grid Grid.Row="6"
                       Grid.ColumnSpan="4"
                       ColumnDefinitions="*,Auto,Auto,Auto,Auto">
                     <!-- ISSUE_17: no fixed Height. The old code computed one in C# from a guess that
@@ -153,7 +187,7 @@
                             ToolTip.Tip="Choose a file or folder" />
                 </Grid>
 
-                <StackPanel Grid.Row="5"
+                <StackPanel Grid.Row="7"
                             Grid.ColumnSpan="4"
                             Margin="0,4,0,0">
                     <TextBlock Name="TargetErrorText"
@@ -164,7 +198,7 @@
                                IsVisible="False"
                                TextWrapping="Wrap" />
                 </StackPanel>
-                <TextBlock Grid.Row="6"
+                <TextBlock Grid.Row="8"
                            Grid.ColumnSpan="4"
                            Name="TargetHintText"
                            Classes="Muted"
@@ -347,14 +381,14 @@
                                                         HorizontalAlignment="Center"
                                                         VerticalAlignment="Center"
                                                         Spacing="4">
-                                                <TextBlock Text="{Binding KeyCombination}"
+                                                <TextBlock Text="{Binding KeyCombinationsDisplay}"
                                                            HorizontalAlignment="Center"
                                                            VerticalAlignment="Center"
                                                            TextAlignment="Center"
                                                            FontWeight="SemiBold"
                                                            Foreground="{DynamicResource AppAccentBrush}"
                                                            TextTrimming="CharacterEllipsis"
-                                                           ToolTip.Tip="{Binding KeyCombination}" />
+                                                           ToolTip.Tip="{Binding KeyCombinationsTooltip}" />
                                                 <TextBlock Text="{Binding QuickActionIndicator}"
                                                            Foreground="{DynamicResource AppAccentBrush}"
                                                            FontSize="11"
@@ -367,7 +401,8 @@
                                             <Border Classes="ShortcutGridSeparatorLine" />
                                         </Grid>
                                         <Border Grid.Column="4" Classes="ShortcutGridCell">
-                                            <TextBlock Text="{Binding ActionDisplay}"
+                                            <TextBlock Text="{Binding ActionTitle}"
+                                                       ToolTip.Tip="{Binding ActionDisplay}"
                                                        HorizontalAlignment="Center"
                                                        VerticalAlignment="Center"
                                                        TextAlignment="Center"
@@ -430,14 +465,11 @@
                                                         FontSize="11"
                                                         TabIndex="0"
                                                         ToolTip.Tip="{Binding ToggleTooltip}" />
-                                                <!-- ISSUE_15: 8.5pt text is roughly two-thirds the
-                                                     size of the smallest text anywhere else here,
-                                                     and REMOVE is a destructive action. -->
-                                                <Button Content="REMOVE"
-                                                        Classes="Danger"
-                                                        Click="Remove_Click"
-                                                        Width="78"
-                                                        MinWidth="78"
+                                                <Button Content="RUN"
+                                                        Classes="Secondary"
+                                                        Click="Run_Click"
+                                                        Width="46"
+                                                        MinWidth="46"
                                                         Height="24"
                                                         MinHeight="24"
                                                         Padding="4,2"
@@ -445,6 +477,22 @@
                                                         VerticalAlignment="Center"
                                                         FontSize="11"
                                                         TabIndex="1"
+                                                        ToolTip.Tip="Execute this action immediately" />
+                                                <!-- ISSUE_15: 8.5pt text is roughly two-thirds the
+                                                     size of the smallest text anywhere else here,
+                                                     and REMOVE is a destructive action. -->
+                                                <Button Content="REMOVE"
+                                                        Classes="Danger"
+                                                        Click="Remove_Click"
+                                                        Width="76"
+                                                        MinWidth="76"
+                                                        Height="24"
+                                                        MinHeight="24"
+                                                        Padding="4,2"
+                                                        HorizontalAlignment="Center"
+                                                        VerticalAlignment="Center"
+                                                        FontSize="11"
+                                                        TabIndex="2"
                                                         ToolTip.Tip="Delete this shortcut" />
                                                 <Button Classes="Secondary"
                                                         Click="Duplicate_Click"
@@ -582,6 +630,12 @@
                         Orientation="Horizontal"
                         Spacing="8"
                         HorizontalAlignment="Right">
+                <Button Content="Screen Brightness"
+                        Classes="Secondary"
+                        Click="ScreenBrightness_Click"
+                        TabIndex="7"
+                        MinWidth="136"
+                        ToolTip.Tip="Control physical screen brightness and contrast across up to 3 displays and configure shortcut cycle steps." />
                 <Button Content="Desktop Organizer"
                         Classes="Secondary"
                         Click="DesktopOrganizer_Click"

@@ -68,6 +68,7 @@ namespace KeyPulse
         public const uint ModWin = 0x0008;
         private const uint ModNoRepeat = 0x4000;
         private static IntPtr _hWnd;
+        public static IntPtr MessageWindowHandle => _hWnd;
         private static Thread? _thread;
         private static Dictionary<int, Action> _actions = new();
         private static int _currentId = 0;
@@ -203,7 +204,7 @@ namespace KeyPulse
         /// foreground window. Previously it kept eating the whole machine's keyboard as soon as the
         /// shortcut box held focus, including after the user alt-tabbed to another application.
         /// </summary>
-        private static bool IsKeyPulseForeground()
+        public static bool IsKeyPulseForeground()
         {
             var hWnd = GetForegroundWindow();
             if (hWnd == IntPtr.Zero) return false;

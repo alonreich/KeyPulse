@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -12,8 +12,24 @@ namespace KeyPulse
     /// </summary>
     public static class ConfigStore
     {
-        public static readonly string ConfigDirectory =
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
+        public static readonly string ConfigDirectory = ResolveConfigDirectory();
+
+        // DEVDATA_01: Route dev-mode configuration to isolated developer sandbox.
+        private static string ResolveConfigDirectory()
+        {
+            var envDataDir = Environment.GetEnvironmentVariable("KEYPULSE_DEV_DATA_DIR");
+            if (!string.IsNullOrWhiteSpace(envDataDir))
+            {
+                return Path.GetFullPath(envDataDir);
+            }
+
+            if (Program.IsDevMode)
+            {
+                return Path.Combine(Program.DevHomeDir, "data");
+            }
+
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
+        }
 
         public static readonly string ConfigPath = Path.Combine(ConfigDirectory, "config.json");
 
@@ -79,28 +95,7 @@ namespace KeyPulse
                 {
                     Directory.CreateDirectory(ConfigDirectory);
                     var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
-                    var temp = ConfigPath + ".tmp";
-
-                    File.WriteAllText(temp, json);
-
-                    if (File.Exists(ConfigPath))
-                    {
-                        try
-                        {
-                            File.Replace(temp, ConfigPath, null);
-                        }
-                        catch
-                        {
-                            File.Copy(temp, ConfigPath, true);
-                            try { File.Delete(temp); } catch { }
-                        }
-                    }
-                    else
-                    {
-                        File.Move(temp, ConfigPath);
-                    }
-
-                    return true;
+                    return AtomicFileWriter.WriteAtomic(ConfigPath, json, out error);
                 }
                 catch (Exception ex)
                 {
@@ -238,6 +233,93 @@ namespace KeyPulse
             catch
             {
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates verified recovery copies of ALL persistent user files (config.json AND desktop_organizer.json)
+        /// OUTSIDE the KeyPulse directory before a destructive wipe.
+        /// Aborts and returns false if any existing persistent file fails to create a verified copy.
+        /// </summary>
+        public static bool SaveAllWipeSafetyCopies(out List<string> createdCopies, out string error)
+        {
+            createdCopies = new List<string>();
+            error = string.Empty;
+
+            lock (IoLock)
+            {
+                var parent = Directory.GetParent(ConfigDirectory)?.FullName;
+                if (string.IsNullOrEmpty(parent))
+                {
+                    error = "Could not locate parent directory for safety copy.";
+                    return false;
+                }
+
+                var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+
+                if (File.Exists(ConfigPath))
+                {
+                    try
+                    {
+                        var target = Path.Combine(parent, $"KeyPulse.before-wipe-{timestamp}.json");
+                        File.Copy(ConfigPath, target, true);
+                        if (!File.Exists(target) || new FileInfo(target).Length != new FileInfo(ConfigPath).Length)
+                        {
+                            error = "Verification of config.json safety copy failed.";
+                            return false;
+                        }
+                        createdCopies.Add(target);
+                    }
+                    catch (Exception ex)
+                    {
+                        error = $"Failed to copy config.json to safety copy: {ex.Message}";
+                        return false;
+                    }
+                }
+
+                var desktopOrganizerPath = Path.Combine(ConfigDirectory, "desktop_organizer.json");
+                if (File.Exists(desktopOrganizerPath))
+                {
+                    try
+                    {
+                        var target = Path.Combine(parent, $"KeyPulse.desktop_organizer.before-wipe-{timestamp}.json");
+                        File.Copy(desktopOrganizerPath, target, true);
+                        if (!File.Exists(target) || new FileInfo(target).Length != new FileInfo(desktopOrganizerPath).Length)
+                        {
+                            error = "Verification of desktop_organizer.json safety copy failed.";
+                            return false;
+                        }
+                        createdCopies.Add(target);
+                    }
+                    catch (Exception ex)
+                    {
+                        error = $"Failed to copy desktop_organizer.json to safety copy: {ex.Message}";
+                        return false;
+                    }
+                }
+
+                var screenBrightnessPath = Path.Combine(ConfigDirectory, "screen_brightness.json");
+                if (File.Exists(screenBrightnessPath))
+                {
+                    try
+                    {
+                        var target = Path.Combine(parent, $"KeyPulse.screen_brightness.before-wipe-{timestamp}.json");
+                        File.Copy(screenBrightnessPath, target, true);
+                        if (!File.Exists(target) || new FileInfo(target).Length != new FileInfo(screenBrightnessPath).Length)
+                        {
+                            error = "Verification of screen_brightness.json safety copy failed.";
+                            return false;
+                        }
+                        createdCopies.Add(target);
+                    }
+                    catch (Exception ex)
+                    {
+                        error = $"Failed to copy screen_brightness.json to safety copy: {ex.Message}";
+                        return false;
+                    }
+                }
+
+                return true;
             }
         }
     }
