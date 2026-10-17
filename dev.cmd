@@ -102,7 +102,10 @@ goto :EOF
 
 :RUN
 echo Running Debug single launch in isolated dev sandbox (full clean)...
-call :NUKE_BUILD
+echo [DEV] Wiping build caches (bin/obj) for a guaranteed-fresh build...
+dotnet build-server shutdown >nul 2>nul
+if exist "%REPO_ROOT%\bin" rd /s /q "%REPO_ROOT%\bin" 2>nul
+if exist "%REPO_ROOT%\obj" rd /s /q "%REPO_ROOT%\obj" 2>nul
 dotnet run --project "%PROJECT%" -c %CONFIG% -r %RUNTIME% -p:PublishAot=false -- run-ui
 goto :EOF
 

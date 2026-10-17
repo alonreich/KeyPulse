@@ -1064,8 +1064,8 @@ namespace KeyPulse
             var bound = BindMonitorsToSlots(cfg);
             if (bound.Count == 0) return;
 
-            var connectedSlotIndices = bound.Keys.OrderBy(k => k).ToArray();
-            foreach (var slotIndex in connectedSlotIndices)
+            var connectedSlotIndices = bound.Keys.ToArray();
+            foreach (var slotIndex in connectedSlotIndices.OrderBy(k => k))
             {
                 if (token.IsCancellationRequested) return;
                 var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
