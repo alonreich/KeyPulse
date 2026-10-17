@@ -47,11 +47,13 @@ namespace KeyPulse
             return client;
         }
 
+        /// <summary>
+        /// DEVUPDATE_01: In dev mode, inspect local .\compiled\KeyPulse.exe instead of querying GitHub.
+        /// </summary>
         public static async Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // DEVUPDATE_01: In dev mode, inspect local .\compiled\KeyPulse.exe instead of querying GitHub.
                 var devUpdateSource = Environment.GetEnvironmentVariable("KEYPULSE_DEV_UPDATE_SOURCE");
                 if (!string.IsNullOrWhiteSpace(devUpdateSource))
                 {

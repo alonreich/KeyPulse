@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -111,6 +111,17 @@ namespace KeyPulse
                 _cachedConfig = config;
                 bool ok = SaveConfigInternal(config);
                 return ok;
+            }
+        }
+
+        public static void FlushConfig()
+        {
+            lock (ConfigLock)
+            {
+                if (_cachedConfig != null)
+                {
+                    SaveConfigInternal(_cachedConfig);
+                }
             }
         }
 
@@ -658,7 +669,6 @@ namespace KeyPulse
                 }
                 slotCfg.LastBrightness = brightness;
                 slotCfg.LastContrast = contrast;
-                SaveConfigInternal(cfg);
             }
 
             QueueThrottledHardwareWrite(slotIndex, brightness, contrast);
@@ -724,6 +734,14 @@ namespace KeyPulse
 
                 if (targetB == prevB && targetC == prevC)
                 {
+                    _ = Task.Run(() =>
+                    {
+                        var cfg = LoadConfig();
+                        lock (ConfigLock)
+                        {
+                            SaveConfigInternal(cfg);
+                        }
+                    });
                     return;
                 }
 
@@ -756,6 +774,17 @@ namespace KeyPulse
                 {
                     await Task.Delay(ThrottleIntervalMs).ConfigureAwait(false);
                     ExecutePendingWriteForSlot(slotIndex, throttle);
+                });
+            }
+            else
+            {
+                _ = Task.Run(() =>
+                {
+                    var cfg = LoadConfig();
+                    lock (ConfigLock)
+                    {
+                        SaveConfigInternal(cfg);
+                    }
                 });
             }
         }
@@ -938,8 +967,6 @@ namespace KeyPulse
                         int candidateIndex = (currentIndex + 1) % ordered.Count;
                         nextIndex = candidateIndex;
 
-                        // If presets were built for 2 or 3 displays while fewer displays are currently connected,
-                        // advance to the next step that actually changes a connected display (if one exists).
                         for (int step = 0; step < ordered.Count - 1; step++)
                         {
                             int probeIdx = (currentIndex + 1 + step) % ordered.Count;
@@ -1047,13 +1074,22 @@ namespace KeyPulse
             if (bound.Count == 0) return;
 
             var connectedSlotIndices = bound.Keys.ToArray();
-            Parallel.ForEach(connectedSlotIndices, slotIndex =>
+            bool firstDisplay = true;
+            foreach (var slotIndex in connectedSlotIndices)
             {
                 if (token.IsCancellationRequested) return;
+
+                if (!firstDisplay)
+                {
+                    Thread.Sleep(30);
+                    if (token.IsCancellationRequested) return;
+                }
+                firstDisplay = false;
+
                 var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
                 var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == slotIndex)
                           ?? profile.Targets?.FirstOrDefault(t => t.SlotIndex == 0);
-                if (screenCfg == null || target == null) return;
+                if (screenCfg == null || target == null) continue;
 
                 int targetB = Math.Clamp(target.Brightness, 0, 100);
                 int targetC = screenCfg.LockRatio ? targetB : Math.Clamp(target.Contrast, 0, 100);
@@ -1074,7 +1110,7 @@ namespace KeyPulse
                         throttle.LastWrittenContrast = targetC;
                     }
                 }
-            });
+            }
         }
 
         #endregion
@@ -1261,6 +1297,9 @@ namespace KeyPulse
                 gotHandles = GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicalMonitors);
                 if (!gotHandles) return false;
 
+                int bPercentClamped = Math.Clamp(brightnessPercent, 0, 100);
+                int cPercentClamped = Math.Clamp(contrastPercent, 0, 100);
+
                 bool anySuccess = false;
                 for (int i = 0; i < count; i++)
                 {
@@ -1272,11 +1311,17 @@ namespace KeyPulse
                         uint minB = 0, curB = 0, maxB = 100;
                         GetMonitorBrightness(hPhys, out minB, out curB, out maxB);
                         if (maxB <= minB) { minB = 0; maxB = 100; }
-                        uint rawB = DenormalizeFrom100(brightnessPercent, minB, maxB);
+                        uint rawB = DenormalizeFrom100(bPercentClamped, minB, maxB);
+                        rawB = Math.Clamp(rawB, minB, maxB);
                         if (SetMonitorBrightness(hPhys, rawB))
                         {
                             anySuccess = true;
                         }
+                    }
+
+                    if (writeBrightness && writeContrast)
+                    {
+                        Thread.Sleep(50);
                     }
 
                     if (writeContrast)
@@ -1284,7 +1329,8 @@ namespace KeyPulse
                         uint minC = 0, curC = 0, maxC = 100;
                         if (GetMonitorContrast(hPhys, out minC, out curC, out maxC) && maxC > minC)
                         {
-                            uint rawC = DenormalizeFrom100(contrastPercent, minC, maxC);
+                            uint rawC = DenormalizeFrom100(cPercentClamped, minC, maxC);
+                            rawC = Math.Clamp(rawC, minC, maxC);
                             if (SetMonitorContrast(hPhys, rawC))
                             {
                                 anySuccess = true;

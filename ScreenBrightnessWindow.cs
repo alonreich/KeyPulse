@@ -28,7 +28,7 @@ namespace KeyPulse
         public ScreenBrightnessWindow()
         {
             Title = "KeyPulse — Screen Brightness & Shortcut Cycling";
-            MinWidth = 760;
+            MinWidth = 780;
             MinHeight = 640;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             Background = ScreenBrightnessOverlayWindow.AppBrush("AppBgBrush", "#0B0F19");
@@ -40,7 +40,11 @@ namespace KeyPulse
             PointerPressed += OnWindowPointerPressed;
             KeyDown += OnWindowKeyDown;
             Opened += OnWindowOpened;
-            Closing += (_, _) => SaveWindowGeometry();
+            Closing += (_, _) =>
+            {
+                SaveWindowGeometry();
+                ScreenBrightnessService.FlushConfig();
+            };
             Closed += OnWindowClosed;
             ScreenBrightnessService.StateChanged += OnServiceStateChanged;
         }
@@ -79,9 +83,9 @@ namespace KeyPulse
             {
                 var appCfg = ConfigStore.Load(out _, out _);
                 Width = (!double.IsNaN(appCfg.ScreenBrightnessWindowWidth) && appCfg.ScreenBrightnessWindowWidth >= MinWidth)
-                    ? appCfg.ScreenBrightnessWindowWidth : 880;
+                    ? appCfg.ScreenBrightnessWindowWidth : 920;
                 Height = (!double.IsNaN(appCfg.ScreenBrightnessWindowHeight) && appCfg.ScreenBrightnessWindowHeight >= MinHeight)
-                    ? appCfg.ScreenBrightnessWindowHeight : 740;
+                    ? appCfg.ScreenBrightnessWindowHeight : 750;
 
                 if (!double.IsNaN(appCfg.ScreenBrightnessWindowX) && !double.IsNaN(appCfg.ScreenBrightnessWindowY))
                 {
@@ -100,8 +104,8 @@ namespace KeyPulse
             }
             catch
             {
-                Width = 880;
-                Height = 740;
+                Width = 920;
+                Height = 750;
             }
         }
 
@@ -191,22 +195,29 @@ namespace KeyPulse
             var headerGrid = new Grid
             {
                 ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                ColumnSpacing = 16,
                 Margin = new Thickness(0, 0, 0, 14)
             };
 
-            var titleStack = new StackPanel { Spacing = 4 };
+            var titleStack = new StackPanel
+            {
+                Spacing = 3,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             titleStack.Children.Add(new TextBlock
             {
                 Text = "Screen Brightness & Contrast Control",
-                FontSize = 20,
+                FontSize = 18.5,
                 FontWeight = FontWeight.Bold,
-                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC")
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                TextTrimming = TextTrimming.CharacterEllipsis
             });
             titleStack.Children.Add(new TextBlock
             {
-                Text = "Hardware DDC/CI & Laptop Backlight • Anti-Cheat Safe (Zero In-Game Focus Steal) • 250ms Speed Limiter",
-                FontSize = 12,
-                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+                Text = "Hardware DDC/CI & Laptop Backlight • Anti-Cheat Safe • 250ms Speed Limiter",
+                FontSize = 11.5,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                TextWrapping = TextWrapping.Wrap
             });
             Grid.SetColumn(titleStack, 0);
             headerGrid.Children.Add(titleStack);
@@ -215,14 +226,16 @@ namespace KeyPulse
             {
                 Orientation = Orientation.Horizontal,
                 Spacing = 8,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right
             };
 
             var identifyBtn = new Button
             {
-                Content = "Identify Screens (A / B / C)",
+                Content = "Identify Screens",
                 Classes = { "Secondary" },
-                Padding = new Thickness(12, 7),
+                Padding = new Thickness(10, 6),
+                FontSize = 12,
                 TabIndex = 1
             };
             ToolTip.SetTip(identifyBtn, "Flash Screen A, Screen B, Screen C banners on each physical monitor so you know which card controls which display.");
@@ -235,9 +248,10 @@ namespace KeyPulse
 
             var refreshBtn = new Button
             {
-                Content = "Read Live Hardware",
+                Content = "Read Hardware",
                 Classes = { "Secondary" },
-                Padding = new Thickness(12, 7),
+                Padding = new Thickness(10, 6),
+                FontSize = 12,
                 TabIndex = 2
             };
             ToolTip.SetTip(refreshBtn, "Query all connected monitors right now to read their current physical brightness and contrast levels.");
@@ -253,7 +267,8 @@ namespace KeyPulse
             {
                 Content = "Cycle Next Step",
                 Classes = { "Primary" },
-                Padding = new Thickness(12, 7),
+                Padding = new Thickness(10, 6),
+                FontSize = 12,
                 TabIndex = 3
             };
             ToolTip.SetTip(testCycleBtn, "Test cycling to the next brightness preset (starts at lowest brightness, climbs up, then wraps back to lowest).");
@@ -725,15 +740,23 @@ namespace KeyPulse
                 BorderBrush = ScreenBrightnessOverlayWindow.AppBrush(isActive ? "AppAccentBrush" : "AppBorderBrush", isActive ? "#38BDF8" : "#334155"),
                 BorderThickness = new Thickness(isActive ? 1.5 : 1),
                 CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12, 10)
+                Padding = new Thickness(14, 12)
             };
 
-            var rowStack = new StackPanel { Spacing = 8 };
+            var rowStack = new StackPanel { Spacing = 9 };
 
-            var topGrid = new Grid
+            var cardHeaderGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("200,Auto,*,Auto"),
-                ColumnSpacing = 10
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                ColumnSpacing = 12,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var identityStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 10,
+                VerticalAlignment = VerticalAlignment.Center
             };
 
             var nameBox = new TextBox
@@ -741,7 +764,8 @@ namespace KeyPulse
                 Text = profile.Name,
                 MaxLength = 32,
                 PlaceholderText = "Preset name (max 32 chars)",
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                Width = 180
             };
             ToolTip.SetTip(nameBox, "Enter a unique preset name up to 32 characters.");
 
@@ -780,8 +804,7 @@ namespace KeyPulse
                     CommitPresetName();
                 }
             };
-            Grid.SetColumn(nameBox, 0);
-            topGrid.Children.Add(nameBox);
+            identityStack.Children.Add(nameBox);
 
             var badgeText = profile.IncludeInCycle
                 ? (cycleStepIndex == 1 ? $"CYCLE STEP 1/{totalCycleSteps} (LOWEST • FIRST)" : $"CYCLE STEP {cycleStepIndex}/{totalCycleSteps}")
@@ -793,7 +816,7 @@ namespace KeyPulse
                     ? ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#0369A1")
                     : ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
                 CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(8, 3),
+                Padding = new Thickness(8, 4),
                 VerticalAlignment = VerticalAlignment.Center,
                 Child = new TextBlock
                 {
@@ -803,75 +826,36 @@ namespace KeyPulse
                     Foreground = Brushes.White
                 }
             };
-            Grid.SetColumn(stepBadge, 1);
-            topGrid.Children.Add(stepBadge);
+            identityStack.Children.Add(stepBadge);
 
-            var togglesPanel = new StackPanel
+            if (isActive)
             {
-                Orientation = Orientation.Horizontal,
-                Spacing = 12,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            var cycleGroup = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
-            var cycleChk = new CheckBox
-            {
-                Content = "Include in shortcut cycle",
-                IsChecked = profile.IncludeInCycle,
-                FontSize = 11.5
-            };
-            ToolTip.SetTip(cycleChk, "Include this preset when pressing your 'Cycle Screen Brightness' shortcut key.");
-            cycleChk.IsCheckedChanged += (_, _) =>
-            {
-                profile.IncludeInCycle = cycleChk.IsChecked == true;
-                ScreenBrightnessService.SaveConfig(cfg);
-                ScreenBrightnessService.NotifyStateChanged();
-                RenderProfilesList();
-            };
-            cycleGroup.Children.Add(cycleChk);
-            cycleGroup.Children.Add(CreateHelpBadge("When checked, pressing your Cycle Brightness shortcut key steps through this preset in lowest-to-highest order."));
-            togglesPanel.Children.Add(cycleGroup);
-
-            var trayGroup = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
-            var trayChk = new CheckBox
-            {
-                Content = "Pin to tray menu (Max 3)",
-                IsChecked = profile.ShowInTrayQuickActions,
-                FontSize = 11.5
-            };
-            ToolTip.SetTip(trayChk, "Show this preset in the KeyPulse System Tray menu and Quick Sliders popup (up to 3 presets).");
-            trayChk.IsCheckedChanged += (_, _) =>
-            {
-                if (trayChk.IsChecked == true)
+                var activeBadge = new Border
                 {
-                    int currentPinned = cfg.Profiles.Count(p => p.ShowInTrayQuickActions && p.Id != profile.Id);
-                    if (currentPinned >= ScreenBrightnessService.MaxTrayQuickActions)
+                    Background = ScreenBrightnessOverlayWindow.AppBrush("AppSuccessBrush", "#10B981"),
+                    CornerRadius = new CornerRadius(6),
+                    Padding = new Thickness(8, 4),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = new TextBlock
                     {
-                        trayChk.IsChecked = false;
-                        SetStatus("Maximum 3 presets can be pinned to the System Tray Quick Actions submenu.", false);
-                        return;
+                        Text = "ACTIVE",
+                        FontSize = 10,
+                        FontWeight = FontWeight.Bold,
+                        Foreground = Brushes.White
                     }
-                    profile.ShowInTrayQuickActions = true;
-                }
-                else
-                {
-                    profile.ShowInTrayQuickActions = false;
-                }
-                ScreenBrightnessService.SaveConfig(cfg);
-                ScreenBrightnessService.NotifyStateChanged();
-            };
-            trayGroup.Children.Add(trayChk);
-            trayGroup.Children.Add(CreateHelpBadge("Pins this preset as a one-click button inside the System Tray icon menu and Quick Sliders popup (maximum 3 pinned presets)."));
-            togglesPanel.Children.Add(trayGroup);
+                };
+                identityStack.Children.Add(activeBadge);
+            }
 
-            Grid.SetColumn(togglesPanel, 2);
-            topGrid.Children.Add(togglesPanel);
+            Grid.SetColumn(identityStack, 0);
+            cardHeaderGrid.Children.Add(identityStack);
 
             var actionBtns = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 Spacing = 6,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right
             };
 
             var applyBtn = new Button
@@ -944,9 +928,80 @@ namespace KeyPulse
             };
             actionBtns.Children.Add(deleteBtn);
 
-            Grid.SetColumn(actionBtns, 3);
-            topGrid.Children.Add(actionBtns);
-            rowStack.Children.Add(topGrid);
+            Grid.SetColumn(actionBtns, 1);
+            cardHeaderGrid.Children.Add(actionBtns);
+            rowStack.Children.Add(cardHeaderGrid);
+
+            var togglesRow = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 0, 0)
+            };
+
+            var cycleGroup = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 4,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 0)
+            };
+            var cycleChk = new CheckBox
+            {
+                Content = "Include in shortcut cycle",
+                IsChecked = profile.IncludeInCycle,
+                FontSize = 11.5
+            };
+            ToolTip.SetTip(cycleChk, "Include this preset when pressing your 'Cycle Screen Brightness' shortcut key.");
+            cycleChk.IsCheckedChanged += (_, _) =>
+            {
+                profile.IncludeInCycle = cycleChk.IsChecked == true;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.NotifyStateChanged();
+                RenderProfilesList();
+            };
+            cycleGroup.Children.Add(cycleChk);
+            cycleGroup.Children.Add(CreateHelpBadge("When checked, pressing your Cycle Brightness shortcut key steps through this preset in lowest-to-highest order."));
+            togglesRow.Children.Add(cycleGroup);
+
+            var trayGroup = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 4,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var trayChk = new CheckBox
+            {
+                Content = "Pin to tray menu (Max 3)",
+                IsChecked = profile.ShowInTrayQuickActions,
+                FontSize = 11.5
+            };
+            ToolTip.SetTip(trayChk, "Show this preset in the KeyPulse System Tray menu and Quick Sliders popup (up to 3 presets).");
+            trayChk.IsCheckedChanged += (_, _) =>
+            {
+                if (trayChk.IsChecked == true)
+                {
+                    int currentPinned = cfg.Profiles.Count(p => p.ShowInTrayQuickActions && p.Id != profile.Id);
+                    if (currentPinned >= ScreenBrightnessService.MaxTrayQuickActions)
+                    {
+                        trayChk.IsChecked = false;
+                        SetStatus("Maximum 3 presets can be pinned to the System Tray Quick Actions submenu.", false);
+                        return;
+                    }
+                    profile.ShowInTrayQuickActions = true;
+                }
+                else
+                {
+                    profile.ShowInTrayQuickActions = false;
+                }
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.NotifyStateChanged();
+            };
+            trayGroup.Children.Add(trayChk);
+            trayGroup.Children.Add(CreateHelpBadge("Pins this preset as a one-click button inside the System Tray icon menu and Quick Sliders popup (maximum 3 pinned presets)."));
+            togglesRow.Children.Add(trayGroup);
+
+            rowStack.Children.Add(togglesRow);
 
             var connectedSlots = ScreenBrightnessService.GetConnectedSlotIndices(cfg);
             if (connectedSlots.Count == 0) connectedSlots.Add(0);
@@ -1190,6 +1245,7 @@ namespace KeyPulse
 
         private void OnWindowClosed(object? sender, EventArgs e)
         {
+            ScreenBrightnessService.FlushConfig();
             ScreenBrightnessService.StateChanged -= OnServiceStateChanged;
             _liveReadCts?.Cancel();
             _liveReadCts?.Dispose();

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -3752,7 +3752,6 @@ namespace KeyPulse
                 Margin = new Avalonia.Thickness(20, 16)
             };
 
-            // Row 0: Header + Instant Search Bar
             var headerGrid = new Grid
             {
                 ColumnDefinitions = new ColumnDefinitions("*,Auto"),
@@ -3778,7 +3777,6 @@ namespace KeyPulse
             Grid.SetRow(headerGrid, 0);
             rootGrid.Children.Add(headerGrid);
 
-            // Row 1: Top-Tier Tab Bar + Per-Tab Restore Defaults Button
             var tabBarBorder = new Border
             {
                 Classes = { "Panel" },
@@ -3832,7 +3830,6 @@ namespace KeyPulse
             Grid.SetRow(tabBarBorder, 1);
             rootGrid.Children.Add(tabBarBorder);
 
-            // Row 2: Scrollable Settings Cards Area
             var cardsStack = new StackPanel { Spacing = 10, Margin = new Avalonia.Thickness(0, 0, 4, 0) };
             var settingCards = new List<(Border Card, int TabCategory, string Keywords)>();
 
@@ -3873,11 +3870,7 @@ namespace KeyPulse
                 return card;
             }
 
-            // =========================================================================
-            // TAB 0: GENERAL (Startup, Theme, Sound, Updates & About)
-            // =========================================================================
 
-            // 1. Startup
             var chk = new CheckBox
             {
                 Content = "Launch KeyPulse at Windows startup",
@@ -3934,7 +3927,6 @@ namespace KeyPulse
                 "startup boot launch windows login automatic tray",
                 startupBody);
 
-            // 2. Appearance / Theme
             var themeCombo = new ComboBox
             {
                 Width = 220,
@@ -3977,7 +3969,6 @@ namespace KeyPulse
                 "appearance theme dark light mode color windows",
                 themeBody);
 
-            // 3. App Sound Effects
             var soundChk = new CheckBox
             {
                 Content = "Play app sound effects",
@@ -4008,7 +3999,6 @@ namespace KeyPulse
                 "sound audio effects mute click chime volume",
                 soundBody);
 
-            // 4. Updates & Version
             var updateStatus = new TextBlock
             {
                 Classes = { "Muted" },
@@ -4091,11 +4081,7 @@ namespace KeyPulse
                 "about version update check release github",
                 aboutBody);
 
-            // =========================================================================
-            // TAB 1: SHORTCUTS & TYPING (Web Links Browser, Simulated Typing Speed)
-            // =========================================================================
 
-            // 5. Web Browser for URLs
             var chromeChk = new CheckBox
             {
                 Content = "Open web links in Google Chrome",
@@ -4138,7 +4124,6 @@ namespace KeyPulse
                 "browser google chrome url web link website edge firefox",
                 browserBody);
 
-            // 6. Simulated Typing Speed (Preset + Custom 1..200 ms Stepper)
             var speedCombo = new ComboBox
             {
                 Width = 285,
@@ -4329,11 +4314,7 @@ namespace KeyPulse
                 "typing speed delay milliseconds ms fast normal compatible console remote rdp",
                 speedBody);
 
-            // =========================================================================
-            // TAB 2: DISPLAYS & DESKTOP (Screen Brightness, Desktop Icon Organizer)
-            // =========================================================================
 
-            // 7. Screen Brightness & Contrast
             var sbCfg = ScreenBrightnessService.LoadConfig();
             var sbLockChk = new CheckBox
             {
@@ -4394,7 +4375,6 @@ namespace KeyPulse
                 "screen brightness contrast monitor display ddc backlight preset cycle sync lock",
                 sbBody);
 
-            // 8. Desktop Icon Organizer
             var doSummaryText = new TextBlock
             {
                 Classes = { "Muted" },
@@ -4437,11 +4417,7 @@ namespace KeyPulse
                 "desktop icon organizer layout restore snapshot monitor grid",
                 doBody);
 
-            // =========================================================================
-            // TAB 3: BACKUP & RESET (Backup/Import + Visible Status + Red Danger Zone)
-            // =========================================================================
 
-            // 9. Backup & Import Settings
             var backupBtn = new Button
             {
                 Content = "Backup Settings...",
@@ -4488,7 +4464,6 @@ namespace KeyPulse
                 "backup restore export import configuration file json encrypt password",
                 backupBody);
 
-            // 10. Red Danger Zone (Administrator Privileges + Factory Reset Defaults)
             bool isElevated = Program.IsElevated;
             bool isWiredAdmin = Program.IsAdminTaskInstalled();
 
@@ -4567,7 +4542,6 @@ namespace KeyPulse
                 dangerBody,
                 isDangerZone: true);
 
-            // Empty Search State
             var emptySearchPanel = new Border
             {
                 Classes = { "Panel" },
@@ -4607,7 +4581,6 @@ namespace KeyPulse
             Grid.SetRow(cardsScroll, 2);
             rootGrid.Children.Add(cardsScroll);
 
-            // Row 3: Visible Status Banner (Fixes Issue #1: statusTxt was previously never added to panel.Children!)
             var statusBorder = new Border
             {
                 Classes = { "Panel" },
@@ -4637,7 +4610,6 @@ namespace KeyPulse
             Grid.SetRow(statusBorder, 3);
             rootGrid.Children.Add(statusBorder);
 
-            // Row 4: Footer Bar
             var footerGrid = new Grid
             {
                 ColumnDefinitions = new ColumnDefinitions("*,Auto"),
@@ -4669,7 +4641,6 @@ namespace KeyPulse
             Grid.SetRow(footerGrid, 4);
             rootGrid.Children.Add(footerGrid);
 
-            // Helper to sync all open Settings controls from _currentConfig / services (Fixes Issue #3 & #7)
             void SyncAllSettingsControls()
             {
                 suppressSyncEvents = true;
@@ -4699,7 +4670,6 @@ namespace KeyPulse
                 }
             }
 
-            // Tab & Search filtering logic
             void RefreshVisibleCards()
             {
                 string query = (searchBox.Text ?? string.Empty).Trim().ToLowerInvariant();
@@ -4745,7 +4715,6 @@ namespace KeyPulse
             searchBox.TextChanged += (_, _) => RefreshVisibleCards();
             RefreshVisibleCards();
 
-            // Per-Tab Restore Defaults handler (Fixes Issue #14)
             restoreTabDefaultsBtn.Click += async (_, _) =>
             {
                 Program.PlaySound("click");
@@ -4788,7 +4757,6 @@ namespace KeyPulse
                 }
                 else if (activeTab == 3)
                 {
-                    // On Backup & Reset tab, Restore Tab Defaults triggers the full preference reset
                     resetAllBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     return;
                 }
@@ -4799,7 +4767,6 @@ namespace KeyPulse
                 statusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
             };
 
-            // Global Restore All Default Settings handler (Fixes Issue #14 & #15)
             resetAllBtn.Click += async (_, _) =>
             {
                 Program.PlaySound("click");
@@ -4838,7 +4805,6 @@ namespace KeyPulse
                 statusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
             };
 
-            // Admin Privilege Button Handler (Fixes Issue #15: confirmation before de-elevating)
             adminBtn.Click += async (s, ev) =>
             {
                 var currentElevated = Program.IsElevated;
@@ -5132,7 +5098,6 @@ namespace KeyPulse
                 }
             };
 
-            // Live cross-window sync while Settings is open (Issue #7)
             void OnBrightnessStateChanged()
             {
                 Avalonia.Threading.Dispatcher.UIThread.Post(() =>

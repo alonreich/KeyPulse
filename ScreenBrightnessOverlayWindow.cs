@@ -474,12 +474,14 @@ namespace KeyPulse
         {
             if (_isClosing) return;
             _isClosing = true;
+            ScreenBrightnessService.FlushConfig();
             try { Close(); } catch { }
         }
 
         private void OnOverlayClosed(object? sender, EventArgs e)
         {
             _isClosing = true;
+            ScreenBrightnessService.FlushConfig();
             ScreenBrightnessService.StateChanged -= OnServiceStateChanged;
             _liveReadCts?.Cancel();
             _liveReadCts?.Dispose();

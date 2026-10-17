@@ -14,7 +14,8 @@
   4. **Type Text**: Simulates hardware-level scan-code typing for predefined text (works in games, RDP, and VMs).
   5. **Insert Text (Paste)**: Injects large chunks of text instantly while preserving and restoring HGLOBAL clipboard formats.
   6. **Cycle Screen Brightness**: Cycles physical monitor Brightness & Contrast presets in-game with zero OSD popups and zero focus stealing.
-- ☀️ **Screen Brightness & Contrast Control**: Active-display-only dynamic layout (automatically hides disconnected screens and resizes overlay to 420px, 540px, or 680px), dual vertical sliders, locked or independent Brightness/Contrast ratios, hardware DDC/CI (`dxva2.dll`) + internal laptop backlight (`\\.\LCD`), 250 ms hardware limiter with trailing-edge flush, stable Hardware ID binding, inline display renaming with explicit `Save`/`Cancel` actions and click-outside auto-save, and intelligent shortcut cycle edge-case handling (never hangs on dead keypresses when 1 monitor is active with a multi-monitor cycle configuration).
+- ☀️ **Hardware-Safe Screen Brightness & Contrast Control**: Active-display-only dynamic layout (automatically hides disconnected screens and resizes overlay to 420px, 540px, or 680px), dual vertical sliders, locked or independent Brightness/Contrast ratios, hardware DDC/CI (`dxva2.dll`) + internal laptop backlight (`\\.\LCD`), stable Hardware ID binding, inline display renaming with explicit `Save`/`Cancel` actions, and intelligent shortcut cycle edge-case handling.
+  - 🛡️ **Hardware Protection Protocol**: Rigorous safety guard rails protect your monitor's microcontrollers and GPU I2C bus: sequential multi-display writes (eliminating bus contention), 30ms I2C multiplexer settling delays, 50ms VESA MCCS dual-write pauses, 250ms hardware write speed limiter with trailing-edge final flush, delta-only write filtering, strict raw value clamping to hardware limits, and decoupled zero-thrash disk I/O during slider movement.
 - 🖥️ **Desktop Organizer**: Save, rename, and restore multi-monitor desktop icon layouts with atomic LKG persistence, non-overlapping responsive profile cards, explicit `Save`/`Cancel` inline renaming, customizable placement for unsaved new icons (primary screen center, untouched in place, right-aligned, or secondary monitor center), and optional periodic auto-snapshots with custom day intervals (`1–30 days`, retains latest 5 while protecting manual layouts forever).
 - ⚙️ **Consolidated 4-Tab Settings Dialog**: Modern categorized preferences dialog featuring 4 top-level application groupings (**General**, **Typing & Speed**, **Window & Display**, **Advanced & Safety**), instant live search filtering across all settings, customizable character delay stepper (`1–200 ms`), per-tab and global "Restore Defaults", persistent window size/position and active tab memory, and an isolated red Danger Zone.
 - 🛡️ **Conflict Probing**: Actively probes and validates your custom hotkeys against existing OS/App shortcuts to prevent collisions.
@@ -23,7 +24,7 @@
 
 ## Installation
 
-1. Download the latest release here: [📥 Download KeyPulse.exe](https://github.com/alonreich/KeyPulse/releases/latest/download/KeyPulse.exe)
+1. Download the latest official release: [📥 **Download KeyPulse.exe (Latest Release)**](https://github.com/alonreich/KeyPulse/releases/latest/download/KeyPulse.exe)
 2. Run the downloaded `KeyPulse.exe`. 
 3. The built-in setup engine will seamlessly move the executable to its local app data directory, establish all necessary Registry keys, and launch the application into your System Tray.
 

@@ -14,7 +14,9 @@ namespace KeyPulse
     {
         public static readonly string ConfigDirectory = ResolveConfigDirectory();
 
-        // DEVDATA_01: Route dev-mode configuration to isolated developer sandbox.
+        /// <summary>
+        /// DEVDATA_01: Route dev-mode configuration to isolated developer sandbox.
+        /// </summary>
         private static string ResolveConfigDirectory()
         {
             var envDataDir = Environment.GetEnvironmentVariable("KEYPULSE_DEV_DATA_DIR");
