@@ -520,7 +520,15 @@ function Publish-GitHubRelease {
         Write-Host "[PUBLISH] STOPPED: built executable missing at $ExePath."
         return $false
     }
-    $localHash = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    $fileStream = [System.IO.File]::OpenRead($ExePath)
+    try {
+        $hashBytes = $hasher.ComputeHash($fileStream)
+        $localHash = [System.BitConverter]::ToString($hashBytes).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $fileStream.Dispose()
+        $hasher.Dispose()
+    }
     Write-Host "[PUBLISH] 4/7 Built exe fingerprint ($localHash) + tag $($Plan.Tag) ready. [OK]"
 
     $title = if ($Plan.Beta) { "KeyPulse $($Plan.Tag) (Beta)" } else { "KeyPulse $($Plan.Tag)" }
