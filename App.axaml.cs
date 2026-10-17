@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
@@ -50,28 +50,6 @@ public partial class App : Application
             icons[0].ToolTipText = inactive > 0
                 ? $"KeyPulse - {active} working, {inactive} NOT working (click to fix)"
                 : $"KeyPulse - {active} shortcut{(active == 1 ? "" : "s")} working";
-        }
-        catch
-        {
-        }
-    }
-
-    public static void RefreshTrayIcon()
-    {
-        try
-        {
-            var current = Current;
-            if (current == null) return;
-
-            var icons = TrayIcon.GetIcons(current);
-            if (icons == null || icons.Count == 0) return;
-
-            icons[0].IsVisible = false;
-            icons[0].IsVisible = true;
-            if (_lastQuickActionHotkeys != null)
-            {
-                UpdateTrayQuickActions(_lastQuickActionHotkeys);
-            }
         }
         catch
         {

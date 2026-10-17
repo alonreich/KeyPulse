@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1381,24 +1381,6 @@ class Program
         catch (Exception ex)
         {
             LogDebug("Could not write the library stamp: " + ex.Message);
-        }
-    }
-
-    private static bool TryReadStamp(string stampPath, out long resourceLength, out string hashHex)
-    {
-        resourceLength = -1;
-        hashHex = string.Empty;
-        try
-        {
-            var parts = File.ReadAllText(stampPath).Trim().Split('|');
-            if (parts.Length != 2) return false;
-            if (!long.TryParse(parts[0], out resourceLength) || resourceLength <= 0) return false;
-            hashHex = parts[1];
-            return hashHex.Length == 64;
-        }
-        catch
-        {
-            return false;
         }
     }
 

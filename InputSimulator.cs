@@ -49,7 +49,6 @@ namespace KeyPulse
         private const uint KEYEVENTF_SCANCODE = 0x0008;
         private const ushort VK_CONTROL = 0x11;
         private const ushort VK_V = 0x56;
-        private const ushort VK_ESCAPE = 0x1B;
         private const uint MAPVK_VK_TO_VSC_EX = 4;
         private static readonly uint CurrentProcessId = (uint)Environment.ProcessId;
 
@@ -419,15 +418,12 @@ namespace KeyPulse
         [DllImport("user32.dll")]
         private static extern IntPtr GetClipboardData(uint uFormat);
         [DllImport("user32.dll")]
-        private static extern bool IsClipboardFormatAvailable(uint format);
-        [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
         [DllImport("user32.dll")]
         private static extern IntPtr GetOpenClipboardWindow();
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern int GetClipboardFormatName(uint format, [Out] char[] lpszFormatName, int cchMaxCount);
 
-        private const uint CF_TEXT = 1;
         private const uint CF_BITMAP = 2;
         private const uint CF_METAFILEPICT = 3;
         private const uint CF_PALETTE = 9;

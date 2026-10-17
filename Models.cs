@@ -25,7 +25,6 @@ namespace KeyPulse
         private string _registrationStatus = "Pending";
         private string _statusHint = string.Empty;
         private bool _isEnabled = true;
-        private string _keyCombination = string.Empty;
         private ActionType _action;
         private string _target = string.Empty;
 

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -123,15 +123,6 @@ namespace KeyPulse
                     SaveConfigInternal(_cachedConfig);
                 }
             }
-        }
-
-        public static void ReloadCache()
-        {
-            lock (ConfigLock)
-            {
-                _cachedConfig = null;
-            }
-            NotifyStateChanged();
         }
 
         public static ScreenBrightnessConfig ResetToDefaults()
@@ -1073,19 +1064,10 @@ namespace KeyPulse
             var bound = BindMonitorsToSlots(cfg);
             if (bound.Count == 0) return;
 
-            var connectedSlotIndices = bound.Keys.ToArray();
-            bool firstDisplay = true;
+            var connectedSlotIndices = bound.Keys.OrderBy(k => k).ToArray();
             foreach (var slotIndex in connectedSlotIndices)
             {
                 if (token.IsCancellationRequested) return;
-
-                if (!firstDisplay)
-                {
-                    Thread.Sleep(30);
-                    if (token.IsCancellationRequested) return;
-                }
-                firstDisplay = false;
-
                 var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
                 var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == slotIndex)
                           ?? profile.Targets?.FirstOrDefault(t => t.SlotIndex == 0);
@@ -1110,6 +1092,9 @@ namespace KeyPulse
                         throttle.LastWrittenContrast = targetC;
                     }
                 }
+
+                if (token.IsCancellationRequested) return;
+                Thread.Sleep(30);
             }
         }
 
@@ -1284,61 +1269,69 @@ namespace KeyPulse
 
         private static bool TryWriteDdcMonitor(IntPtr hMonitor, int brightnessPercent, int contrastPercent, bool writeBrightness, bool writeContrast)
         {
-            if (hMonitor == IntPtr.Zero) return false;
+            if (hMonitor == IntPtr.Zero || (!writeBrightness && !writeContrast)) return false;
+
             if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
             {
                 return false;
             }
 
             var physicalMonitors = new PHYSICAL_MONITOR[count];
-            bool gotHandles = false;
+            if (!GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicalMonitors))
+            {
+                return false;
+            }
+
             try
             {
-                gotHandles = GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicalMonitors);
-                if (!gotHandles) return false;
+                bool allOk = true;
 
-                int bPercentClamped = Math.Clamp(brightnessPercent, 0, 100);
-                int cPercentClamped = Math.Clamp(contrastPercent, 0, 100);
-
-                bool anySuccess = false;
                 for (int i = 0; i < count; i++)
                 {
-                    IntPtr hPhys = physicalMonitors[i].hPhysicalMonitor;
-                    if (hPhys == IntPtr.Zero) continue;
+                    IntPtr hPhysical = physicalMonitors[i].hPhysicalMonitor;
+                    if (hPhysical == IntPtr.Zero) continue;
+
+                    bool wroteB = false;
 
                     if (writeBrightness)
                     {
-                        uint minB = 0, curB = 0, maxB = 100;
-                        GetMonitorBrightness(hPhys, out minB, out curB, out maxB);
-                        if (maxB <= minB) { minB = 0; maxB = 100; }
-                        uint rawB = DenormalizeFrom100(bPercentClamped, minB, maxB);
-                        rawB = Math.Clamp(rawB, minB, maxB);
-                        if (SetMonitorBrightness(hPhys, rawB))
+                        if (GetMonitorBrightness(hPhysical, out uint minB, out uint curB, out uint maxB))
                         {
-                            anySuccess = true;
-                        }
-                    }
+                            uint targetRawB = minB + (uint)Math.Round((maxB - minB) * (Math.Clamp(brightnessPercent, 0, 100) / 100.0));
+                            targetRawB = Math.Clamp(targetRawB, minB, maxB);
 
-                    if (writeBrightness && writeContrast)
-                    {
-                        Thread.Sleep(50);
+                            if (SetMonitorBrightness(hPhysical, targetRawB))
+                            {
+                                wroteB = true;
+                            }
+                            else
+                            {
+                                allOk = false;
+                            }
+                        }
                     }
 
                     if (writeContrast)
                     {
-                        uint minC = 0, curC = 0, maxC = 100;
-                        if (GetMonitorContrast(hPhys, out minC, out curC, out maxC) && maxC > minC)
+                        if (wroteB)
                         {
-                            uint rawC = DenormalizeFrom100(cPercentClamped, minC, maxC);
-                            rawC = Math.Clamp(rawC, minC, maxC);
-                            if (SetMonitorContrast(hPhys, rawC))
+                            Thread.Sleep(50);
+                        }
+
+                        if (GetMonitorContrast(hPhysical, out uint minC, out uint curC, out uint maxC))
+                        {
+                            uint targetRawC = minC + (uint)Math.Round((maxC - minC) * (Math.Clamp(contrastPercent, 0, 100) / 100.0));
+                            targetRawC = Math.Clamp(targetRawC, minC, maxC);
+
+                            if (!SetMonitorContrast(hPhysical, targetRawC))
                             {
-                                anySuccess = true;
+                                allOk = false;
                             }
                         }
                     }
                 }
-                return anySuccess;
+
+                return allOk;
             }
             catch
             {
@@ -1346,10 +1339,7 @@ namespace KeyPulse
             }
             finally
             {
-                if (gotHandles)
-                {
-                    try { DestroyPhysicalMonitors(count, physicalMonitors); } catch { }
-                }
+                DestroyPhysicalMonitors(count, physicalMonitors);
             }
         }
 
