@@ -222,11 +222,15 @@
         <Style Selector="TextBox">
             <Setter Property="MinHeight" Value="{DynamicResource AppInputMinHeight}" />
             <Setter Property="Padding" Value="8,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="Background" Value="{DynamicResource AppInputBrush}" />
             <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
             <Setter Property="BorderBrush" Value="{DynamicResource AppBorderStrongBrush}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="6" />
+        </Style>
+        <Style Selector="TextBox[AcceptsReturn=True]">
+            <Setter Property="VerticalContentAlignment" Value="Top" />
         </Style>
         <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
             <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
@@ -240,6 +244,7 @@
         <Style Selector="ComboBox">
             <Setter Property="MinHeight" Value="{DynamicResource AppInputMinHeight}" />
             <Setter Property="Padding" Value="8,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="Background" Value="{DynamicResource AppInputBrush}" />
             <Setter Property="Foreground" Value="{DynamicResource AppTextPrimaryBrush}" />
             <Setter Property="BorderBrush" Value="{DynamicResource AppBorderStrongBrush}" />

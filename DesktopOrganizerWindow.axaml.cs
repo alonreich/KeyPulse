@@ -24,24 +24,11 @@ namespace KeyPulse
             try
             {
                 InitializeComponent();
+                ApplySavedWindowGeometry();
+
                 _loadResult = DesktopOrganizerService.LoadConfigDetailed();
                 _config = _loadResult.Config;
-
-                if (this.FindControl<CheckBox>("AutoRestoreToggle") is CheckBox autoRestore)
-                {
-                    autoRestore.IsChecked = _config.AutoRestoreOnDisplayChange;
-                    if (_loadResult.IsReadOnly) autoRestore.IsEnabled = false;
-                }
-                if (this.FindControl<CheckBox>("AutoSnapshotToggle") is CheckBox autoSnap)
-                {
-                    autoSnap.IsChecked = _config.AutoPeriodicSnapshotEnabled;
-                    if (_loadResult.IsReadOnly) autoSnap.IsEnabled = false;
-                }
-                if (this.FindControl<ComboBox>("NewIconBehaviorCombo") is ComboBox behaviorCombo)
-                {
-                    behaviorCombo.SelectedIndex = Math.Clamp((int)_config.NewIconBehavior, 0, 2);
-                    if (_loadResult.IsReadOnly) behaviorCombo.IsEnabled = false;
-                }
+                SyncBehavioralControlsFromConfig();
             }
             finally
             {
@@ -66,7 +53,161 @@ namespace KeyPulse
                 SetStatus("Saved layouts were recovered from a previous verified copy.", true);
             }
 
-            Closed += (s, e) => _instance = null;
+            KeyDown += OnWindowKeyDown;
+            DesktopOrganizerService.ProfilesChanged += OnExternalProfilesChanged;
+            Closing += (s, e) => SaveWindowGeometry();
+            Closed += (s, e) =>
+            {
+                DesktopOrganizerService.ProfilesChanged -= OnExternalProfilesChanged;
+                _instance = null;
+            };
+        }
+
+        private void OnWindowKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+        {
+            if (e.Key == Avalonia.Input.Key.Escape && !e.Handled)
+            {
+                e.Handled = true;
+                Close();
+            }
+        }
+
+        private void OnExternalProfilesChanged()
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                _loadResult = DesktopOrganizerService.LoadConfigDetailed();
+                _config = _loadResult.Config;
+                SyncBehavioralControlsFromConfig();
+                RefreshDisplayState();
+                RenderProfiles();
+            });
+        }
+
+        private void ApplySavedWindowGeometry()
+        {
+            try
+            {
+                var appCfg = ConfigStore.Load(out _, out _);
+                var w = (!double.IsNaN(appCfg.DesktopOrganizerWindowWidth) && appCfg.DesktopOrganizerWindowWidth >= MinWidth)
+                    ? appCfg.DesktopOrganizerWindowWidth : 820;
+                var h = (!double.IsNaN(appCfg.DesktopOrganizerWindowHeight) && appCfg.DesktopOrganizerWindowHeight >= MinHeight)
+                    ? appCfg.DesktopOrganizerWindowHeight : 640;
+                Width = w;
+                Height = h;
+
+                if (!double.IsNaN(appCfg.DesktopOrganizerWindowX) && !double.IsNaN(appCfg.DesktopOrganizerWindowY))
+                {
+                    var x = (int)appCfg.DesktopOrganizerWindowX;
+                    var y = (int)appCfg.DesktopOrganizerWindowY;
+                    var monitors = DesktopOrganizerService.GetMonitors();
+                    bool onScreen = monitors.Any(m =>
+                        x + 100 >= m.WorkRect.left && x <= m.WorkRect.right - 100 &&
+                        y + 60 >= m.WorkRect.top && y <= m.WorkRect.bottom - 60);
+                    if (onScreen)
+                    {
+                        WindowStartupLocation = WindowStartupLocation.Manual;
+                        Position = new PixelPoint(x, y);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveWindowGeometry()
+        {
+            try
+            {
+                if (WindowState != WindowState.Normal) return;
+                var x = Position.X;
+                var y = Position.Y;
+                var w = Bounds.Width > 0 ? Bounds.Width : Width;
+                var h = Bounds.Height > 0 ? Bounds.Height : Height;
+                ConfigStore.TryUpdate(cfg =>
+                {
+                    cfg.DesktopOrganizerWindowX = x;
+                    cfg.DesktopOrganizerWindowY = y;
+                    cfg.DesktopOrganizerWindowWidth = w;
+                    cfg.DesktopOrganizerWindowHeight = h;
+                }, out _);
+            }
+            catch { }
+        }
+
+        private void SyncBehavioralControlsFromConfig()
+        {
+            _suppressConfigEvents = true;
+            try
+            {
+                var hasProfiles = _config.Profiles.Count > 0;
+                if (this.FindControl<CheckBox>("AutoRestoreToggle") is CheckBox autoRestore)
+                {
+                    autoRestore.IsChecked = _config.AutoRestoreOnDisplayChange;
+                    autoRestore.IsEnabled = !_loadResult.IsReadOnly && hasProfiles;
+                }
+                if (this.FindControl<TextBlock>("AutoRestoreHintText") is TextBlock autoHint)
+                {
+                    if (!hasProfiles)
+                    {
+                        autoHint.Text = "Save at least one desktop layout above to enable auto-restore on display changes.";
+                        autoHint.Foreground = AppBrush("AppWarningBrush");
+                    }
+                    else
+                    {
+                        autoHint.Text = "Listens for monitor disconnects, reconnects, or sleep wake-ups and snaps icons back into place.";
+                        autoHint.Foreground = AppBrush("AppTextMutedBrush");
+                    }
+                }
+                if (this.FindControl<CheckBox>("AutoSnapshotToggle") is CheckBox autoSnap)
+                {
+                    autoSnap.IsChecked = _config.AutoPeriodicSnapshotEnabled;
+                    autoSnap.IsEnabled = !_loadResult.IsReadOnly;
+                }
+                var intervalDays = Math.Clamp(_config.AutoSnapshotIntervalDays <= 0 ? 3 : _config.AutoSnapshotIntervalDays, 1, 30);
+                _config.AutoSnapshotIntervalDays = intervalDays;
+                if (this.FindControl<TextBox>("AutoSnapshotDaysBox") is TextBox daysBox)
+                {
+                    daysBox.Text = intervalDays.ToString();
+                }
+                UpdateIntervalStepperState();
+
+                if (this.FindControl<ComboBox>("NewIconBehaviorCombo") is ComboBox behaviorCombo)
+                {
+                    behaviorCombo.SelectedIndex = Math.Clamp((int)_config.NewIconBehavior, 0, 3);
+                    behaviorCombo.IsEnabled = !_loadResult.IsReadOnly;
+                }
+                if (this.FindControl<Button>("RestoreDefaultsBtn") is Button resetBtn)
+                {
+                    resetBtn.IsEnabled = !_loadResult.IsReadOnly && !_isBusy;
+                }
+            }
+            finally
+            {
+                _suppressConfigEvents = false;
+            }
+        }
+
+        private void UpdateIntervalStepperState()
+        {
+            bool enabled = !_loadResult.IsReadOnly && _config.AutoPeriodicSnapshotEnabled;
+            int days = Math.Clamp(_config.AutoSnapshotIntervalDays <= 0 ? 3 : _config.AutoSnapshotIntervalDays, 1, 30);
+
+            if (this.FindControl<StackPanel>("AutoSnapshotIntervalPanel") is StackPanel panel)
+            {
+                panel.Opacity = enabled ? 1.0 : 0.48;
+            }
+            if (this.FindControl<TextBox>("AutoSnapshotDaysBox") is TextBox box)
+            {
+                box.IsEnabled = enabled;
+            }
+            if (this.FindControl<Button>("AutoSnapshotMinusBtn") is Button minusBtn)
+            {
+                minusBtn.IsEnabled = enabled && days > 1;
+            }
+            if (this.FindControl<Button>("AutoSnapshotPlusBtn") is Button plusBtn)
+            {
+                plusBtn.IsEnabled = enabled && days < 30;
+            }
         }
 
         public static void OpenOrganizer(Window? owner = null)
@@ -146,6 +287,8 @@ namespace KeyPulse
 
         private void RenderProfiles()
         {
+            SyncBehavioralControlsFromConfig();
+
             if (this.FindControl<StackPanel>("ProfilesStackPanel") is not StackPanel stack) return;
             if (this.FindControl<StackPanel>("EmptyStatePanel") is not StackPanel emptyPanel) return;
 
@@ -192,67 +335,35 @@ namespace KeyPulse
                 ColumnDefinitions = new ColumnDefinitions("*,Auto")
             };
 
-            var leftStack = new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+            var leftStack = new StackPanel
+            {
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 16, 0),
+                ClipToBounds = true
+            };
 
-            var titleRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+            var titleRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             var titleTxt = new TextBlock
             {
                 Text = profile.Name,
                 FontWeight = FontWeight.Bold,
                 FontSize = 14,
                 Foreground = AppBrush("AppTextPrimaryBrush"),
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 4)
             };
-            var renameBox = new TextBox
-            {
-                Text = profile.Name,
-                MinWidth = 220,
-                FontSize = 13,
-                IsVisible = false,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            void CommitRename()
-            {
-                if (!renameBox.IsVisible) return;
-                var newName = (renameBox.Text ?? string.Empty).Trim();
-                renameBox.IsVisible = false;
-                titleTxt.IsVisible = true;
-                if (!string.IsNullOrWhiteSpace(newName) && newName != profile.Name && !_loadResult.IsReadOnly)
-                {
-                    profile.Name = newName;
-                    titleTxt.Text = newName;
-                    DesktopOrganizerService.SaveConfig(_config, out _);
-                    SetStatus($"Renamed layout to \"{newName}\".", true);
-                }
-            }
-
-            renameBox.KeyDown += (s, ke) =>
-            {
-                if (ke.Key == Avalonia.Input.Key.Enter)
-                {
-                    ke.Handled = true;
-                    CommitRename();
-                }
-                else if (ke.Key == Avalonia.Input.Key.Escape)
-                {
-                    ke.Handled = true;
-                    renameBox.Text = profile.Name;
-                    renameBox.IsVisible = false;
-                    titleTxt.IsVisible = true;
-                }
-            };
-            renameBox.LostFocus += (s, le) => CommitRename();
-
             titleRow.Children.Add(titleTxt);
-            titleRow.Children.Add(renameBox);
 
             var typeBadge = new Border
             {
-                Background = new SolidColorBrush(Color.Parse(profile.IsAutoSnapshot ? "#1e3a8a" : "#065f46")),
+                Background = AppBrush("AppPanelBrush"),
+                BorderBrush = AppBrush(profile.IsAutoSnapshot ? "AppAccentBrush" : "AppSuccessBrush"),
+                BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(8, 2),
                 VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 4),
                 Child = new TextBlock
                 {
                     Text = profile.IsAutoSnapshot
@@ -260,7 +371,7 @@ namespace KeyPulse
                         : "MANUAL (Protected)",
                     FontSize = 10,
                     FontWeight = FontWeight.Bold,
-                    Foreground = new SolidColorBrush(Color.Parse(profile.IsAutoSnapshot ? "#bfdbfe" : "#a7f3d0"))
+                    Foreground = AppBrush(profile.IsAutoSnapshot ? "AppAccentBrush" : "AppSuccessBrush")
                 }
             };
             ToolTip.SetTip(typeBadge, profile.IsAutoSnapshot
@@ -272,24 +383,139 @@ namespace KeyPulse
             {
                 var activeBadge = new Border
                 {
-                    Background = new SolidColorBrush(Color.Parse("#166534")),
+                    Background = AppBrush("AppSuccessBrush"),
                     CornerRadius = new CornerRadius(10),
                     Padding = new Thickness(8, 2),
                     VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 8, 4),
                     Child = new TextBlock
                     {
                         Text = "ACTIVE",
                         FontSize = 10,
                         FontWeight = FontWeight.Bold,
-                        Foreground = new SolidColorBrush(Color.Parse("#bbf7d0"))
+                        Foreground = Brushes.White
                     }
                 };
                 titleRow.Children.Add(activeBadge);
             }
 
-            leftStack.Children.Add(titleRow);
+            var renameRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsVisible = false
+            };
 
-            var metaRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+            var renameBox = new TextBox
+            {
+                Text = profile.Name,
+                MaxLength = 32,
+                Width = 200,
+                MaxWidth = 240,
+                Height = 28,
+                MinHeight = 28,
+                Padding = new Thickness(6, 2),
+                FontSize = 12.5,
+                VerticalAlignment = VerticalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            var saveRenameBtn = new Button
+            {
+                Content = "Save",
+                Classes = { "Primary" },
+                Padding = new Thickness(8, 3),
+                FontSize = 11.5,
+                FontWeight = FontWeight.Bold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var cancelRenameBtn = new Button
+            {
+                Content = "Cancel",
+                Classes = { "Secondary" },
+                Padding = new Thickness(8, 3),
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            renameRow.Children.Add(renameBox);
+            renameRow.Children.Add(saveRenameBtn);
+            renameRow.Children.Add(cancelRenameBtn);
+
+            void BeginRename()
+            {
+                renameBox.Text = profile.Name;
+                titleRow.IsVisible = false;
+                renameRow.IsVisible = true;
+                renameBox.Focus();
+                renameBox.SelectAll();
+            }
+
+            void CancelRename()
+            {
+                renameRow.IsVisible = false;
+                titleRow.IsVisible = true;
+            }
+
+            void CommitRename()
+            {
+                if (!renameRow.IsVisible) return;
+                var newName = (renameBox.Text ?? string.Empty).Trim();
+                if (newName.Length > 32) newName = newName.Substring(0, 32).Trim();
+                renameRow.IsVisible = false;
+                titleRow.IsVisible = true;
+                if (string.IsNullOrWhiteSpace(newName))
+                {
+                    SetStatus("⚠️ Layout name cannot be blank.", false);
+                    return;
+                }
+                if (_config.Profiles.Any(p => p.Id != profile.Id && string.Equals(p.Name, newName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    SetStatus($"⚠️ Another layout is already named \"{newName}\".", false);
+                    return;
+                }
+                if (newName != profile.Name && !_loadResult.IsReadOnly)
+                {
+                    profile.Name = newName;
+                    titleTxt.Text = newName;
+                    DesktopOrganizerService.SaveConfig(_config, out _);
+                    SetStatus($"Renamed layout to \"{newName}\".", true);
+                }
+            }
+
+            saveRenameBtn.Click += (s, e) =>
+            {
+                Program.PlaySound("click");
+                CommitRename();
+            };
+
+            cancelRenameBtn.Click += (s, e) =>
+            {
+                Program.PlaySound("click");
+                CancelRename();
+            };
+
+            renameBox.KeyDown += (s, ke) =>
+            {
+                if (ke.Key == Avalonia.Input.Key.Enter)
+                {
+                    ke.Handled = true;
+                    CommitRename();
+                }
+                else if (ke.Key == Avalonia.Input.Key.Escape)
+                {
+                    ke.Handled = true;
+                    CancelRename();
+                }
+            };
+            renameBox.LostFocus += (s, le) => CommitRename();
+
+            leftStack.Children.Add(titleRow);
+            leftStack.Children.Add(renameRow);
+
+            var metaRow = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
             if (profile.DisplayCount != currentMonitorCount)
             {
@@ -375,21 +601,17 @@ namespace KeyPulse
                 MinWidth = 72,
                 IsEnabled = !_loadResult.IsReadOnly && !_isBusy
             };
-            ToolTip.SetTip(renameBtn, "Rename this saved layout profile.");
+            ToolTip.SetTip(renameBtn, "Rename this saved layout profile (max 32 characters).");
             renameBtn.Click += (s, e) =>
             {
                 if (_loadResult.IsReadOnly || _isBusy) return;
-                if (renameBox.IsVisible)
+                if (renameRow.IsVisible)
                 {
                     CommitRename();
                 }
                 else
                 {
-                    renameBox.Text = profile.Name;
-                    titleTxt.IsVisible = false;
-                    renameBox.IsVisible = true;
-                    renameBox.Focus();
-                    renameBox.SelectAll();
+                    BeginRename();
                 }
             };
             buttons.Children.Add(renameBtn);
@@ -452,9 +674,16 @@ namespace KeyPulse
                 IsEnabled = !_loadResult.IsReadOnly && !_isBusy
             };
             ToolTip.SetTip(deleteBtn, "Remove this saved layout profile.");
-            deleteBtn.Click += (s, e) =>
+            deleteBtn.Click += async (s, e) =>
             {
-                if (_loadResult.IsReadOnly) return;
+                if (_loadResult.IsReadOnly || _isBusy) return;
+                Program.PlaySound("click");
+                bool confirmed = await ConfirmActionAsync(
+                    "Delete Saved Layout",
+                    $"Are you sure you want to delete the layout \"{profile.Name}\" ({profile.IconCount} icons)?\n\nThis cannot be undone.",
+                    "Delete Layout");
+                if (!confirmed) return;
+
                 Program.PlaySound("close");
                 _config.Profiles.Remove(profile);
                 if (_config.ActiveProfileId == profile.Id)
@@ -472,6 +701,101 @@ namespace KeyPulse
 
             card.Child = grid;
             return card;
+        }
+
+        private async Task<bool> ConfirmActionAsync(string title, string message, string confirmButtonText)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            var dlg = new Window
+            {
+                Title = title,
+                Width = 440,
+                SizeToContent = SizeToContent.Height,
+                CanResize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Icon = Icon
+            };
+
+            var root = new StackPanel { Margin = new Thickness(20), Spacing = 14 };
+            root.Children.Add(new TextBlock
+            {
+                Text = title,
+                Classes = { "SectionTitle" },
+                FontSize = 16
+            });
+            root.Children.Add(new TextBlock
+            {
+                Text = message,
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 13,
+                Foreground = AppBrush("AppTextPrimaryBrush")
+            });
+
+            var btnRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Spacing = 10,
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+
+            var cancelBtn = new Button
+            {
+                Content = "Cancel",
+                Classes = { "Secondary" },
+                MinWidth = 90
+            };
+            cancelBtn.Click += (_, _) =>
+            {
+                tcs.TrySetResult(false);
+                dlg.Close();
+            };
+
+            var confirmBtn = new Button
+            {
+                Content = confirmButtonText,
+                Classes = { "Danger" },
+                MinWidth = 120
+            };
+            confirmBtn.Click += (_, _) =>
+            {
+                tcs.TrySetResult(true);
+                dlg.Close();
+            };
+
+            dlg.KeyDown += (_, ke) =>
+            {
+                if (ke.Key == Avalonia.Input.Key.Escape)
+                {
+                    ke.Handled = true;
+                    tcs.TrySetResult(false);
+                    dlg.Close();
+                }
+                else if (ke.Key == Avalonia.Input.Key.Enter)
+                {
+                    ke.Handled = true;
+                    tcs.TrySetResult(true);
+                    dlg.Close();
+                }
+            };
+            dlg.Closed += (_, _) => tcs.TrySetResult(false);
+
+            btnRow.Children.Add(cancelBtn);
+            btnRow.Children.Add(confirmBtn);
+            root.Children.Add(btnRow);
+            dlg.Content = root;
+
+            if (IsVisible)
+            {
+                await dlg.ShowDialog(this);
+            }
+            else
+            {
+                dlg.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+                dlg.Show();
+            }
+
+            return await tcs.Task;
         }
 
         private Border CreateBadge(string text)
@@ -499,14 +823,27 @@ namespace KeyPulse
             var saveBtn = this.FindControl<Button>("SaveLayoutBtn");
             var nameBox = this.FindControl<TextBox>("NewProfileNameBox");
             var name = nameBox?.Text?.Trim() ?? string.Empty;
+            if (name.Length > 32)
+            {
+                name = name.Substring(0, 32).Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(name) &&
+                _config.Profiles.Any(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                Program.PlaySound("error");
+                SetStatus($"⚠️ A saved layout named \"{name}\" already exists. Choose a unique name or click Update on that layout.", false);
+                return;
+            }
 
             if (string.IsNullOrWhiteSpace(name))
             {
                 var monitors = DesktopOrganizerService.GetMonitors();
                 var count = monitors.Count;
-                name = count > 1
-                    ? $"Dual-Screen Setup ({DateTime.Now:MMM d, HH:mm})"
-                    : $"Desktop Layout ({DateTime.Now:MMM d, HH:mm})";
+                var baseName = count > 1
+                    ? $"Dual-Screen ({DateTime.Now:MMM d, HH:mm})"
+                    : $"Layout ({DateTime.Now:MMM d, HH:mm})";
+                name = baseName.Length > 32 ? baseName.Substring(0, 32) : baseName;
             }
 
             _isBusy = true;
@@ -598,6 +935,32 @@ namespace KeyPulse
             SetStatus("Displays and icons refreshed.", true);
         }
 
+        private async void RestoreDefaults_Click(object? sender, RoutedEventArgs e)
+        {
+            if (_isBusy || _loadResult.IsReadOnly) return;
+            Program.PlaySound("click");
+
+            bool confirmed = await ConfirmActionAsync(
+                "Restore Default Preferences",
+                "Reset Desktop Organizer automation and icon placement settings back to their out-of-the-box defaults?\n\n• Auto-restore on display change: Off\n• Auto-backup icon layout: Off (Every 3 days)\n• New icon placement: Center of primary screen\n\nYour saved desktop layouts will NOT be deleted.",
+                "Restore Defaults");
+            if (!confirmed) return;
+
+            if (DesktopOrganizerService.ResetBehavioralDefaults(out var err))
+            {
+                _loadResult = DesktopOrganizerService.LoadConfigDetailed();
+                _config = _loadResult.Config;
+                SyncBehavioralControlsFromConfig();
+                Program.PlaySound("click");
+                SetStatus("✓ Restored default Desktop Organizer preferences.", true);
+            }
+            else
+            {
+                Program.PlaySound("error");
+                SetStatus("⚠️ " + err, false);
+            }
+        }
+
         private void AutoRestoreToggle_Changed(object? sender, RoutedEventArgs e)
         {
             if (_suppressConfigEvents || _loadResult.IsReadOnly) return;
@@ -617,6 +980,7 @@ namespace KeyPulse
             if (sender is CheckBox chk)
             {
                 _config.AutoPeriodicSnapshotEnabled = chk.IsChecked == true;
+                UpdateIntervalStepperState();
                 DesktopOrganizerService.SaveConfig(_config, out _);
                 if (_config.AutoPeriodicSnapshotEnabled)
                 {
@@ -625,11 +989,72 @@ namespace KeyPulse
                     _loadResult = DesktopOrganizerService.LoadConfigDetailed();
                     _config = _loadResult.Config;
                     RenderProfiles();
-                    SetStatus("Periodic Auto-Snapshot enabled (keeps latest 5 auto-snapshots; manual profiles are never auto-deleted).", true);
+                    SetStatus($"Auto-backup enabled (every {_config.AutoSnapshotIntervalDays} day{(_config.AutoSnapshotIntervalDays == 1 ? "" : "s")}, keeps latest 5).", true);
                 }
                 else
                 {
-                    SetStatus("Periodic Auto-Snapshot disabled.", true);
+                    SetStatus("Auto-backup disabled.", true);
+                }
+            }
+        }
+
+        private void ApplyAutoSnapshotDays(int newDays)
+        {
+            int clamped = Math.Clamp(newDays, 1, 30);
+            _config.AutoSnapshotIntervalDays = clamped;
+            if (this.FindControl<TextBox>("AutoSnapshotDaysBox") is TextBox box)
+            {
+                box.Text = clamped.ToString();
+            }
+            UpdateIntervalStepperState();
+            if (!_suppressConfigEvents && !_loadResult.IsReadOnly)
+            {
+                DesktopOrganizerService.SaveConfig(_config, out _);
+                SetStatus($"Auto-backup interval set to every {clamped} day{(clamped == 1 ? "" : "s")}.", true);
+            }
+        }
+
+        private void AutoSnapshotMinus_Click(object? sender, RoutedEventArgs e)
+        {
+            if (_loadResult.IsReadOnly || !_config.AutoPeriodicSnapshotEnabled) return;
+            Program.PlaySound("click");
+            ApplyAutoSnapshotDays(_config.AutoSnapshotIntervalDays - 1);
+        }
+
+        private void AutoSnapshotPlus_Click(object? sender, RoutedEventArgs e)
+        {
+            if (_loadResult.IsReadOnly || !_config.AutoPeriodicSnapshotEnabled) return;
+            Program.PlaySound("click");
+            ApplyAutoSnapshotDays(_config.AutoSnapshotIntervalDays + 1);
+        }
+
+        private void AutoSnapshotDays_LostFocus(object? sender, RoutedEventArgs e)
+        {
+            CommitAutoSnapshotDaysBox();
+        }
+
+        private void AutoSnapshotDays_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+        {
+            if (e.Key == Avalonia.Input.Key.Enter)
+            {
+                e.Handled = true;
+                CommitAutoSnapshotDaysBox();
+            }
+        }
+
+        private void CommitAutoSnapshotDaysBox()
+        {
+            if (_suppressConfigEvents || _loadResult.IsReadOnly) return;
+            if (this.FindControl<TextBox>("AutoSnapshotDaysBox") is TextBox box)
+            {
+                if (int.TryParse(box.Text?.Trim(), out int parsed))
+                {
+                    ApplyAutoSnapshotDays(parsed);
+                }
+                else
+                {
+                    box.Text = Math.Clamp(_config.AutoSnapshotIntervalDays, 1, 30).ToString();
+                    SetStatus("⚠️ Please enter a whole number between 1 and 30 days.", false);
                 }
             }
         }
@@ -637,10 +1062,11 @@ namespace KeyPulse
         private void NewIconBehaviorCombo_Changed(object? sender, SelectionChangedEventArgs e)
         {
             if (_suppressConfigEvents || _loadResult.IsReadOnly) return;
-            if (sender is ComboBox cb && cb.SelectedIndex >= 0)
+            if (sender is ComboBox cb && cb.SelectedIndex >= 0 && cb.SelectedIndex <= 3)
             {
                 _config.NewIconBehavior = (UnsavedIconBehavior)cb.SelectedIndex;
                 DesktopOrganizerService.SaveConfig(_config, out _);
+                SetStatus("Updated placement preference for new icons.", true);
             }
         }
 

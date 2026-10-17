@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -121,6 +121,19 @@ namespace KeyPulse
                 _cachedConfig = null;
             }
             NotifyStateChanged();
+        }
+
+        public static ScreenBrightnessConfig ResetToDefaults()
+        {
+            ScreenBrightnessConfig defaults;
+            lock (ConfigLock)
+            {
+                defaults = CreateDefaultConfig();
+                _cachedConfig = defaults;
+                SaveConfigInternal(defaults);
+            }
+            NotifyStateChanged();
+            return defaults;
         }
 
         private static ScreenBrightnessConfig? TryReadConfigFile(string path)
@@ -329,7 +342,20 @@ namespace KeyPulse
                     dd.cb = Marshal.SizeOf<DISPLAY_DEVICE>();
                     if (EnumDisplayDevices(devName, 0, ref dd, 0))
                     {
-                        hwId = (dd.DeviceID ?? string.Empty).Trim();
+                        string ddId = (dd.DeviceID ?? string.Empty).Trim();
+                        string ddKey = (dd.DeviceKey ?? string.Empty).Trim();
+                        if (!string.IsNullOrWhiteSpace(ddId) && !string.IsNullOrWhiteSpace(ddKey))
+                        {
+                            hwId = $"{ddId}|{ddKey}";
+                        }
+                        else if (!string.IsNullOrWhiteSpace(ddId))
+                        {
+                            hwId = ddId;
+                        }
+                        else
+                        {
+                            hwId = ddKey;
+                        }
                         model = (dd.DeviceString ?? string.Empty).Trim();
                     }
 
@@ -365,6 +391,15 @@ namespace KeyPulse
                 .ToList();
         }
 
+        private static bool HardwareIdsMatch(string savedId, string liveId)
+        {
+            if (string.IsNullOrWhiteSpace(savedId) || string.IsNullOrWhiteSpace(liveId)) return false;
+            if (string.Equals(savedId, liveId, StringComparison.OrdinalIgnoreCase)) return true;
+            if (liveId.StartsWith(savedId + "|", StringComparison.OrdinalIgnoreCase)) return true;
+            if (savedId.StartsWith(liveId + "|", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
         /// <summary>
         /// Maps connected physical monitors to stable SlotIndex (0 = Screen A, 1 = Screen B, 2 = Screen C)
         /// using saved HardwareId + ModelName so Windows never swaps Screen A and Screen B after reboot.
@@ -377,25 +412,31 @@ namespace KeyPulse
 
             lock (ConfigLock)
             {
+                bool changedBinding = false;
+
                 foreach (var slot in cfg.Screens.OrderBy(s => s.SlotIndex))
                 {
                     if (!string.IsNullOrWhiteSpace(slot.HardwareId))
                     {
-                        var match = unassignedMonitors.FirstOrDefault(m =>
-                            string.Equals(m.HardwareId, slot.HardwareId, StringComparison.OrdinalIgnoreCase));
+                        var match = unassignedMonitors.FirstOrDefault(m => HardwareIdsMatch(slot.HardwareId, m.HardwareId));
                         if (match != null)
                         {
                             result[slot.SlotIndex] = match;
                             unassignedMonitors.Remove(match);
-                            if (!string.IsNullOrWhiteSpace(match.ModelName))
+                            if (!string.Equals(slot.HardwareId, match.HardwareId, StringComparison.Ordinal))
+                            {
+                                slot.HardwareId = match.HardwareId;
+                                changedBinding = true;
+                            }
+                            if (!string.IsNullOrWhiteSpace(match.ModelName) && slot.ModelName != match.ModelName)
                             {
                                 slot.ModelName = match.ModelName;
+                                changedBinding = true;
                             }
                         }
                     }
                 }
 
-                bool changedBinding = false;
                 for (int slotIdx = 0; slotIdx < MaxScreens && unassignedMonitors.Count > 0; slotIdx++)
                 {
                     if (result.ContainsKey(slotIdx)) continue;
@@ -419,6 +460,16 @@ namespace KeyPulse
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Returns the sorted list of SlotIndex values (0..2) that are physically connected right now.
+        /// </summary>
+        public static List<int> GetConnectedSlotIndices(ScreenBrightnessConfig? cfg = null)
+        {
+            cfg ??= LoadConfig();
+            var bound = BindMonitorsToSlots(cfg);
+            return bound.Keys.OrderBy(k => k).ToList();
         }
 
         /// <summary>
@@ -565,7 +616,7 @@ namespace KeyPulse
                 return state;
             }
 
-            if (TryReadInternalLcdBrightness(out int lcdPercent))
+            if ((mon.IsPrimary || slotIndex == 0) && TryReadInternalLcdBrightness(out int lcdPercent))
             {
                 state.IsInternalLcd = true;
                 state.SupportsBrightness = true;
@@ -709,68 +760,158 @@ namespace KeyPulse
             }
         }
 
-        private static void WriteSingleScreenHardwareWithRetry(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast)
+        private static bool WriteSingleScreenHardwareWithRetry(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast)
         {
-            var cfg = LoadConfig();
-            var bound = BindMonitorsToSlots(cfg);
-            if (!bound.TryGetValue(slotIndex, out var mon)) return;
-
-            if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, writeBrightness, writeContrast))
+            try
             {
-                return;
-            }
+                var cfg = LoadConfig();
+                var bound = BindMonitorsToSlots(cfg);
+                if (!bound.TryGetValue(slotIndex, out var mon)) return false;
 
-            if (writeBrightness && TryWriteInternalLcdBrightness(brightness))
-            {
-                return;
-            }
+                if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, writeBrightness, writeContrast))
+                {
+                    return true;
+                }
 
-            var refreshed = BindMonitorsToSlots(cfg);
-            if (refreshed.TryGetValue(slotIndex, out var freshMon))
-            {
-                TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
+                if ((mon.IsPrimary || slotIndex == 0) && writeBrightness && TryWriteInternalLcdBrightness(brightness))
+                {
+                    return true;
+                }
+
+                var refreshed = BindMonitorsToSlots(cfg);
+                if (refreshed.TryGetValue(slotIndex, out var freshMon))
+                {
+                    return TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
+                }
             }
+            catch
+            {
+            }
+            return false;
         }
 
         #endregion
 
         #region Presets & Rapid Shortcut Key Cycling (Lowest-First + Latest-Step Wins)
 
+        private static int GetSafeTargetBrightness(ScreenBrightnessProfile profile, int slotIndex)
+        {
+            var entry = profile.Targets?.FirstOrDefault(t => t.SlotIndex == slotIndex);
+            return Math.Clamp(entry?.Brightness ?? 50, 0, 100);
+        }
+
+        private static double GetActiveAverageBrightness(ScreenBrightnessProfile profile, IReadOnlyList<int> activeSlots)
+        {
+            if (profile.Targets == null || profile.Targets.Count == 0) return 50.0;
+            if (activeSlots.Count > 0)
+            {
+                double sum = 0;
+                int count = 0;
+                foreach (int slot in activeSlots)
+                {
+                    var t = profile.Targets.FirstOrDefault(x => x.SlotIndex == slot);
+                    if (t != null)
+                    {
+                        sum += Math.Clamp(t.Brightness, 0, 100);
+                        count++;
+                    }
+                }
+                if (count > 0) return sum / count;
+            }
+            return profile.Targets.Average(t => Math.Clamp(t.Brightness, 0, 100));
+        }
+
+        private static bool ProfilesDifferOnConnectedScreens(
+            ScreenBrightnessConfig cfg,
+            ScreenBrightnessProfile a,
+            ScreenBrightnessProfile b,
+            IReadOnlyList<int> connectedSlots)
+        {
+            if (ReferenceEquals(a, b) || a.Id == b.Id) return false;
+            var slotsToCheck = connectedSlots.Count > 0 ? connectedSlots : new[] { 0 };
+            foreach (int slot in slotsToCheck)
+            {
+                var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
+                bool locked = screenCfg?.LockRatio ?? true;
+                var ta = a.Targets?.FirstOrDefault(t => t.SlotIndex == slot);
+                var tb = b.Targets?.FirstOrDefault(t => t.SlotIndex == slot);
+                int ba = Math.Clamp(ta?.Brightness ?? 50, 0, 100);
+                int bb = Math.Clamp(tb?.Brightness ?? 50, 0, 100);
+                if (ba != bb) return true;
+
+                int ca = locked ? ba : Math.Clamp(ta?.Contrast ?? ba, 0, 100);
+                int cb = locked ? bb : Math.Clamp(tb?.Contrast ?? bb, 0, 100);
+                if (ca != cb) return true;
+            }
+            return false;
+        }
+
         public static List<ScreenBrightnessProfile> GetOrderedCycleProfiles(ScreenBrightnessConfig cfg)
         {
-            return cfg.Profiles
-                .Where(p => p.IncludeInCycle)
-                .OrderBy(p => p.Targets.FirstOrDefault(t => t.SlotIndex == 0)?.Brightness ?? 50)
-                .ThenBy(p => p.Targets.Average(t => t.Brightness))
+            NormalizeConfig(cfg);
+            var activeSlots = GetConnectedSlotIndices(cfg);
+            int primarySlot = activeSlots.Count > 0 ? activeSlots[0] : 0;
+
+            var candidates = cfg.Profiles.Where(p => p.IncludeInCycle).ToList();
+            if (candidates.Count == 0 && cfg.Profiles.Count > 0)
+            {
+                candidates = cfg.Profiles.ToList();
+            }
+
+            return candidates
+                .OrderBy(p => GetSafeTargetBrightness(p, primarySlot))
+                .ThenBy(p => GetActiveAverageBrightness(p, activeSlots))
+                .ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
         public static List<ScreenBrightnessProfile> GetTrayQuickActionProfiles(ScreenBrightnessConfig cfg)
         {
+            NormalizeConfig(cfg);
+            var activeSlots = GetConnectedSlotIndices(cfg);
+            int primarySlot = activeSlots.Count > 0 ? activeSlots[0] : 0;
+
             return cfg.Profiles
                 .Where(p => p.ShowInTrayQuickActions)
-                .OrderBy(p => p.Targets.FirstOrDefault(t => t.SlotIndex == 0)?.Brightness ?? 50)
+                .OrderBy(p => GetSafeTargetBrightness(p, primarySlot))
+                .ThenBy(p => GetActiveAverageBrightness(p, activeSlots))
                 .Take(MaxTrayQuickActions)
                 .ToList();
         }
 
         public static string FormatProfileSummary(ScreenBrightnessProfile profile, ScreenBrightnessConfig cfg)
         {
-            var parts = new List<string>(MaxScreens);
-            for (int i = 0; i < MaxScreens; i++)
+            var connectedSlots = GetConnectedSlotIndices(cfg);
+            if (connectedSlots.Count == 0)
             {
-                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == i);
+                connectedSlots.Add(0);
+            }
+
+            var parts = new List<string>(connectedSlots.Count);
+            foreach (int i in connectedSlots)
+            {
+                var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == i);
                 if (target != null)
                 {
-                    string letter = i switch { 0 => "A", 1 => "B", _ => "C" };
-                    parts.Add($"{letter}:{target.Brightness}%");
+                    if (connectedSlots.Count == 1)
+                    {
+                        parts.Add($"{target.Brightness}%");
+                    }
+                    else
+                    {
+                        string letter = i switch { 0 => "A", 1 => "B", _ => "C" };
+                        parts.Add($"{letter}:{target.Brightness}%");
+                    }
                 }
             }
-            return $"{profile.Name} ({string.Join(" | ", parts)})";
+            return parts.Count > 0
+                ? $"{profile.Name} ({string.Join(" | ", parts)})"
+                : profile.Name;
         }
 
         /// <summary>
         /// Advances the brightness cycle step immediately in memory (Lowest first on initial press, then climbing up, then wrapping to lowest).
+        /// Accounts for 1, 2, or 3 active displays by skipping redundant multi-display steps that do not change any currently connected monitor.
         /// Cancels any in-flight hardware command when mashed rapidly in a game and sends only the final target step.
         /// Zero UI/OSD popups so fullscreen games (Fortnite, Valorant, etc.) never lose focus.
         /// </summary>
@@ -785,13 +926,29 @@ namespace KeyPulse
                 var ordered = GetOrderedCycleProfiles(cfg);
                 if (ordered.Count == 0) return;
 
+                var connectedSlots = GetConnectedSlotIndices(cfg);
+
                 int nextIndex = 0;
                 if (_hasStartedCycleInSession && !string.IsNullOrWhiteSpace(cfg.LastCycleProfileId))
                 {
                     int currentIndex = ordered.FindIndex(p => p.Id == cfg.LastCycleProfileId);
-                    if (currentIndex >= 0)
+                    if (currentIndex >= 0 && ordered.Count > 1)
                     {
-                        nextIndex = (currentIndex + 1) % ordered.Count;
+                        var currentProfile = ordered[currentIndex];
+                        int candidateIndex = (currentIndex + 1) % ordered.Count;
+                        nextIndex = candidateIndex;
+
+                        // If presets were built for 2 or 3 displays while fewer displays are currently connected,
+                        // advance to the next step that actually changes a connected display (if one exists).
+                        for (int step = 0; step < ordered.Count - 1; step++)
+                        {
+                            int probeIdx = (currentIndex + 1 + step) % ordered.Count;
+                            if (ProfilesDifferOnConnectedScreens(cfg, currentProfile, ordered[probeIdx], connectedSlots))
+                            {
+                                nextIndex = probeIdx;
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -824,6 +981,9 @@ namespace KeyPulse
                     catch (OperationCanceledException)
                     {
                     }
+                    catch
+                    {
+                    }
                 });
             }
         }
@@ -851,9 +1011,15 @@ namespace KeyPulse
 
             _ = Task.Run(() =>
             {
-                if (!token.IsCancellationRequested)
+                try
                 {
-                    ApplyProfileToHardwareDeltaOnly(profile, token);
+                    if (!token.IsCancellationRequested)
+                    {
+                        ApplyProfileToHardwareDeltaOnly(profile, token);
+                    }
+                }
+                catch
+                {
                 }
             });
         }
@@ -863,7 +1029,7 @@ namespace KeyPulse
             for (int i = 0; i < MaxScreens; i++)
             {
                 var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == i);
-                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == i);
+                var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == i);
                 if (screen != null && target != null)
                 {
                     int b = Math.Clamp(target.Brightness, 0, 100);
@@ -877,36 +1043,37 @@ namespace KeyPulse
         private static void ApplyProfileToHardwareDeltaOnly(ScreenBrightnessProfile profile, CancellationToken token)
         {
             var cfg = LoadConfig();
-            Parallel.For(0, MaxScreens, slotIndex =>
+            var bound = BindMonitorsToSlots(cfg);
+            if (bound.Count == 0) return;
+
+            var connectedSlotIndices = bound.Keys.ToArray();
+            Parallel.ForEach(connectedSlotIndices, slotIndex =>
             {
                 if (token.IsCancellationRequested) return;
                 var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
-                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == slotIndex);
+                var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == slotIndex)
+                          ?? profile.Targets?.FirstOrDefault(t => t.SlotIndex == 0);
                 if (screenCfg == null || target == null) return;
 
                 int targetB = Math.Clamp(target.Brightness, 0, 100);
                 int targetC = screenCfg.LockRatio ? targetB : Math.Clamp(target.Contrast, 0, 100);
 
                 var throttle = Throttles.GetOrAdd(slotIndex, _ => new ScreenWriteThrottle());
-                bool writeB;
-                bool writeC;
-
                 lock (throttle.Sync)
                 {
-                    writeB = targetB != throttle.LastWrittenBrightness;
-                    writeC = targetC != throttle.LastWrittenContrast;
-                    if (!writeB && !writeC)
-                    {
-                        return;
-                    }
                     throttle.PendingBrightness = targetB;
                     throttle.PendingContrast = targetC;
-                    throttle.LastWrittenBrightness = targetB;
-                    throttle.LastWrittenContrast = targetC;
                     throttle.LastWriteUtc = DateTime.UtcNow;
                 }
 
-                WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, writeB, writeC);
+                if (WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, writeBrightness: true, writeContrast: true))
+                {
+                    lock (throttle.Sync)
+                    {
+                        throttle.LastWrittenBrightness = targetB;
+                        throttle.LastWrittenContrast = targetC;
+                    }
+                }
             });
         }
 

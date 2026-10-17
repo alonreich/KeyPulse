@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -18,26 +18,137 @@ namespace KeyPulse
     {
         private static ScreenBrightnessWindow? _instance;
         private readonly ScreenContainerView[] _containers = new ScreenContainerView[ScreenBrightnessService.MaxScreens];
+        private Grid _containersGrid = null!;
         private StackPanel _profilesStack = null!;
         private TextBlock _statusText = null!;
         private CheckBox _globalLockCheck = null!;
+        private bool _suppressGlobalLockEvent;
         private CancellationTokenSource? _liveReadCts;
 
         public ScreenBrightnessWindow()
         {
             Title = "KeyPulse — Screen Brightness & Shortcut Cycling";
-            Width = 880;
-            Height = 740;
             MinWidth = 760;
             MinHeight = 640;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             Background = ScreenBrightnessOverlayWindow.AppBrush("AppBgBrush", "#0B0F19");
+            Focusable = true;
 
+            ApplySavedWindowGeometry();
             BuildUi();
 
+            PointerPressed += OnWindowPointerPressed;
+            KeyDown += OnWindowKeyDown;
             Opened += OnWindowOpened;
+            Closing += (_, _) => SaveWindowGeometry();
             Closed += OnWindowClosed;
             ScreenBrightnessService.StateChanged += OnServiceStateChanged;
+        }
+
+        private void OnWindowPointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            if (e.Source is Visual v)
+            {
+                for (int i = 0; i < _containers.Length; i++)
+                {
+                    var c = _containers[i];
+                    if (c?.InlineRenameBox != null && c.InlineRenameBox.IsVisible)
+                    {
+                        if (!ReferenceEquals(v, c.InlineRenameBox) && !ScreenBrightnessOverlayWindow.IsVisualInside(v, c.InlineRenameBox))
+                        {
+                            c.CommitPendingRename?.Invoke();
+                            Focus();
+                        }
+                    }
+                }
+            }
+        }
+
+        private void OnWindowKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Escape && !e.Handled)
+            {
+                e.Handled = true;
+                Close();
+            }
+        }
+
+        private void ApplySavedWindowGeometry()
+        {
+            try
+            {
+                var appCfg = ConfigStore.Load(out _, out _);
+                Width = (!double.IsNaN(appCfg.ScreenBrightnessWindowWidth) && appCfg.ScreenBrightnessWindowWidth >= MinWidth)
+                    ? appCfg.ScreenBrightnessWindowWidth : 880;
+                Height = (!double.IsNaN(appCfg.ScreenBrightnessWindowHeight) && appCfg.ScreenBrightnessWindowHeight >= MinHeight)
+                    ? appCfg.ScreenBrightnessWindowHeight : 740;
+
+                if (!double.IsNaN(appCfg.ScreenBrightnessWindowX) && !double.IsNaN(appCfg.ScreenBrightnessWindowY))
+                {
+                    var x = (int)appCfg.ScreenBrightnessWindowX;
+                    var y = (int)appCfg.ScreenBrightnessWindowY;
+                    var monitors = DesktopOrganizerService.GetMonitors();
+                    bool onScreen = monitors.Any(m =>
+                        x + 100 >= m.WorkRect.left && x <= m.WorkRect.right - 100 &&
+                        y + 60 >= m.WorkRect.top && y <= m.WorkRect.bottom - 60);
+                    if (onScreen)
+                    {
+                        WindowStartupLocation = WindowStartupLocation.Manual;
+                        Position = new PixelPoint(x, y);
+                    }
+                }
+            }
+            catch
+            {
+                Width = 880;
+                Height = 740;
+            }
+        }
+
+        private void SaveWindowGeometry()
+        {
+            try
+            {
+                if (WindowState != WindowState.Normal) return;
+                var x = Position.X;
+                var y = Position.Y;
+                var w = Bounds.Width > 0 ? Bounds.Width : Width;
+                var h = Bounds.Height > 0 ? Bounds.Height : Height;
+                ConfigStore.TryUpdate(cfg =>
+                {
+                    cfg.ScreenBrightnessWindowX = x;
+                    cfg.ScreenBrightnessWindowY = y;
+                    cfg.ScreenBrightnessWindowWidth = w;
+                    cfg.ScreenBrightnessWindowHeight = h;
+                }, out _);
+            }
+            catch { }
+        }
+
+        private static Border CreateHelpBadge(string tooltipText)
+        {
+            var badge = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9),
+                Width = 17,
+                Height = 17,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Help),
+                Child = new TextBlock
+                {
+                    Text = "?",
+                    FontSize = 10.5,
+                    FontWeight = FontWeight.Bold,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+                }
+            };
+            ToolTip.SetTip(badge, tooltipText);
+            return badge;
         }
 
         public static void OpenWindow(Window? owner = null)
@@ -111,9 +222,10 @@ namespace KeyPulse
             {
                 Content = "Identify Screens (A / B / C)",
                 Classes = { "Secondary" },
-                Padding = new Thickness(12, 7)
+                Padding = new Thickness(12, 7),
+                TabIndex = 1
             };
-            ToolTip.SetTip(identifyBtn, "Flash Screen A, Screen B, Screen C banners on each physical monitor.");
+            ToolTip.SetTip(identifyBtn, "Flash Screen A, Screen B, Screen C banners on each physical monitor so you know which card controls which display.");
             identifyBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -125,8 +237,10 @@ namespace KeyPulse
             {
                 Content = "Read Live Hardware",
                 Classes = { "Secondary" },
-                Padding = new Thickness(12, 7)
+                Padding = new Thickness(12, 7),
+                TabIndex = 2
             };
+            ToolTip.SetTip(refreshBtn, "Query all connected monitors right now to read their current physical brightness and contrast levels.");
             refreshBtn.Click += async (_, _) =>
             {
                 Program.PlaySound("click");
@@ -139,9 +253,10 @@ namespace KeyPulse
             {
                 Content = "Cycle Next Step",
                 Classes = { "Primary" },
-                Padding = new Thickness(12, 7)
+                Padding = new Thickness(12, 7),
+                TabIndex = 3
             };
-            ToolTip.SetTip(testCycleBtn, "Test cycling to the next brightness preset (Lowest -> Highest -> Wraps to Lowest).");
+            ToolTip.SetTip(testCycleBtn, "Test cycling to the next brightness preset (starts at lowest brightness, climbs up, then wraps back to lowest).");
             testCycleBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -180,38 +295,73 @@ namespace KeyPulse
                 ColumnDefinitions = new ColumnDefinitions("*,Auto")
             };
 
+            var globalLockRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 8,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
             _globalLockCheck = new CheckBox
             {
-                Content = "Lock Brightness & Contrast Together Tight (Default across screens — moving one moves the other instantly)",
+                Content = "Sync brightness and contrast across all screens",
                 IsChecked = cfg.GlobalLockBrightnessContrast,
                 FontWeight = FontWeight.SemiBold,
-                FontSize = 12.5
+                FontSize = 12.5,
+                TabIndex = 4
             };
+            ToolTip.SetTip(_globalLockCheck, "When enabled, moving a Brightness slider automatically sets Contrast to the same percentage on all displays. Uncheck to adjust Contrast independently.");
             _globalLockCheck.IsCheckedChanged += OnGlobalLockChanged;
-            Grid.SetColumn(_globalLockCheck, 0);
-            globalBarGrid.Children.Add(_globalLockCheck);
+            globalLockRow.Children.Add(_globalLockCheck);
+            globalLockRow.Children.Add(CreateHelpBadge("Keeps Brightness and Contrast locked at a 1:1 ratio across every connected screen. Turn this off if you want separate Brightness and Contrast sliders for your displays or presets."));
+
+            Grid.SetColumn(globalLockRow, 0);
+            globalBarGrid.Children.Add(globalLockRow);
+
+            var globalBarButtons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 8,
+                VerticalAlignment = VerticalAlignment.Center
+            };
 
             var trayOverlayBtn = new Button
             {
                 Content = "Open Tray Quick Sliders",
                 Classes = { "Secondary" },
                 Padding = new Thickness(10, 5),
-                FontSize = 11.5
+                FontSize = 11.5,
+                TabIndex = 5
             };
+            ToolTip.SetTip(trayOverlayBtn, "Open the compact system tray popup sliders near your clock.");
             trayOverlayBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
                 ScreenBrightnessOverlayWindow.ShowOverlay();
             };
-            Grid.SetColumn(trayOverlayBtn, 1);
-            globalBarGrid.Children.Add(trayOverlayBtn);
+            globalBarButtons.Children.Add(trayOverlayBtn);
+
+            var restoreDefaultsBtn = new Button
+            {
+                Content = "Restore Defaults",
+                Classes = { "Secondary" },
+                Padding = new Thickness(10, 5),
+                FontSize = 11.5,
+                TabIndex = 6
+            };
+            ToolTip.SetTip(restoreDefaultsBtn, "Reset all screen nicknames, sync settings, and brightness presets back to their original factory defaults.");
+            restoreDefaultsBtn.Click += OnRestoreDefaultsClick;
+            globalBarButtons.Children.Add(restoreDefaultsBtn);
+
+            Grid.SetColumn(globalBarButtons, 1);
+            globalBarGrid.Children.Add(globalBarButtons);
 
             globalBar.Child = globalBarGrid;
             contentStack.Children.Add(globalBar);
 
-            var containersGrid = new Grid
+            _containersGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("*,*,*"),
+                ColumnDefinitions = new ColumnDefinitions("*"),
                 ColumnSpacing = 12,
                 MinHeight = 290
             };
@@ -228,10 +378,10 @@ namespace KeyPulse
                         ScreenBrightnessService.NotifyStateChanged();
                     });
                 _containers[i] = view;
-                Grid.SetColumn(view.RootCard, i);
-                containersGrid.Children.Add(view.RootCard);
             }
-            contentStack.Children.Add(containersGrid);
+
+            UpdateVisibleScreenContainers(initialStates);
+            contentStack.Children.Add(_containersGrid);
 
             var presetsPanelBorder = new Border
             {
@@ -279,8 +429,10 @@ namespace KeyPulse
                 Content = "+ Save Current Sliders as Preset",
                 Classes = { "Primary" },
                 Padding = new Thickness(12, 6),
-                FontSize = 12
+                FontSize = 12,
+                TabIndex = 7
             };
+            ToolTip.SetTip(addFromCurrentBtn, "Create a new brightness preset using the current Screen A, B, and C slider percentages.");
             addFromCurrentBtn.Click += OnSaveCurrentSlidersAsPreset;
             addPresetButtons.Children.Add(addFromCurrentBtn);
 
@@ -319,7 +471,8 @@ namespace KeyPulse
                 Content = "Close",
                 Classes = { "Secondary" },
                 MinWidth = 90,
-                Padding = new Thickness(14, 7)
+                Padding = new Thickness(14, 7),
+                TabIndex = 20
             };
             closeBtn.Click += (_, _) => Close();
             Grid.SetColumn(closeBtn, 1);
@@ -332,8 +485,134 @@ namespace KeyPulse
             RenderProfilesList();
         }
 
+        private async Task<bool> ConfirmActionAsync(string title, string message, string confirmButtonText)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            var dlg = new Window
+            {
+                Title = title,
+                Width = 440,
+                SizeToContent = SizeToContent.Height,
+                CanResize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Icon = Icon,
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppBgBrush", "#0B0F19")
+            };
+
+            var root = new StackPanel { Margin = new Thickness(20), Spacing = 14 };
+            root.Children.Add(new TextBlock
+            {
+                Text = title,
+                FontWeight = FontWeight.Bold,
+                FontSize = 16,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC")
+            });
+            root.Children.Add(new TextBlock
+            {
+                Text = message,
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 13,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#E2E8F0")
+            });
+
+            var btnRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Spacing = 10,
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+
+            var cancelBtn = new Button
+            {
+                Content = "Cancel",
+                Classes = { "Secondary" },
+                MinWidth = 90
+            };
+            cancelBtn.Click += (_, _) =>
+            {
+                tcs.TrySetResult(false);
+                dlg.Close();
+            };
+
+            var confirmBtn = new Button
+            {
+                Content = confirmButtonText,
+                Classes = { "Danger" },
+                MinWidth = 120
+            };
+            confirmBtn.Click += (_, _) =>
+            {
+                tcs.TrySetResult(true);
+                dlg.Close();
+            };
+
+            dlg.KeyDown += (_, ke) =>
+            {
+                if (ke.Key == Key.Escape)
+                {
+                    ke.Handled = true;
+                    tcs.TrySetResult(false);
+                    dlg.Close();
+                }
+                else if (ke.Key == Key.Enter)
+                {
+                    ke.Handled = true;
+                    tcs.TrySetResult(true);
+                    dlg.Close();
+                }
+            };
+            dlg.Closed += (_, _) => tcs.TrySetResult(false);
+
+            btnRow.Children.Add(cancelBtn);
+            btnRow.Children.Add(confirmBtn);
+            root.Children.Add(btnRow);
+            dlg.Content = root;
+
+            if (IsVisible)
+            {
+                await dlg.ShowDialog(this);
+            }
+            else
+            {
+                dlg.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+                dlg.Show();
+            }
+
+            return await tcs.Task;
+        }
+
+        private async void OnRestoreDefaultsClick(object? sender, RoutedEventArgs e)
+        {
+            Program.PlaySound("click");
+            bool confirmed = await ConfirmActionAsync(
+                "Restore Default Brightness Settings",
+                "Reset all screen nicknames, brightness/contrast sync toggles, and shortcut presets back to their original factory defaults?\n\n• Sync Brightness & Contrast: On\n• Default levels: 65% across Screen A, B, C\n• Default presets: Night / Low (15%), Balanced (55%), Daylight / Competitive (90%)",
+                "Restore Defaults");
+            if (!confirmed) return;
+
+            var cfg = ScreenBrightnessService.ResetToDefaults();
+            _suppressGlobalLockEvent = true;
+            _globalLockCheck.IsChecked = cfg.GlobalLockBrightnessContrast;
+            _suppressGlobalLockEvent = false;
+
+            var states = ScreenBrightnessService.GetImmediateCachedStates();
+            foreach (var st in states)
+            {
+                if (st.SlotIndex >= 0 && st.SlotIndex < _containers.Length && _containers[st.SlotIndex] != null)
+                {
+                    ScreenContainerBuilder.SyncFromConfigState(_containers[st.SlotIndex], st);
+                }
+            }
+
+            RenderProfilesList();
+            Program.PlaySound("click");
+            SetStatus("✓ Restored default Screen Brightness settings and presets.", true);
+        }
+
         private void OnGlobalLockChanged(object? sender, RoutedEventArgs e)
         {
+            if (_suppressGlobalLockEvent) return;
             bool lockAll = _globalLockCheck.IsChecked == true;
             var cfg = ScreenBrightnessService.LoadConfig();
             cfg.GlobalLockBrightnessContrast = lockAll;
@@ -361,12 +640,16 @@ namespace KeyPulse
                     view.ContrastValueText.Text = b.ToString();
                     ScreenBrightnessService.RequestScreenLevelChange(i, b, b, updateContrastFromLock: true);
                 }
+                ScreenContainerBuilder.UpdateContrastInteractivity(view);
                 view.SuppressSliderEvents = false;
             }
 
+            RenderProfilesList();
+            ScreenBrightnessService.NotifyStateChanged();
+
             SetStatus(lockAll
-                ? "Locked Brightness & Contrast together across all screens."
-                : "Unlocked per-screen Brightness & Contrast sliders.", true);
+                ? "Synced Brightness & Contrast together across all screens."
+                : "Unlocked independent Brightness & Contrast sliders.", true);
         }
 
         private void OnSaveCurrentSlidersAsPreset(object? sender, RoutedEventArgs e)
@@ -389,9 +672,17 @@ namespace KeyPulse
             }
 
             int b0 = targets[0].Brightness;
+            string baseName = $"Custom {b0}%";
+            string candidate = baseName;
+            int suffix = 2;
+            while (cfg.Profiles.Any(p => string.Equals(p.Name, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                candidate = $"{baseName} ({suffix++})";
+            }
+
             var newProfile = new ScreenBrightnessProfile
             {
-                Name = $"Custom {b0}%",
+                Name = candidate,
                 IncludeInCycle = true,
                 ShowInTrayQuickActions = pinnedCount < ScreenBrightnessService.MaxTrayQuickActions,
                 Targets = targets
@@ -448,17 +739,45 @@ namespace KeyPulse
             var nameBox = new TextBox
             {
                 Text = profile.Name,
-                PlaceholderText = "Preset Nickname",
+                MaxLength = 32,
+                PlaceholderText = "Preset name (max 32 chars)",
                 VerticalAlignment = VerticalAlignment.Center
             };
-            nameBox.LostFocus += (_, _) =>
+            ToolTip.SetTip(nameBox, "Enter a unique preset name up to 32 characters.");
+
+            void CommitPresetName()
             {
                 string trimmed = (nameBox.Text ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(trimmed) && trimmed != profile.Name)
+                if (trimmed.Length > 32) trimmed = trimmed.Substring(0, 32).Trim();
+                if (string.IsNullOrWhiteSpace(trimmed))
+                {
+                    nameBox.Text = profile.Name;
+                    SetStatus("⚠️ Preset name cannot be empty.", false);
+                    return;
+                }
+                if (cfg.Profiles.Any(p => p.Id != profile.Id && string.Equals(p.Name, trimmed, StringComparison.OrdinalIgnoreCase)))
+                {
+                    nameBox.Text = profile.Name;
+                    SetStatus($"⚠️ Another preset is already named \"{trimmed}\".", false);
+                    return;
+                }
+                if (trimmed != profile.Name)
                 {
                     profile.Name = trimmed;
+                    nameBox.Text = trimmed;
                     ScreenBrightnessService.SaveConfig(cfg);
                     ScreenBrightnessService.NotifyStateChanged();
+                    SetStatus($"Renamed preset to \"{trimmed}\".", true);
+                }
+            }
+
+            nameBox.LostFocus += (_, _) => CommitPresetName();
+            nameBox.KeyDown += (_, ke) =>
+            {
+                if (ke.Key == Key.Enter)
+                {
+                    ke.Handled = true;
+                    CommitPresetName();
                 }
             };
             Grid.SetColumn(nameBox, 0);
@@ -470,7 +789,9 @@ namespace KeyPulse
 
             var stepBadge = new Border
             {
-                Background = new SolidColorBrush(Color.Parse(profile.IncludeInCycle ? "#0369A1" : "#334155")),
+                Background = profile.IncludeInCycle
+                    ? ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#0369A1")
+                    : ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
                 CornerRadius = new CornerRadius(6),
                 Padding = new Thickness(8, 3),
                 VerticalAlignment = VerticalAlignment.Center,
@@ -488,16 +809,18 @@ namespace KeyPulse
             var togglesPanel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                Spacing = 14,
+                Spacing = 12,
                 VerticalAlignment = VerticalAlignment.Center
             };
 
+            var cycleGroup = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
             var cycleChk = new CheckBox
             {
-                Content = "In Shortcut Cycle",
+                Content = "Include in shortcut cycle",
                 IsChecked = profile.IncludeInCycle,
                 FontSize = 11.5
             };
+            ToolTip.SetTip(cycleChk, "Include this preset when pressing your 'Cycle Screen Brightness' shortcut key.");
             cycleChk.IsCheckedChanged += (_, _) =>
             {
                 profile.IncludeInCycle = cycleChk.IsChecked == true;
@@ -505,14 +828,18 @@ namespace KeyPulse
                 ScreenBrightnessService.NotifyStateChanged();
                 RenderProfilesList();
             };
-            togglesPanel.Children.Add(cycleChk);
+            cycleGroup.Children.Add(cycleChk);
+            cycleGroup.Children.Add(CreateHelpBadge("When checked, pressing your Cycle Brightness shortcut key steps through this preset in lowest-to-highest order."));
+            togglesPanel.Children.Add(cycleGroup);
 
+            var trayGroup = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
             var trayChk = new CheckBox
             {
-                Content = "Tray Quick Action (Max 3)",
+                Content = "Pin to tray menu (Max 3)",
                 IsChecked = profile.ShowInTrayQuickActions,
                 FontSize = 11.5
             };
+            ToolTip.SetTip(trayChk, "Show this preset in the KeyPulse System Tray menu and Quick Sliders popup (up to 3 presets).");
             trayChk.IsCheckedChanged += (_, _) =>
             {
                 if (trayChk.IsChecked == true)
@@ -533,7 +860,9 @@ namespace KeyPulse
                 ScreenBrightnessService.SaveConfig(cfg);
                 ScreenBrightnessService.NotifyStateChanged();
             };
-            togglesPanel.Children.Add(trayChk);
+            trayGroup.Children.Add(trayChk);
+            trayGroup.Children.Add(CreateHelpBadge("Pins this preset as a one-click button inside the System Tray icon menu and Quick Sliders popup (maximum 3 pinned presets)."));
+            togglesPanel.Children.Add(trayGroup);
 
             Grid.SetColumn(togglesPanel, 2);
             topGrid.Children.Add(togglesPanel);
@@ -552,6 +881,7 @@ namespace KeyPulse
                 Padding = new Thickness(10, 5),
                 FontSize = 11.5
             };
+            ToolTip.SetTip(applyBtn, "Apply this preset's brightness and contrast levels to your displays right now.");
             applyBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -594,9 +924,17 @@ namespace KeyPulse
                 FontSize = 11.5,
                 IsEnabled = cfg.Profiles.Count > 1
             };
-            deleteBtn.Click += (_, _) =>
+            ToolTip.SetTip(deleteBtn, "Delete this brightness preset.");
+            deleteBtn.Click += async (_, _) =>
             {
                 if (cfg.Profiles.Count <= 1) return;
+                Program.PlaySound("click");
+                bool confirmed = await ConfirmActionAsync(
+                    "Delete Brightness Preset",
+                    $"Are you sure you want to delete the brightness preset \"{profile.Name}\"?\n\nThis cannot be undone.",
+                    "Delete Preset");
+                if (!confirmed) return;
+
                 Program.PlaySound("close");
                 cfg.Profiles.Remove(profile);
                 ScreenBrightnessService.SaveConfig(cfg);
@@ -610,15 +948,18 @@ namespace KeyPulse
             topGrid.Children.Add(actionBtns);
             rowStack.Children.Add(topGrid);
 
+            var connectedSlots = ScreenBrightnessService.GetConnectedSlotIndices(cfg);
+            if (connectedSlots.Count == 0) connectedSlots.Add(0);
+
             var targetsGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("*,*,*"),
+                ColumnDefinitions = new ColumnDefinitions(string.Join(",", Enumerable.Repeat("*", connectedSlots.Count))),
                 ColumnSpacing = 12
             };
 
-            for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
+            for (int colIdx = 0; colIdx < connectedSlots.Count; colIdx++)
             {
-                int slotIdx = i;
+                int slotIdx = connectedSlots[colIdx];
                 var screenCfg = cfg.Screens.First(s => s.SlotIndex == slotIdx);
                 var target = profile.Targets.First(t => t.SlotIndex == slotIdx);
                 string slotTitle = ScreenBrightnessService.DefaultSlotName(slotIdx);
@@ -628,16 +969,22 @@ namespace KeyPulse
                     slotTitle = $"{slotTitle} ({screenCfg.CustomNickname})";
                 }
 
-                var slotPanel = new StackPanel
+                var slotStack = new StackPanel
+                {
+                    Spacing = 4,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                var bRow = new StackPanel
                 {
                     Orientation = Orientation.Horizontal,
                     Spacing = 6,
                     VerticalAlignment = VerticalAlignment.Center
                 };
 
-                slotPanel.Children.Add(new TextBlock
+                bRow.Children.Add(new TextBlock
                 {
-                    Text = $"{slotTitle}:",
+                    Text = screenCfg.LockRatio ? $"{slotTitle}:" : $"{slotTitle} (Bri):",
                     FontSize = 11.5,
                     FontWeight = FontWeight.SemiBold,
                     Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
@@ -649,9 +996,12 @@ namespace KeyPulse
                     Minimum = 0,
                     Maximum = 100,
                     Value = target.Brightness,
-                    Width = 110,
+                    Width = 105,
                     VerticalAlignment = VerticalAlignment.Center
                 };
+                ToolTip.SetTip(bSlider, screenCfg.LockRatio
+                    ? $"Target Brightness & Contrast for {slotTitle} when this preset is applied."
+                    : $"Target Brightness for {slotTitle} when this preset is applied.");
 
                 var bValText = new TextBlock
                 {
@@ -676,16 +1026,93 @@ namespace KeyPulse
                     ScreenBrightnessService.SaveConfig(cfg);
                 };
 
-                slotPanel.Children.Add(bSlider);
-                slotPanel.Children.Add(bValText);
+                bRow.Children.Add(bSlider);
+                bRow.Children.Add(bValText);
+                slotStack.Children.Add(bRow);
 
-                Grid.SetColumn(slotPanel, slotIdx);
-                targetsGrid.Children.Add(slotPanel);
+                if (!screenCfg.LockRatio)
+                {
+                    var cRow = new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 6,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+
+                    cRow.Children.Add(new TextBlock
+                    {
+                        Text = $"{slotTitle} (Con):",
+                        FontSize = 11.5,
+                        FontWeight = FontWeight.SemiBold,
+                        Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+
+                    var cSlider = new Slider
+                    {
+                        Minimum = 0,
+                        Maximum = 100,
+                        Value = target.Contrast,
+                        Width = 105,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    ToolTip.SetTip(cSlider, $"Target Contrast for {slotTitle} when this preset is applied (independent because Sync ratio is off).");
+
+                    var cValText = new TextBlock
+                    {
+                        Text = $"{target.Contrast}%",
+                        FontSize = 11.5,
+                        FontWeight = FontWeight.Bold,
+                        MinWidth = 36,
+                        Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+
+                    cSlider.PropertyChanged += (_, pe) =>
+                    {
+                        if (pe.Property != RangeBase.ValueProperty) return;
+                        int val = (int)Math.Round(cSlider.Value);
+                        target.Contrast = val;
+                        cValText.Text = $"{val}%";
+                        ScreenBrightnessService.SaveConfig(cfg);
+                    };
+
+                    cRow.Children.Add(cSlider);
+                    cRow.Children.Add(cValText);
+                    slotStack.Children.Add(cRow);
+                }
+
+                Grid.SetColumn(slotStack, colIdx);
+                targetsGrid.Children.Add(slotStack);
             }
 
             rowStack.Children.Add(targetsGrid);
             card.Child = rowStack;
             return card;
+        }
+
+        private void UpdateVisibleScreenContainers(IReadOnlyList<ScreenLiveState> states)
+        {
+            if (_containersGrid == null) return;
+
+            var activeStates = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
+            if (activeStates.Count == 0 && states.Count > 0)
+            {
+                activeStates.Add(states[0]);
+            }
+
+            int activeCount = Math.Max(1, activeStates.Count);
+            _containersGrid.Children.Clear();
+            _containersGrid.ColumnDefinitions = new ColumnDefinitions(string.Join(",", Enumerable.Repeat("*", activeCount)));
+
+            for (int col = 0; col < activeStates.Count; col++)
+            {
+                int slotIdx = activeStates[col].SlotIndex;
+                var view = _containers[slotIdx];
+                view.RootCard.IsVisible = true;
+                Grid.SetColumn(view.RootCard, col);
+                _containersGrid.Children.Add(view.RootCard);
+            }
         }
 
         private async void OnWindowOpened(object? sender, EventArgs e)
@@ -708,12 +1135,14 @@ namespace KeyPulse
 
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
+                    UpdateVisibleScreenContainers(liveStates);
                     int connected = 0;
                     foreach (var st in liveStates)
                     {
                         if (st.IsConnected) connected++;
                         ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
                     }
+                    RenderProfilesList();
                     SetStatus($"Live hardware read complete ({connected} display{(connected == 1 ? "" : "s")} connected).", true);
                 });
             }
@@ -726,7 +1155,16 @@ namespace KeyPulse
         {
             Dispatcher.UIThread.Post(() =>
             {
+                var cfg = ScreenBrightnessService.LoadConfig();
+                if (_globalLockCheck != null && _globalLockCheck.IsChecked != cfg.GlobalLockBrightnessContrast)
+                {
+                    _suppressGlobalLockEvent = true;
+                    _globalLockCheck.IsChecked = cfg.GlobalLockBrightnessContrast;
+                    _suppressGlobalLockEvent = false;
+                }
+
                 var states = ScreenBrightnessService.GetImmediateCachedStates();
+                UpdateVisibleScreenContainers(states);
                 foreach (var st in states)
                 {
                     if (st.SlotIndex >= 0 && st.SlotIndex < _containers.Length && _containers[st.SlotIndex] != null)
@@ -734,6 +1172,8 @@ namespace KeyPulse
                         ScreenContainerBuilder.SyncFromConfigState(_containers[st.SlotIndex], st);
                     }
                 }
+
+                RenderProfilesList();
             });
         }
 

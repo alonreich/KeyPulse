@@ -19,10 +19,11 @@
 
         <!-- Header Block -->
         <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
-            <StackPanel Grid.Column="0" Spacing="4">
+            <StackPanel Grid.Column="0" Spacing="4" Margin="0,0,16,0">
                 <TextBlock Text="Desktop Organizer" Classes="SectionTitle" FontSize="22" />
                 <TextBlock Text="Save, restore, and organize your desktop icon layouts across all your displays."
-                           Classes="Muted" />
+                           Classes="Muted"
+                           TextWrapping="Wrap" />
             </StackPanel>
 
             <!-- Display Status Pill -->
@@ -49,9 +50,9 @@
         <Border Grid.Row="1"
                 Name="AutoArrangeWarning"
                 IsVisible="False"
-                Background="#2D1F05"
+                Background="{DynamicResource AppPanelRaisedBrush}"
                 BorderBrush="{DynamicResource AppWarningBrush}"
-                BorderThickness="1"
+                BorderThickness="1.5"
                 CornerRadius="8"
                 Padding="12,10"
                 Margin="0,0,0,14">
@@ -75,15 +76,19 @@
                 <!-- Profile Name Input for Saving -->
                 <TextBox Grid.Column="0"
                          Name="NewProfileNameBox"
-                         PlaceholderText="Enter layout name (e.g. Work Dual-Screen, Clean Desktop, Gaming)..."
+                         MaxLength="32"
+                         TabIndex="1"
+                         PlaceholderText="Enter layout name (max 32 chars, e.g. Work Dual-Screen, Gaming)..."
                          Margin="0,0,10,0"
-                         VerticalAlignment="Center" />
+                         VerticalAlignment="Center"
+                         VerticalContentAlignment="Center" />
 
                 <!-- Save Button -->
                 <Button Grid.Column="1"
                         Name="SaveLayoutBtn"
                         Content="Save Current Layout"
                         Classes="Primary"
+                        TabIndex="2"
                         Click="SaveLayout_Click"
                         Margin="0,0,8,0"
                         MinWidth="160" />
@@ -93,16 +98,18 @@
                         Name="UndoBtn"
                         Content="Undo Last Restore"
                         Classes="Secondary"
+                        TabIndex="3"
                         Click="Undo_Click"
                         IsEnabled="False"
                         Margin="0,0,8,0"
-                        ToolTip.Tip="Revert icons back to the arrangement before the last restore." />
+                        ToolTip.Tip="Revert icons back to the arrangement right before the last restore." />
 
                 <!-- Refresh Button -->
                 <Button Grid.Column="3"
                         Name="RefreshBtn"
                         Content="Refresh"
                         Classes="Secondary"
+                        TabIndex="4"
                         Click="Refresh_Click"
                         ToolTip.Tip="Re-detect monitors and icon count from Windows Explorer." />
             </Grid>
@@ -145,49 +152,148 @@
         <!-- Automation & Behavioral Settings Panel -->
         <Border Grid.Row="4"
                 Classes="Panel"
-                Padding="14"
+                Padding="14,12"
                 Margin="0,0,0,12">
-            <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto">
+            <StackPanel Spacing="10">
+                <!-- Panel Header + Restore Defaults -->
+                <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Grid.Column="0"
+                               Text="Automation &amp; Restore Preferences"
+                               FontWeight="Bold"
+                               FontSize="13"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            Name="RestoreDefaultsBtn"
+                            Content="Restore Defaults"
+                            Classes="Secondary"
+                            TabIndex="11"
+                            Padding="10,4"
+                            FontSize="12"
+                            Click="RestoreDefaults_Click"
+                            ToolTip.Tip="Reset these desktop automation and icon placement settings back to their original out-of-the-box defaults. Your saved layout profiles are kept safe." />
+                </Grid>
+
                 <!-- Auto-Restore Checkbox -->
-                <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2" Margin="0,0,16,8">
-                    <CheckBox Name="AutoRestoreToggle"
-                              Content="Auto-restore layout on display connection or resolution change"
-                              FontWeight="SemiBold"
-                              IsCheckedChanged="AutoRestoreToggle_Changed" />
-                    <TextBlock Text="Listens for monitor disconnects, reconnects, or sleep wake-ups and automatically snaps icons back into place after displays settle."
+                <StackPanel Spacing="2">
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <CheckBox Name="AutoRestoreToggle"
+                                  Content="Auto-restore layout on display changes"
+                                  FontWeight="SemiBold"
+                                  TabIndex="5"
+                                  IsCheckedChanged="AutoRestoreToggle_Changed" />
+                        <Border Background="{DynamicResource AppPanelRaisedBrush}"
+                                BorderBrush="{DynamicResource AppBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="10"
+                                Width="18" Height="18"
+                                VerticalAlignment="Center"
+                                Cursor="Help"
+                                ToolTip.Tip="When turned on, KeyPulse watches for monitors being plugged in, unplugged, waking from sleep, or changing resolution. Once your screens finish settling, KeyPulse automatically restores your active desktop icon layout.">
+                            <TextBlock Text="?" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Classes="Muted" />
+                        </Border>
+                    </StackPanel>
+                    <TextBlock Name="AutoRestoreHintText"
+                               Text="Listens for monitor disconnects, reconnects, or sleep wake-ups and snaps icons back into place."
                                Classes="Muted"
                                FontSize="11"
                                Margin="28,0,0,0"
                                TextWrapping="Wrap" />
                 </StackPanel>
 
-                <!-- Periodic Auto-Snapshot Checkbox -->
-                <StackPanel Grid.Row="1" Grid.Column="0" Spacing="2" Margin="0,0,16,10">
-                    <CheckBox Name="AutoSnapshotToggle"
-                              Content="Periodically take automated layout snapshots (keeps last 5 auto-snapshots)"
-                              FontWeight="SemiBold"
-                              IsCheckedChanged="AutoSnapshotToggle_Changed" />
-                    <TextBlock Text="Automatically saves your desktop layout every few days when icons move, keeping the 5 newest auto-snapshots. Your manually saved layouts are protected and never auto-deleted."
-                               Classes="Muted"
-                               FontSize="11"
-                               Margin="28,0,0,0"
-                               TextWrapping="Wrap" />
+                <!-- Periodic Auto-Snapshot Checkbox + Interval Stepper -->
+                <StackPanel Spacing="4">
+                    <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <CheckBox Name="AutoSnapshotToggle"
+                                  Content="Auto-backup icon layout"
+                                  FontWeight="SemiBold"
+                                  TabIndex="6"
+                                  Margin="0,0,8,0"
+                                  IsCheckedChanged="AutoSnapshotToggle_Changed" />
+                        <Border Background="{DynamicResource AppPanelRaisedBrush}"
+                                BorderBrush="{DynamicResource AppBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="10"
+                                Width="18" Height="18"
+                                Margin="0,0,14,0"
+                                VerticalAlignment="Center"
+                                Cursor="Help"
+                                ToolTip.Tip="Automatically saves a backup snapshot of your desktop icon positions on your chosen day interval whenever icons have moved. KeyPulse keeps the 5 newest auto-snapshots and never deletes layouts you saved manually.">
+                            <TextBlock Text="?" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Classes="Muted" />
+                        </Border>
+
+                        <StackPanel Name="AutoSnapshotIntervalPanel"
+                                    Orientation="Horizontal"
+                                    Spacing="6"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="Every" VerticalAlignment="Center" FontSize="12" />
+                            <Button Name="AutoSnapshotMinusBtn"
+                                    Content="−"
+                                    Classes="Secondary"
+                                    Width="28" Height="28"
+                                    Padding="0"
+                                    TabIndex="7"
+                                    HorizontalContentAlignment="Center"
+                                    VerticalContentAlignment="Center"
+                                    Click="AutoSnapshotMinus_Click"
+                                    ToolTip.Tip="Decrease auto-backup interval by 1 day (minimum 1 day)." />
+                            <TextBox Name="AutoSnapshotDaysBox"
+                                     Text="3"
+                                     Width="46"
+                                     Height="28"
+                                     MinHeight="28"
+                                     Padding="4,2"
+                                     MaxLength="2"
+                                     TabIndex="8"
+                                     TextAlignment="Center"
+                                     VerticalAlignment="Center"
+                                     VerticalContentAlignment="Center"
+                                     LostFocus="AutoSnapshotDays_LostFocus"
+                                     KeyDown="AutoSnapshotDays_KeyDown"
+                                     ToolTip.Tip="Number of days between automatic desktop icon snapshots (1 to 30 days)." />
+                            <Button Name="AutoSnapshotPlusBtn"
+                                    Content="+"
+                                    Classes="Secondary"
+                                    Width="28" Height="28"
+                                    Padding="0"
+                                    TabIndex="9"
+                                    HorizontalContentAlignment="Center"
+                                    VerticalContentAlignment="Center"
+                                    Click="AutoSnapshotPlus_Click"
+                                    ToolTip.Tip="Increase auto-backup interval by 1 day (maximum 30 days)." />
+                            <TextBlock Text="days (keeps latest 5)" VerticalAlignment="Center" FontSize="12" Classes="Muted" />
+                        </StackPanel>
+                    </WrapPanel>
                 </StackPanel>
 
                 <!-- New Icon Placement Behavior Combo -->
-                <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                    <TextBlock Text="When restoring, place unfamiliar (new) icons:"
+                <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="Place new (unsaved) icons:"
                                Classes="Label"
+                               Margin="0,0,6,0"
                                VerticalAlignment="Center" />
+                    <Border Background="{DynamicResource AppPanelRaisedBrush}"
+                            BorderBrush="{DynamicResource AppBorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Width="18" Height="18"
+                            Margin="0,0,10,0"
+                            VerticalAlignment="Center"
+                            Cursor="Help"
+                            ToolTip.Tip="Decides where KeyPulse places newly created desktop files or folders that did not exist when your layout was originally saved.">
+                        <TextBlock Text="?" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Classes="Muted" />
+                    </Border>
                     <ComboBox Name="NewIconBehaviorCombo"
                               SelectionChanged="NewIconBehaviorCombo_Changed"
-                              MinWidth="290">
-                        <ComboBoxItem Content="Group in a tidy grid in center of screen (Default)" />
-                        <ComboBoxItem Content="Leave new icons untouched right where they are" />
-                        <ComboBoxItem Content="Align down the side of the primary monitor" />
+                              TabIndex="10"
+                              Width="290"
+                              MaxWidth="310">
+                        <ComboBoxItem Content="Group in center of primary screen (Default)" />
+                        <ComboBoxItem Content="Leave new icons untouched in place" />
+                        <ComboBoxItem Content="Align down right side of primary screen" />
+                        <ComboBoxItem Content="Group in center of secondary monitor" />
                     </ComboBox>
-                </StackPanel>
-            </Grid>
+                </WrapPanel>
+            </StackPanel>
         </Border>
 
         <!-- Footer / Status Notification Bar -->
@@ -202,6 +308,7 @@
             <Button Grid.Column="1"
                     Content="Close"
                     Classes="Secondary"
+                    TabIndex="12"
                     Click="Close_Click"
                     MinWidth="90" />
         </Grid>

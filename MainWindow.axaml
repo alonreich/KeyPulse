@@ -155,8 +155,8 @@
                              Margin="0,0,8,0" />
                     <CheckBox Grid.Column="1"
                               Name="ObfuscateCheck"
-                              Content="Blur/Obfuscate"
-                              ToolTip.Tip="Blur the target text in the list to hide passwords or sensitive data"
+                              Content="Hide secret text"
+                              ToolTip.Tip="Blur and encrypt the target text in the shortcut list so passwords or private snippets stay hidden from view"
                               Margin="0,0,8,0"
                               VerticalAlignment="Center"
                               TabIndex="3" />

@@ -856,9 +856,11 @@ namespace KeyPulse
                 int newArranged = 0;
                 if (unsavedItems.Count > 0 && behavior != UnsavedIconBehavior.LeaveInPlace)
                 {
-                    if (behavior == UnsavedIconBehavior.CenterGrid)
+                    if (behavior == UnsavedIconBehavior.CenterGrid || behavior == UnsavedIconBehavior.SecondaryMonitorCenterGrid)
                     {
-                        var targetMon = monitors.Count > 1 ? monitors[1] : primaryMonitor;
+                        var targetMon = (behavior == UnsavedIconBehavior.SecondaryMonitorCenterGrid && monitors.Count > 1)
+                            ? monitors[1]
+                            : primaryMonitor;
                         int centerX = targetMon.WorkRect.left + targetMon.WorkRect.Width / 2;
                         int centerY = targetMon.WorkRect.top + targetMon.WorkRect.Height / 2;
 
@@ -1172,6 +1174,31 @@ namespace KeyPulse
                 }
             }
 
+            return true;
+        }
+
+        public static bool ResetBehavioralDefaults(out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            var loadRes = LoadConfigDetailed();
+            if (loadRes.IsReadOnly)
+            {
+                errorMessage = "Desktop Organizer configuration is currently in read-only recovery mode.";
+                return false;
+            }
+
+            var cfg = loadRes.Config;
+            cfg.AutoRestoreOnDisplayChange = false;
+            cfg.AutoPeriodicSnapshotEnabled = false;
+            cfg.AutoSnapshotIntervalDays = 3;
+            cfg.NewIconBehavior = UnsavedIconBehavior.CenterGrid;
+
+            if (!SaveConfig(cfg, out errorMessage))
+            {
+                return false;
+            }
+
+            RaiseProfilesChanged();
             return true;
         }
     }

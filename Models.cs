@@ -516,8 +516,19 @@ namespace KeyPulse
 
         public double SettingsWindowX { get; set; } = double.NaN;
         public double SettingsWindowY { get; set; } = double.NaN;
-        public double SettingsWindowWidth { get; set; } = 580;
-        public double SettingsWindowHeight { get; set; } = 750;
+        public double SettingsWindowWidth { get; set; } = 640;
+        public double SettingsWindowHeight { get; set; } = 680;
+        public int LastActiveSettingsTab { get; set; } = 0;
+
+        public double DesktopOrganizerWindowX { get; set; } = double.NaN;
+        public double DesktopOrganizerWindowY { get; set; } = double.NaN;
+        public double DesktopOrganizerWindowWidth { get; set; } = 820;
+        public double DesktopOrganizerWindowHeight { get; set; } = 640;
+
+        public double ScreenBrightnessWindowX { get; set; } = double.NaN;
+        public double ScreenBrightnessWindowY { get; set; } = double.NaN;
+        public double ScreenBrightnessWindowWidth { get; set; } = 880;
+        public double ScreenBrightnessWindowHeight { get; set; } = 740;
 
         public bool UseGoogleChromeForUrls { get; set; } = true;
 
@@ -532,7 +543,7 @@ namespace KeyPulse
 
         /// <summary>
         /// ISSUE_9: milliseconds paused between batches of injected characters. 1 = fast (default),
-        /// 6 = normal, 18 = compatible, for old consoles and remote sessions that drop fast input.
+        /// 6 = normal, 18 = compatible, or custom 1..200 ms for old consoles and remote sessions.
         /// </summary>
         public int TypingDelayMs { get; set; } = 1;
 
@@ -624,6 +635,16 @@ namespace KeyPulse
         public double SetupWindowWidth { get; set; }
         public double SetupWindowHeight { get; set; }
 
+        public double DesktopOrganizerWindowX { get; set; } = double.NaN;
+        public double DesktopOrganizerWindowY { get; set; } = double.NaN;
+        public double DesktopOrganizerWindowWidth { get; set; }
+        public double DesktopOrganizerWindowHeight { get; set; }
+
+        public double ScreenBrightnessWindowX { get; set; } = double.NaN;
+        public double ScreenBrightnessWindowY { get; set; } = double.NaN;
+        public double ScreenBrightnessWindowWidth { get; set; }
+        public double ScreenBrightnessWindowHeight { get; set; }
+
         public double ShortcutStatusColumnWidth { get; set; }
         public double ShortcutKeyColumnWidth { get; set; }
         public double ShortcutActionColumnWidth { get; set; }
@@ -642,6 +663,7 @@ namespace KeyPulse
         public string ShortcutSortColumn { get; set; } = string.Empty;
         public bool ShortcutSortDescending { get; set; }
         public bool HasSeenTrayHint { get; set; }
+        public int LastActiveSettingsTab { get; set; }
 
         public BackupWindowLayout Window { get; set; } = new();
 
@@ -683,7 +705,8 @@ namespace KeyPulse
     {
         CenterGrid,
         LeaveInPlace,
-        SideColumn
+        SideColumn,
+        SecondaryMonitorCenterGrid
     }
 
     public class DesktopIconSnapshot

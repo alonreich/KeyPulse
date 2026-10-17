@@ -316,6 +316,7 @@ namespace KeyPulse
                 ShortcutSortColumn = config.ShortcutSortColumn ?? string.Empty,
                 ShortcutSortDescending = config.ShortcutSortDescending,
                 HasSeenTrayHint = config.HasSeenTrayHint,
+                LastActiveSettingsTab = config.LastActiveSettingsTab,
                 Window = new BackupWindowLayout
                 {
                     MainWindowX = config.MainWindowX,
@@ -327,6 +328,14 @@ namespace KeyPulse
                     SettingsWindowY = config.SettingsWindowY,
                     SettingsWindowWidth = config.SettingsWindowWidth,
                     SettingsWindowHeight = config.SettingsWindowHeight,
+                    DesktopOrganizerWindowX = config.DesktopOrganizerWindowX,
+                    DesktopOrganizerWindowY = config.DesktopOrganizerWindowY,
+                    DesktopOrganizerWindowWidth = config.DesktopOrganizerWindowWidth,
+                    DesktopOrganizerWindowHeight = config.DesktopOrganizerWindowHeight,
+                    ScreenBrightnessWindowX = config.ScreenBrightnessWindowX,
+                    ScreenBrightnessWindowY = config.ScreenBrightnessWindowY,
+                    ScreenBrightnessWindowWidth = config.ScreenBrightnessWindowWidth,
+                    ScreenBrightnessWindowHeight = config.ScreenBrightnessWindowHeight,
                     SetupWindowX = config.SetupWindowX,
                     SetupWindowY = config.SetupWindowY,
                     SetupWindowWidth = config.SetupWindowWidth,
