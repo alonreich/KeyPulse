@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.18.1724] - 2026-10-18
+
 ### Added
 - **Active Directory-Style Property Sheet Tabs**: Overhauled Settings & Preferences with 8 dedicated property sheets (General, Hotkeys, Typing, Theme, Displays, Desktop Icons, Updates, Backup) featuring seamless top-mounted tab ears physically connected to the content page container.
 - **Full-Bleed Zero-Padding Systray Icon**: Redesigned multi-resolution application icon (16x16 through 256x256) with zero padding to maximize visual clarity and size in the Windows system tray.
