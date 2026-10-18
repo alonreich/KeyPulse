@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -227,6 +227,7 @@ namespace KeyPulse
         /// </summary>
         public void BringToFront()
         {
+            ResetSearchFilter();
             _userAskedToBeShown = true;
             _startHidden = false;
             ShowInTaskbar = true;
@@ -1191,7 +1192,32 @@ namespace KeyPulse
         public void SearchBox_TextChanged(object? sender, TextChangedEventArgs e)
         {
             _searchText = (sender as TextBox)?.Text ?? string.Empty;
+            if (this.FindControl<Button>("ClearSearchBtn") is Button clearBtn)
+            {
+                clearBtn.IsVisible = !string.IsNullOrEmpty(_searchText);
+            }
             RefreshVisibleHotkeys();
+        }
+
+        public void ClearSearch_Click(object? sender, RoutedEventArgs e)
+        {
+            if (this.FindControl<TextBox>("SearchBox") is TextBox box)
+            {
+                box.Text = string.Empty;
+                box.Focus();
+            }
+        }
+
+        public void SearchBox_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+        {
+            if (e.Key == Avalonia.Input.Key.Escape)
+            {
+                if (sender is TextBox box && !string.IsNullOrEmpty(box.Text))
+                {
+                    box.Text = string.Empty;
+                    e.Handled = true;
+                }
+            }
         }
 
         public void ShortcutHeader_Pressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
@@ -3995,21 +4021,60 @@ namespace KeyPulse
             };
             var titleStack = new StackPanel { Spacing = 2, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
             titleStack.Children.Add(new TextBlock { Text = "Settings & Preferences", Classes = { "SectionTitle" }, FontSize = 20 });
-            titleStack.Children.Add(new TextBlock { Text = "Customize startup, appearance, typing speed, displays, and backups.", Classes = { "Muted" }, FontSize = 11.5 });
+            titleStack.Children.Add(new TextBlock { Text = "Customize startup, privileges, appearance, typing speed, and backups.", Classes = { "Muted" }, FontSize = 11.5 });
             Grid.SetColumn(titleStack, 0);
             headerGrid.Children.Add(titleStack);
 
+            var searchPanel = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                Width = 260,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            };
             var searchBox = new TextBox
             {
-                Width = 230,
                 PlaceholderText = "Search settings...",
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
                 TabIndex = 1,
                 IsTabStop = true
             };
-            ToolTip.SetTip(searchBox, "Type any keyword (e.g. Chrome, theme, delay, brightness, backup, admin) to filter all settings instantly.");
-            Grid.SetColumn(searchBox, 1);
-            headerGrid.Children.Add(searchBox);
+            ToolTip.SetTip(searchBox, "Type any keyword (e.g. startup, admin, theme, sound, typing, brightness, backup) to filter all settings instantly.");
+            var clearSearchBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                IsVisible = false,
+                Margin = new Thickness(4, 0, 0, 0),
+                Padding = new Thickness(8, 2),
+                FontWeight = FontWeight.Bold,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch,
+                VerticalContentAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+            };
+            ToolTip.SetTip(clearSearchBtn, "Clear search filter");
+            clearSearchBtn.Click += (_, _) =>
+            {
+                searchBox.Text = string.Empty;
+                searchBox.Focus();
+            };
+            searchBox.TextChanged += (_, _) =>
+            {
+                clearSearchBtn.IsVisible = !string.IsNullOrEmpty(searchBox.Text);
+            };
+            searchBox.KeyDown += (_, ke) =>
+            {
+                if (ke.Key == Avalonia.Input.Key.Escape && !string.IsNullOrEmpty(searchBox.Text))
+                {
+                    searchBox.Text = string.Empty;
+                    ke.Handled = true;
+                }
+            };
+            Grid.SetColumn(searchBox, 0);
+            Grid.SetColumn(clearSearchBtn, 1);
+            searchPanel.Children.Add(searchBox);
+            searchPanel.Children.Add(clearSearchBtn);
+            Grid.SetColumn(searchPanel, 1);
+            headerGrid.Children.Add(searchPanel);
             Grid.SetRow(headerGrid, 0);
             rootGrid.Children.Add(headerGrid);
 
@@ -4029,7 +4094,7 @@ namespace KeyPulse
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
             };
 
-            string[] tabNames = { "General", "Shortcuts & Typing", "Displays & Desktop", "Backup & Reset" };
+            string[] tabNames = { "General", "Shortcuts & Typing", "Appearance & Displays", "Maintenance & About" };
             var tabButtons = new Button[tabNames.Length];
             for (int i = 0; i < tabNames.Length; i++)
             {
@@ -4106,15 +4171,14 @@ namespace KeyPulse
                 return card;
             }
 
-
             var chk = new CheckBox
             {
-                Content = "Launch KeyPulse at Windows startup",
+                Content = "Start KeyPulse automatically with Windows",
                 IsEnabled = false,
                 TabIndex = 10,
                 IsTabStop = true
             };
-            ToolTip.SetTip(chk, "Automatically start KeyPulse hidden in your system tray whenever you sign in to Windows.");
+            ToolTip.SetTip(chk, "Automatically launch KeyPulse hidden in your system tray whenever you sign in to Windows.");
             var startupStatus = new TextBlock
             {
                 Text = "Checking your Windows startup setting...",
@@ -4155,55 +4219,116 @@ namespace KeyPulse
                 }
                 chk.IsEnabled = true;
             };
-            var startupBody = new StackPanel { Spacing = 4 };
-            startupBody.Children.Add(chk);
-            startupBody.Children.Add(startupStatus);
-            RegisterSettingCard(0, "Windows Startup",
-                "Controls whether KeyPulse launches automatically in the background when you log in to Windows so your hotkeys are always ready.",
-                "startup boot launch windows login automatic tray",
-                startupBody);
 
-            var themeCombo = new ComboBox
+            bool isElevated = Program.IsElevated;
+            bool isWiredAdmin = Program.IsAdminTaskInstalled();
+
+            var adminBadge = new Border
             {
-                Width = 220,
-                MaxWidth = 240,
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                TabIndex = 11,
-                IsTabStop = true,
-                ItemsSource = new List<string> { "Match Windows (Default)", "Light", "Dark" }
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(8, 3),
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
             };
-            ToolTip.SetTip(themeCombo, "Choose whether KeyPulse follows your Windows color mode or stays in Light or Dark mode.");
-            themeCombo.SelectedIndex = _currentConfig.Theme switch
+            var adminBadgeText = new TextBlock
             {
-                "Light" => 1,
-                "Dark" => 2,
-                _ => 0
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold
             };
-            themeCombo.SelectionChanged += (s, ev) =>
+            adminBadge.Child = adminBadgeText;
+
+            var adminStatusDesc = new TextBlock
             {
-                if (suppressSyncEvents) return;
-                _currentConfig.Theme = themeCombo.SelectedIndex switch
-                {
-                    1 => "Light",
-                    2 => "Dark",
-                    _ => "System"
-                };
-                App.ApplyTheme(_currentConfig.Theme);
-                SaveConfig();
-            };
-            var themeBody = new StackPanel { Spacing = 4 };
-            themeBody.Children.Add(themeCombo);
-            themeBody.Children.Add(new TextBlock
-            {
-                Text = "Switches all KeyPulse windows and dialogs between Light and Dark color schemes immediately.",
                 Classes = { "Muted" },
                 FontSize = 11.5,
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
+            };
+
+            var adminBtn = new Button
+            {
+                Classes = { "Secondary" },
+                Padding = new Thickness(14, 7),
+                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                TabIndex = 11,
+                IsTabStop = true
+            };
+
+            void RefreshAdminButtonState(bool elevated, bool wiredAdmin)
+            {
+                if (elevated)
+                {
+                    adminBadge.Background = new SolidColorBrush(Color.Parse("#1e3d2f"));
+                    adminBadge.BorderBrush = new SolidColorBrush(Color.Parse("#2e5c46"));
+                    adminBadge.BorderThickness = new Thickness(1);
+                    adminBadgeText.Text = "Administrator (Elevated Session)";
+                    adminBadgeText.Foreground = AppBrush("AppSuccessSoftBrush");
+                    adminStatusDesc.Text = "Full permissions active. Shortcuts, typing, and hotkeys work inside elevated Command Prompt, PowerShell, Task Manager, and Admin windows.";
+                    adminBtn.Content = "Revert to Standard User Level";
+                    adminBtn.Classes.Remove("Primary");
+                    adminBtn.Classes.Remove("Danger");
+                    if (!adminBtn.Classes.Contains("Secondary")) adminBtn.Classes.Add("Secondary");
+                    ToolTip.SetTip(adminBtn, "Revert KeyPulse to standard user permissions and restart.");
+                }
+                else if (wiredAdmin)
+                {
+                    adminBadge.Background = new SolidColorBrush(Color.Parse("#423512"));
+                    adminBadge.BorderBrush = new SolidColorBrush(Color.Parse("#8a6d1b"));
+                    adminBadge.BorderThickness = new Thickness(1);
+                    adminBadgeText.Text = "Admin Task Wired (Session Unelevated)";
+                    adminBadgeText.Foreground = AppBrush("AppWarningBrush");
+                    adminStatusDesc.Text = "The Administrator logon task exists in Windows, but this current session is running without Administrator rights.";
+                    adminBtn.Content = "Elevate To Match Admin Mode (Requires Restart)";
+                    adminBtn.Classes.Remove("Secondary");
+                    if (!adminBtn.Classes.Contains("Primary")) adminBtn.Classes.Add("Primary");
+                    ToolTip.SetTip(adminBtn, "Click to restart KeyPulse with Administrator rights matching the logon task.");
+                }
+                else
+                {
+                    adminBadge.Background = new SolidColorBrush(Color.Parse("#2a2e37"));
+                    adminBadge.BorderBrush = new SolidColorBrush(Color.Parse("#4a5260"));
+                    adminBadge.BorderThickness = new Thickness(1);
+                    adminBadgeText.Text = "Standard User (Normal Isolation)";
+                    adminBadgeText.Foreground = AppBrush("AppTextMutedBrush");
+                    adminStatusDesc.Text = "Running as standard user. Shortcuts cannot inject keystrokes into windows running as Administrator.";
+                    adminBtn.Content = "Run As Administrator (Requires Restart)";
+                    adminBtn.Classes.Remove("Secondary");
+                    if (!adminBtn.Classes.Contains("Primary")) adminBtn.Classes.Add("Primary");
+                    ToolTip.SetTip(adminBtn, "Restart KeyPulse with Administrator rights to allow hotkeys and typing inside elevated Admin tools.");
+                }
+            }
+            RefreshAdminButtonState(isElevated, isWiredAdmin);
+
+            var sysIntegrationBody = new StackPanel { Spacing = 10 };
+            sysIntegrationBody.Children.Add(chk);
+            sysIntegrationBody.Children.Add(startupStatus);
+            sysIntegrationBody.Children.Add(new Border
+            {
+                Height = 1,
+                Background = AppBrush("AppBorderBrush"),
+                Margin = new Thickness(0, 4)
             });
-            RegisterSettingCard(0, "Appearance & Theme",
-                "Changes the visual color theme across KeyPulse. 'Match Windows' automatically switches between Light and Dark based on your Windows system settings.",
-                "appearance theme dark light mode color windows",
-                themeBody);
+
+            var privHeaderStack = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 8,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            };
+            privHeaderStack.Children.Add(new TextBlock
+            {
+                Text = "Windows Administrator Privileges",
+                FontWeight = FontWeight.SemiBold,
+                FontSize = 12.5,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            });
+            privHeaderStack.Children.Add(adminBadge);
+            sysIntegrationBody.Children.Add(privHeaderStack);
+            sysIntegrationBody.Children.Add(adminStatusDesc);
+            sysIntegrationBody.Children.Add(adminBtn);
+
+            RegisterSettingCard(0, "Windows Integration & Privileges",
+                "Controls whether KeyPulse starts automatically with Windows and whether it runs with Administrator rights to inject keys into elevated consoles and admin apps.",
+                "startup boot launch windows login automatic tray admin administrator privilege elevate uac runas rights",
+                sysIntegrationBody);
 
             var soundChk = new CheckBox
             {
@@ -4235,183 +4360,15 @@ namespace KeyPulse
                 "sound audio effects mute click chime volume",
                 soundBody);
 
-            var updateStatus = new TextBlock
-            {
-                Classes = { "Muted" },
-                FontSize = 11.5,
-                TextWrapping = Avalonia.Media.TextWrapping.Wrap
-            };
-            var updateBtn = new Button
-            {
-                Content = "Check for Updates",
-                Classes = { "Secondary" },
-                Width = 220,
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                TabIndex = 13,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(updateBtn, "Check GitHub for a newer release of KeyPulse.");
-            UpdateCheckResult? lastCheckResult = null;
-            updateBtn.Click += async (s, ev) =>
-            {
-                if (lastCheckResult.HasValue && lastCheckResult.Value.UpdateAvailable)
-                {
-                    ShowUpdateNotification(lastCheckResult.Value);
-                    return;
-                }
 
-                updateBtn.IsEnabled = false;
-                var isDevUpdate = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KEYPULSE_DEV_UPDATE_SOURCE"));
-                updateStatus.Text = isDevUpdate
-                    ? "Checking local .\\compiled\\KeyPulse.exe for a newer build..."
-                    : "Checking github.com for a newer release...";
-                updateStatus.Foreground = AppBrush("AppTextMutedBrush");
-                try
-                {
-                    var result = await UpdateChecker.CheckAsync(_currentConfig.UpdateChannel ?? "Stable");
-                    if (!result.Succeeded)
-                    {
-                        updateStatus.Text = "Could not check for updates: " + result.Message;
-                        updateStatus.Foreground = AppBrush("AppWarningBrush");
-                    }
-                    else if (result.UpdateAvailable)
-                    {
-                        lastCheckResult = result;
-                        updateStatus.Text = !string.IsNullOrWhiteSpace(result.LocalInstallerPath)
-                            ? $"Local dev build {result.LatestVersion} is ready in .\\compiled. You have {Program.AppVersion}."
-                            : $"Version {result.LatestVersion} is available. You have {Program.AppVersion}.";
-                        updateStatus.Foreground = AppBrush("AppWarningBrush");
-                        updateBtn.Content = "View What's New & Update";
-                        updateBtn.Classes.Remove("Secondary");
-                        updateBtn.Classes.Add("Primary");
-                        ShowUpdateNotification(result);
-                    }
-                    else
-                    {
-                        updateStatus.Text = $"You are running the latest release ({Program.AppVersion}) on the {_currentConfig.UpdateChannel ?? "Stable"} channel.";
-                        updateStatus.Foreground = AppBrush("AppSuccessSoftBrush");
-                    }
-                }
-                finally
-                {
-                    updateBtn.IsEnabled = true;
-                }
+            var speedPresetPanel = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 6
             };
-            var autoUpdateCheck = new CheckBox
-            {
-                Content = "Automatically check for updates on startup",
-                IsChecked = _currentConfig.AutoCheckForUpdates,
-                TabIndex = 14,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(autoUpdateCheck, "When checked, KeyPulse automatically checks for new releases on startup and notifies you when an update is available.");
-            autoUpdateCheck.IsCheckedChanged += (s, ev) =>
-            {
-                if (suppressSyncEvents) return;
-                _currentConfig.AutoCheckForUpdates = autoUpdateCheck.IsChecked == true;
-                SaveConfig();
-            };
-
-            var channelLabel = new TextBlock
-            {
-                Text = "Release Channel:",
-                FontSize = 12,
-                Margin = new Thickness(0, 4, 0, 0),
-                Classes = { "Muted" }
-            };
-            var channelCombo = new ComboBox
-            {
-                ItemsSource = new[] { "Stable", "Beta" },
-                SelectedItem = string.Equals(_currentConfig.UpdateChannel, "Beta", StringComparison.OrdinalIgnoreCase) ? "Beta" : "Stable",
-                Width = 140,
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                TabIndex = 15,
-                IsTabStop = true
-            };
-            channelCombo.SelectionChanged += (s, ev) =>
-            {
-                if (suppressSyncEvents) return;
-                _currentConfig.UpdateChannel = channelCombo.SelectedItem as string ?? "Stable";
-                SaveConfig();
-            };
-
-            var aboutBody = new StackPanel { Spacing = 6 };
-            aboutBody.Children.Add(new TextBlock
-            {
-                Text = "Installed version: KeyPulse v" + Program.AppVersion,
-                FontSize = 12,
-                Classes = { "Muted" }
-            });
-            aboutBody.Children.Add(autoUpdateCheck);
-            aboutBody.Children.Add(channelLabel);
-            aboutBody.Children.Add(channelCombo);
-            aboutBody.Children.Add(updateBtn);
-            aboutBody.Children.Add(updateStatus);
-            RegisterSettingCard(0, "About & Software Updates",
-                "Shows your currently installed KeyPulse version and checks online for newer releases.",
-                "about version update check release github channel beta",
-                aboutBody);
-
-
-            var chromeChk = new CheckBox
-            {
-                Content = "Open web links in Google Chrome",
-                IsChecked = _currentConfig.UseGoogleChromeForUrls,
-                TabIndex = 20,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(chromeChk, "When checked, 'Launch website' shortcuts open directly in Google Chrome. Uncheck to use your default Windows web browser.");
-            var chromeWarningText = new TextBlock
-            {
-                Text = "⚠️ Google Chrome was not detected on this PC — web links will automatically fall back to your default Windows browser.",
-                Foreground = AppBrush("AppWarningBrush"),
-                FontSize = 11.5,
-                TextWrapping = Avalonia.Media.TextWrapping.Wrap,
-                IsVisible = _currentConfig.UseGoogleChromeForUrls && !TryFindGoogleChrome(out _)
-            };
-            void RefreshChromeWarning()
-            {
-                chromeWarningText.IsVisible = (chromeChk.IsChecked == true) && !TryFindGoogleChrome(out _);
-            }
-            chromeChk.IsCheckedChanged += (s, ev) =>
-            {
-                if (suppressSyncEvents) return;
-                _currentConfig.UseGoogleChromeForUrls = chromeChk.IsChecked == true;
-                RefreshChromeWarning();
-                SaveConfig();
-            };
-            var browserBody = new StackPanel { Spacing = 4 };
-            browserBody.Children.Add(chromeChk);
-            browserBody.Children.Add(chromeWarningText);
-            browserBody.Children.Add(new TextBlock
-            {
-                Text = "Applies to shortcuts using the 'Launch website' action. Turn off to open links in Edge, Firefox, Brave, or your default browser.",
-                Classes = { "Muted" },
-                FontSize = 11.5,
-                TextWrapping = Avalonia.Media.TextWrapping.Wrap
-            });
-            RegisterSettingCard(1, "Web Browser for URLs",
-                "Determines whether website shortcuts explicitly launch Google Chrome or open in your default Windows browser.",
-                "browser google chrome url web link website edge firefox",
-                browserBody);
-
-            var speedCombo = new ComboBox
-            {
-                Width = 285,
-                MaxWidth = 300,
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                TabIndex = 21,
-                IsTabStop = true,
-                ItemsSource = new List<string>
-                {
-                    "Fast (1 ms — Recommended)",
-                    "Normal (6 ms)",
-                    "Compatible (18 ms — Consoles & Remote)",
-                    "Custom Delay (1–200 ms)"
-                }
-            };
-            ToolTip.SetTip(speedCombo, "Choose how fast KeyPulse types out characters when using the 'Type text' shortcut action.");
+            int[] speedPresetValues = { TypingDelayFast, TypingDelayNormal, TypingDelayCompatible };
+            string[] speedPresetNames = { "Fast (1 ms — Recommended)", "Normal (6 ms)", "Compatible (18 ms)" };
+            var speedPresetButtons = new Button[speedPresetValues.Length];
 
             var speedCustomPanel = new StackPanel
             {
@@ -4422,7 +4379,7 @@ namespace KeyPulse
             };
             speedCustomPanel.Children.Add(new TextBlock
             {
-                Text = "Keystroke delay:",
+                Text = "Custom delay:",
                 FontSize = 12,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
             });
@@ -4435,7 +4392,7 @@ namespace KeyPulse
                 Padding = new Avalonia.Thickness(0),
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
                 VerticalContentAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                TabIndex = 22,
+                TabIndex = 24,
                 IsTabStop = true
             };
             ToolTip.SetTip(speedMinusBtn, "Decrease typing delay by 1 ms (faster typing).");
@@ -4450,7 +4407,7 @@ namespace KeyPulse
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
                 VerticalContentAlignment = Avalonia.Layout.VerticalAlignment.Center,
                 Text = NormalizeTypingDelay(_currentConfig.TypingDelayMs).ToString(),
-                TabIndex = 23,
+                TabIndex = 25,
                 IsTabStop = true
             };
             ToolTip.SetTip(speedCustomBox, "Enter a custom millisecond pause between characters (1 to 200 ms). Higher numbers prevent dropped letters in slow remote desktop or console windows.");
@@ -4463,7 +4420,7 @@ namespace KeyPulse
                 Padding = new Avalonia.Thickness(0),
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
                 VerticalContentAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                TabIndex = 24,
+                TabIndex = 26,
                 IsTabStop = true
             };
             ToolTip.SetTip(speedPlusBtn, "Increase typing delay by 1 ms (more compatible with slow apps).");
@@ -4472,7 +4429,7 @@ namespace KeyPulse
             speedCustomPanel.Children.Add(speedPlusBtn);
             speedCustomPanel.Children.Add(new TextBlock
             {
-                Text = "ms between characters (1–200 ms)",
+                Text = "ms pause between characters (1–200 ms)",
                 Classes = { "Muted" },
                 FontSize = 11.5,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
@@ -4482,25 +4439,18 @@ namespace KeyPulse
             {
                 int clamped = NormalizeTypingDelay(delayMs);
                 speedCustomBox.Text = clamped.ToString();
-                int idx = clamped switch
+                for (int i = 0; i < speedPresetValues.Length; i++)
                 {
-                    TypingDelayFast => 0,
-                    TypingDelayNormal => 1,
-                    TypingDelayCompatible => 2,
-                    _ => 3
-                };
-                if (speedCombo.SelectedIndex != idx)
-                {
-                    speedCombo.SelectedIndex = idx;
+                    bool isMatch = speedPresetValues[i] == clamped;
+                    speedPresetButtons[i].Classes.Remove("Primary");
+                    speedPresetButtons[i].Classes.Remove("Secondary");
+                    speedPresetButtons[i].Classes.Add(isMatch ? "Primary" : "Secondary");
                 }
-                bool isCustom = speedCombo.SelectedIndex == 3;
-                speedCustomPanel.Opacity = isCustom ? 1.0 : 0.65;
-                speedCustomBox.IsEnabled = isCustom;
-                speedMinusBtn.IsEnabled = isCustom && clamped > 1;
-                speedPlusBtn.IsEnabled = isCustom && clamped < 200;
+                speedMinusBtn.IsEnabled = clamped > 1;
+                speedPlusBtn.IsEnabled = clamped < 200;
             }
 
-            void ApplyTypingDelayMs(int newDelay, bool forceCustomIndex = false)
+            void ApplyTypingDelayMs(int newDelay)
             {
                 int clamped = NormalizeTypingDelay(newDelay);
                 _currentConfig.TypingDelayMs = clamped;
@@ -4508,13 +4458,7 @@ namespace KeyPulse
                 suppressSyncEvents = true;
                 try
                 {
-                    speedCustomBox.Text = clamped.ToString();
-                    if (forceCustomIndex) speedCombo.SelectedIndex = 3;
-                    bool isCustom = speedCombo.SelectedIndex == 3;
-                    speedCustomPanel.Opacity = isCustom ? 1.0 : 0.65;
-                    speedCustomBox.IsEnabled = isCustom;
-                    speedMinusBtn.IsEnabled = isCustom && clamped > 1;
-                    speedPlusBtn.IsEnabled = isCustom && clamped < 200;
+                    SyncSpeedUiFromValue(clamped);
                 }
                 finally
                 {
@@ -4523,38 +4467,45 @@ namespace KeyPulse
                 SaveConfig();
             }
 
-            SyncSpeedUiFromValue(_currentConfig.TypingDelayMs);
-
-            speedCombo.SelectionChanged += (s, ev) =>
+            for (int i = 0; i < speedPresetValues.Length; i++)
             {
-                if (suppressSyncEvents) return;
-                if (speedCombo.SelectedIndex == 0) ApplyTypingDelayMs(TypingDelayFast);
-                else if (speedCombo.SelectedIndex == 1) ApplyTypingDelayMs(TypingDelayNormal);
-                else if (speedCombo.SelectedIndex == 2) ApplyTypingDelayMs(TypingDelayCompatible);
-                else
+                int presetVal = speedPresetValues[i];
+                var spBtn = new Button
                 {
-                    ApplyTypingDelayMs(_currentConfig.TypingDelayMs, forceCustomIndex: true);
-                    speedCustomBox.Focus();
-                    speedCustomBox.SelectAll();
-                }
-            };
+                    Content = speedPresetNames[i],
+                    Classes = { _currentConfig.TypingDelayMs == presetVal ? "Primary" : "Secondary" },
+                    Padding = new Thickness(10, 5),
+                    FontSize = 11.5,
+                    Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                    TabIndex = 21 + i,
+                    IsTabStop = true
+                };
+                spBtn.Click += (_, _) =>
+                {
+                    Program.PlaySound("click");
+                    ApplyTypingDelayMs(presetVal);
+                };
+                speedPresetButtons[i] = spBtn;
+                speedPresetPanel.Children.Add(spBtn);
+            }
+            SyncSpeedUiFromValue(_currentConfig.TypingDelayMs);
 
             speedMinusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                ApplyTypingDelayMs(_currentConfig.TypingDelayMs - 1, forceCustomIndex: true);
+                ApplyTypingDelayMs(_currentConfig.TypingDelayMs - 1);
             };
             speedPlusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                ApplyTypingDelayMs(_currentConfig.TypingDelayMs + 1, forceCustomIndex: true);
+                ApplyTypingDelayMs(_currentConfig.TypingDelayMs + 1);
             };
             void CommitCustomSpeedBox()
             {
                 if (suppressSyncEvents) return;
                 if (int.TryParse(speedCustomBox.Text?.Trim(), out int parsed))
                 {
-                    ApplyTypingDelayMs(parsed, forceCustomIndex: true);
+                    ApplyTypingDelayMs(parsed);
                 }
                 else
                 {
@@ -4571,8 +4522,8 @@ namespace KeyPulse
                 }
             };
 
-            var speedBody = new StackPanel { Spacing = 4 };
-            speedBody.Children.Add(speedCombo);
+            var speedBody = new StackPanel { Spacing = 6 };
+            speedBody.Children.Add(speedPresetPanel);
             speedBody.Children.Add(speedCustomPanel);
             speedBody.Children.Add(new TextBlock
             {
@@ -4582,17 +4533,157 @@ namespace KeyPulse
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
             RegisterSettingCard(1, "Simulated Typing Speed",
-                "Controls the pause (in milliseconds) between keystrokes injected by the 'Type text' action. Fast (1 ms) is instant; Compatible (18 ms) or Custom (up to 200 ms) prevents dropped characters in laggy remote sessions.",
+                "Controls the pause (in milliseconds) between keystrokes injected by the 'Type text' action. Fast (1 ms) is instant; Compatible (18 ms) or Custom prevents dropped characters in laggy remote sessions.",
                 "typing speed delay milliseconds ms fast normal compatible console remote rdp",
                 speedBody);
 
+            var browserSegmentPanel = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 8
+            };
+            var sysBrowserBtn = new Button
+            {
+                Content = "Default System Browser (Recommended)",
+                Classes = { !_currentConfig.UseGoogleChromeForUrls ? "Primary" : "Secondary" },
+                Padding = new Thickness(12, 6),
+                FontSize = 12,
+                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                TabIndex = 27,
+                IsTabStop = true
+            };
+            var chromeBrowserBtn = new Button
+            {
+                Content = "Google Chrome",
+                Classes = { _currentConfig.UseGoogleChromeForUrls ? "Primary" : "Secondary" },
+                Padding = new Thickness(12, 6),
+                FontSize = 12,
+                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                TabIndex = 28,
+                IsTabStop = true
+            };
+            browserSegmentPanel.Children.Add(sysBrowserBtn);
+            browserSegmentPanel.Children.Add(chromeBrowserBtn);
+
+            var chromeWarningText = new TextBlock
+            {
+                Foreground = AppBrush("AppWarningBrush"),
+                FontSize = 11.5,
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap
+            };
+            void RefreshBrowserStateUi()
+            {
+                bool useChrome = _currentConfig.UseGoogleChromeForUrls;
+                sysBrowserBtn.Classes.Remove("Primary");
+                sysBrowserBtn.Classes.Remove("Secondary");
+                sysBrowserBtn.Classes.Add(!useChrome ? "Primary" : "Secondary");
+
+                chromeBrowserBtn.Classes.Remove("Primary");
+                chromeBrowserBtn.Classes.Remove("Secondary");
+                chromeBrowserBtn.Classes.Add(useChrome ? "Primary" : "Secondary");
+
+                bool chromeFound = TryFindGoogleChrome(out _);
+                if (useChrome && !chromeFound)
+                {
+                    chromeWarningText.Text = "⚠️ Google Chrome was not detected on this PC — web links will automatically fall back to your default Windows browser.";
+                    chromeWarningText.Foreground = AppBrush("AppWarningBrush");
+                    chromeWarningText.IsVisible = true;
+                }
+                else if (useChrome)
+                {
+                    chromeWarningText.Text = "✓ Google Chrome detected. Web link shortcuts will launch explicitly in Chrome.";
+                    chromeWarningText.Foreground = AppBrush("AppSuccessSoftBrush");
+                    chromeWarningText.IsVisible = true;
+                }
+                else
+                {
+                    chromeWarningText.Text = "✓ Links will open in your default Windows browser (Edge, Firefox, Brave, etc.).";
+                    chromeWarningText.Foreground = AppBrush("AppTextMutedBrush");
+                    chromeWarningText.IsVisible = true;
+                }
+            }
+            RefreshBrowserStateUi();
+
+            sysBrowserBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                _currentConfig.UseGoogleChromeForUrls = false;
+                RefreshBrowserStateUi();
+                SaveConfig();
+            };
+            chromeBrowserBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                _currentConfig.UseGoogleChromeForUrls = true;
+                RefreshBrowserStateUi();
+                SaveConfig();
+            };
+
+            var browserBody = new StackPanel { Spacing = 6 };
+            browserBody.Children.Add(browserSegmentPanel);
+            browserBody.Children.Add(chromeWarningText);
+            RegisterSettingCard(1, "Web Browser for URLs",
+                "Determines whether website shortcuts explicitly launch Google Chrome or open in your default Windows browser.",
+                "browser google chrome url web link website edge firefox default",
+                browserBody);
+
+            var themeSegmentedPanel = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 6
+            };
+            string[] themeOptions = { "Match Windows (Default)", "Light", "Dark" };
+            string[] themeValues = { "System", "Light", "Dark" };
+            var themeSegmentButtons = new Button[themeOptions.Length];
+            for (int i = 0; i < themeOptions.Length; i++)
+            {
+                int capturedIdx = i;
+                var tBtn = new Button
+                {
+                    Content = themeOptions[i],
+                    Classes = { string.Equals(_currentConfig.Theme, themeValues[i], StringComparison.OrdinalIgnoreCase) ? "Primary" : "Secondary" },
+                    Padding = new Thickness(14, 6),
+                    FontSize = 12,
+                    Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                    TabIndex = 30 + i,
+                    IsTabStop = true
+                };
+                tBtn.Click += (_, _) =>
+                {
+                    Program.PlaySound("click");
+                    _currentConfig.Theme = themeValues[capturedIdx];
+                    App.ApplyTheme(_currentConfig.Theme);
+                    SaveConfig();
+                    for (int j = 0; j < themeSegmentButtons.Length; j++)
+                    {
+                        themeSegmentButtons[j].Classes.Remove("Primary");
+                        themeSegmentButtons[j].Classes.Remove("Secondary");
+                        themeSegmentButtons[j].Classes.Add(j == capturedIdx ? "Primary" : "Secondary");
+                    }
+                };
+                themeSegmentButtons[i] = tBtn;
+                themeSegmentedPanel.Children.Add(tBtn);
+            }
+            var themeBody = new StackPanel { Spacing = 6 };
+            themeBody.Children.Add(themeSegmentedPanel);
+            themeBody.Children.Add(new TextBlock
+            {
+                Text = "Switches all KeyPulse windows and dialogs between Light and Dark color schemes immediately.",
+                Classes = { "Muted" },
+                FontSize = 11.5,
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap
+            });
+            RegisterSettingCard(2, "Appearance & Theme",
+                "Changes the visual color theme across KeyPulse. 'Match Windows' automatically switches between Light and Dark based on your Windows system settings.",
+                "appearance theme dark light mode color windows",
+                themeBody);
 
             var sbCfg = ScreenBrightnessService.LoadConfig();
             var sbLockChk = new CheckBox
             {
-                Content = "Sync brightness and contrast across all screens",
+                Content = "Lock brightness and contrast together across all screens",
                 IsChecked = sbCfg.GlobalLockBrightnessContrast,
-                TabIndex = 30,
+                TabIndex = 33,
                 IsTabStop = true
             };
             ToolTip.SetTip(sbLockChk, "When checked, moving a Brightness slider automatically updates Contrast to the same level on all monitors.");
@@ -4617,13 +4708,13 @@ namespace KeyPulse
 
             var openBrightnessBtn = new Button
             {
-                Content = "Open Screen Brightness & Presets...",
+                Content = "Open Screen Brightness Manager...",
                 Classes = { "Secondary" },
                 Width = 270,
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
                 Margin = new Avalonia.Thickness(0, 4, 0, 0),
-                TabIndex = 31,
+                TabIndex = 34,
                 IsTabStop = true
             };
             ToolTip.SetTip(openBrightnessBtn, "Open the Screen Brightness & Contrast manager to tune per-monitor sliders and shortcut cycle presets.");
@@ -4672,7 +4763,7 @@ namespace KeyPulse
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
                 Margin = new Avalonia.Thickness(0, 4, 0, 0),
-                TabIndex = 32,
+                TabIndex = 35,
                 IsTabStop = true
             };
             ToolTip.SetTip(openOrganizerBtn, "Open Desktop Icon Organizer to save, restore, or automate desktop icon layouts across your monitors.");
@@ -4690,13 +4781,138 @@ namespace KeyPulse
                 doBody);
 
 
+            var autoUpdateCheck = new CheckBox
+            {
+                Content = "Automatically check for updates on startup",
+                IsChecked = _currentConfig.AutoCheckForUpdates,
+                TabIndex = 38,
+                IsTabStop = true
+            };
+            ToolTip.SetTip(autoUpdateCheck, "When checked, KeyPulse quietly checks GitHub releases for updates in the background and notifies you if a new version is available.");
+            autoUpdateCheck.IsCheckedChanged += (_, _) =>
+            {
+                if (suppressSyncEvents) return;
+                _currentConfig.AutoCheckForUpdates = autoUpdateCheck.IsChecked == true;
+                SaveConfig();
+            };
+
+            var channelPanel = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 8,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                Margin = new Thickness(0, 4, 0, 0)
+            };
+            channelPanel.Children.Add(new TextBlock
+            {
+                Text = "Update channel:",
+                FontSize = 12,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            });
+            var channelCombo = new ComboBox
+            {
+                ItemsSource = new[] { "Stable (Recommended)", "Preview / Beta" },
+                SelectedIndex = string.Equals(_currentConfig.UpdateChannel, "Beta", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
+                Width = 200,
+                TabIndex = 39,
+                IsTabStop = true
+            };
+            ToolTip.SetTip(channelCombo, "Select which release channel to receive updates from. Stable is thoroughly tested; Preview includes early experimental features.");
+            channelCombo.SelectionChanged += (_, _) =>
+            {
+                if (suppressSyncEvents) return;
+                _currentConfig.UpdateChannel = channelCombo.SelectedIndex == 1 ? "Beta" : "Stable";
+                SaveConfig();
+            };
+            channelPanel.Children.Add(channelCombo);
+
+            var checkUpdatesBtn = new Button
+            {
+                Content = "Check for Updates Now",
+                Classes = { "Secondary" },
+                Padding = new Thickness(14, 6),
+                FontSize = 12,
+                TabIndex = 40,
+                IsTabStop = true
+            };
+            ToolTip.SetTip(checkUpdatesBtn, "Immediately check GitHub for a newer version of KeyPulse.");
+
+            var updateStatusTxt = new TextBlock
+            {
+                Classes = { "Muted" },
+                FontSize = 11.5,
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            };
+
+            checkUpdatesBtn.Click += async (_, _) =>
+            {
+                Program.PlaySound("click");
+                checkUpdatesBtn.IsEnabled = false;
+                updateStatusTxt.Text = "Checking for updates...";
+                updateStatusTxt.Foreground = AppBrush("AppWarningBrush");
+                try
+                {
+                    var result = await UpdateChecker.CheckAsync(_currentConfig.UpdateChannel ?? "Stable");
+                    if (!result.Succeeded)
+                    {
+                        updateStatusTxt.Text = $"Update check failed: {result.Message}";
+                        updateStatusTxt.Foreground = AppBrush("AppDangerBrush");
+                    }
+                    else if (result.UpdateAvailable)
+                    {
+                        updateStatusTxt.Text = $"v{result.LatestVersion} is available!";
+                        updateStatusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
+                        ShowUpdateNotification(result);
+                    }
+                    else
+                    {
+                        updateStatusTxt.Text = $"KeyPulse is up to date (v{Program.AppVersion}).";
+                        updateStatusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    updateStatusTxt.Text = $"Update check error: {ex.Message}";
+                    updateStatusTxt.Foreground = AppBrush("AppDangerBrush");
+                }
+                finally
+                {
+                    checkUpdatesBtn.IsEnabled = true;
+                }
+            };
+
+            var updateBtnRow = new StackPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 10,
+                Margin = new Thickness(0, 4, 0, 0)
+            };
+            updateBtnRow.Children.Add(checkUpdatesBtn);
+            updateBtnRow.Children.Add(updateStatusTxt);
+
+            var updatesBody = new StackPanel { Spacing = 6 };
+            updatesBody.Children.Add(new TextBlock
+            {
+                Text = $"KeyPulse v{Program.AppVersion} • Fast, keyboard-first automation & screen utility for Windows.",
+                Classes = { "Muted" },
+                FontSize = 11.5
+            });
+            updatesBody.Children.Add(autoUpdateCheck);
+            updatesBody.Children.Add(channelPanel);
+            updatesBody.Children.Add(updateBtnRow);
+            RegisterSettingCard(3, "About & Software Updates",
+                "Application version information, background update check toggles, update channel selection (Stable vs Beta), and manual update checks.",
+                "about version update updates release check github channel stable beta preview upgrade",
+                updatesBody);
+
             var backupBtn = new Button
             {
                 Content = "Backup Settings...",
                 Classes = { "Primary" },
                 MinWidth = 180,
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                TabIndex = 40,
+                TabIndex = 41,
                 IsTabStop = true
             };
             ToolTip.SetTip(backupBtn, "Export all shortcuts, preferences, window layouts, desktop icon profiles, and brightness presets to a single file (with optional AES-GCM password encryption).");
@@ -4707,7 +4923,7 @@ namespace KeyPulse
                 Classes = { "Secondary" },
                 MinWidth = 180,
                 HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                TabIndex = 41,
+                TabIndex = 42,
                 IsTabStop = true
             };
             ToolTip.SetTip(restoreBtn, "Restore your shortcuts, preferences, desktop layouts, and brightness presets from a previously saved KeyPulse backup file.");
@@ -4736,56 +4952,6 @@ namespace KeyPulse
                 "backup restore export import configuration file json encrypt password",
                 backupBody);
 
-            bool isElevated = Program.IsElevated;
-            bool isWiredAdmin = Program.IsAdminTaskInstalled();
-
-            var adminBtn = new Button
-            {
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                Padding = new Avalonia.Thickness(12, 8),
-                TabIndex = 42,
-                IsTabStop = true
-            };
-            var adminStack = new StackPanel
-            {
-                Orientation = Avalonia.Layout.Orientation.Vertical,
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center
-            };
-            var adminTitle = new TextBlock { FontWeight = Avalonia.Media.FontWeight.SemiBold, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
-            var adminSub = new TextBlock { FontSize = 10.5, Classes = { "Muted" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
-            adminStack.Children.Add(adminTitle);
-            adminStack.Children.Add(adminSub);
-            adminBtn.Content = adminStack;
-
-            void RefreshAdminButtonState(bool elevated, bool wiredAdmin)
-            {
-                if (elevated)
-                {
-                    adminTitle.Text = "Run As Standard User Level (Requires Restart)";
-                    adminSub.Text = wiredAdmin
-                        ? "(Administrator active & wired — click to revert to standard user)"
-                        : "(Administrator session active — click to revert to standard user)";
-                    adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#2e5c46"));
-                    ToolTip.SetTip(adminBtn, "Revert KeyPulse to standard user permissions and restart. Restores normal security isolation, though shortcuts won't inject into elevated Admin windows.");
-                }
-                else if (wiredAdmin)
-                {
-                    adminTitle.Text = "Elevate To Match Admin Mode (Requires Restart)";
-                    adminSub.Text = "(Admin logon task is installed, but this session is running as standard user)";
-                    adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8a6d1b"));
-                    ToolTip.SetTip(adminBtn, "The Administrator logon task is installed, but this session is not elevated. Click to restart as Administrator or remove the Admin task.");
-                }
-                else
-                {
-                    adminTitle.Text = "Run As Administrator (Requires Restart)";
-                    adminSub.Text = "(Allows injecting hotkeys and text into elevated CMD/Admin apps)";
-                    adminBtn.Background = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#7d1d1d"));
-                    ToolTip.SetTip(adminBtn, "Restarts KeyPulse with Administrator rights so shortcuts and text typing work inside elevated Command Prompt, PowerShell, and Admin tools.");
-                }
-            }
-            RefreshAdminButtonState(isElevated, isWiredAdmin);
-
             var resetAllBtn = new Button
             {
                 Content = "Restore All Default Settings...",
@@ -4796,21 +4962,20 @@ namespace KeyPulse
                 TabIndex = 43,
                 IsTabStop = true
             };
-            ToolTip.SetTip(resetAllBtn, "Reset all KeyPulse preferences, typing speed, theme, screen brightness presets, and desktop organizer automation settings back to factory defaults. Your saved shortcuts and manual desktop layouts are kept safe.");
+            ToolTip.SetTip(resetAllBtn, "Reset all KeyPulse preferences, typing speed, theme, update channel, screen brightness presets, and desktop organizer automation settings back to factory defaults. Your saved shortcuts and manual desktop layouts are kept safe.");
 
             var dangerBody = new StackPanel { Spacing = 10 };
             dangerBody.Children.Add(new TextBlock
             {
-                Text = "Actions below change Windows system privilege tasks (restarting KeyPulse) or reset all application preferences back to factory defaults.",
+                Text = "Reset all application preferences, presets, and behavior back to their original factory defaults. Your saved shortcuts and custom desktop layouts will NOT be deleted.",
                 Classes = { "Muted" },
                 FontSize = 11.5,
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
-            dangerBody.Children.Add(adminBtn);
             dangerBody.Children.Add(resetAllBtn);
-            RegisterSettingCard(3, "Danger Zone — Privileges & Factory Reset",
-                "High-impact system actions that restart KeyPulse to change Windows Administrator elevation or reset all preferences back to out-of-the-box defaults.",
-                "danger zone privileges administrator admin user elevate uac reset factory defaults",
+            RegisterSettingCard(3, "Danger Zone — Factory Reset",
+                "Destructive preference reset action that restores all out-of-the-box defaults for startup, theme, sounds, typing, brightness, and updates without deleting saved shortcuts.",
+                "danger zone factory reset restore defaults wipe all settings preferences",
                 dangerBody,
                 isDangerZone: true);
 
@@ -4918,23 +5083,28 @@ namespace KeyPulse
                 suppressSyncEvents = true;
                 try
                 {
-                    chromeChk.IsChecked = _currentConfig.UseGoogleChromeForUrls;
-                    RefreshChromeWarning();
-
-                    themeCombo.SelectedIndex = _currentConfig.Theme switch
-                    {
-                        "Light" => 1,
-                        "Dark" => 2,
-                        _ => 0
-                    };
-
-                    SyncSpeedUiFromValue(_currentConfig.TypingDelayMs);
+                    chk.IsChecked = _currentConfig.LaunchOnBoot;
                     soundChk.IsChecked = _currentConfig.SoundEnabled;
+                    RefreshAdminButtonState(Program.IsElevated, Program.IsAdminTaskInstalled());
+
+                    RefreshBrowserStateUi();
+                    SyncSpeedUiFromValue(_currentConfig.TypingDelayMs);
+
+                    for (int j = 0; j < themeSegmentButtons.Length; j++)
+                    {
+                        bool active = string.Equals(_currentConfig.Theme, themeValues[j], StringComparison.OrdinalIgnoreCase);
+                        themeSegmentButtons[j].Classes.Remove("Primary");
+                        themeSegmentButtons[j].Classes.Remove("Secondary");
+                        themeSegmentButtons[j].Classes.Add(active ? "Primary" : "Secondary");
+                    }
 
                     var latestSb = ScreenBrightnessService.LoadConfig();
                     sbLockChk.IsChecked = latestSb.GlobalLockBrightnessContrast;
 
                     RefreshDesktopOrganizerSummary();
+
+                    autoUpdateCheck.IsChecked = _currentConfig.AutoCheckForUpdates;
+                    channelCombo.SelectedIndex = string.Equals(_currentConfig.UpdateChannel, "Beta", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
                 }
                 finally
                 {
@@ -5009,10 +5179,8 @@ namespace KeyPulse
                         startupStatus.Text = "KeyPulse will start hidden in the tray when Windows starts.";
                         startupStatus.Foreground = AppBrush("AppSuccessSoftBrush");
                     }
-                    _currentConfig.Theme = "System";
                     _currentConfig.SoundEnabled = true;
                     Program.SoundEnabled = true;
-                    App.ApplyTheme(_currentConfig.Theme);
                     SaveConfig();
                 }
                 else if (activeTab == 1)
@@ -5024,13 +5192,18 @@ namespace KeyPulse
                 }
                 else if (activeTab == 2)
                 {
+                    _currentConfig.Theme = "System";
+                    App.ApplyTheme(_currentConfig.Theme);
                     ScreenBrightnessService.ResetToDefaults();
                     DesktopOrganizerService.ResetBehavioralDefaults(out _);
+                    SaveConfig();
                 }
                 else if (activeTab == 3)
                 {
-                    resetAllBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    return;
+                    _currentConfig.AutoCheckForUpdates = true;
+                    _currentConfig.UpdateChannel = "Stable";
+                    _currentConfig.SkippedUpdateVersion = string.Empty;
+                    SaveConfig();
                 }
 
                 SyncAllSettingsControls();
@@ -5045,7 +5218,7 @@ namespace KeyPulse
                 bool confirmed = await ConfirmSettingsActionAsync(
                     w,
                     "Restore All Default Settings",
-                    "Reset ALL KeyPulse preferences across every tab back to their original factory defaults?\n\n• Startup: Launch with Windows (On)\n• Theme: Match Windows\n• Sound effects: On\n• Browser: Google Chrome (On)\n• Typing speed: Fast (1 ms)\n• Screen Brightness: Sync On + 3 default presets\n• Desktop Organizer: Auto-restore Off, Auto-backup Off (3 days)\n\nYour saved keyboard shortcuts and manual desktop icon layouts will NOT be deleted.",
+                    "Reset ALL KeyPulse preferences across every tab back to their original factory defaults?\n\n• Startup: Launch with Windows (On)\n• Theme: Match Windows\n• Sound effects: On\n• Browser: Google Chrome (On)\n• Typing speed: Fast (1 ms)\n• Updates: Automatic checks on (Stable channel)\n• Screen Brightness: Sync On + 3 default presets\n• Desktop Organizer: Auto-restore Off, Auto-backup Off (3 days)\n\nYour saved keyboard shortcuts and manual desktop icon layouts will NOT be deleted.",
                     "Restore All Defaults");
                 if (!confirmed) return;
 
@@ -5063,6 +5236,9 @@ namespace KeyPulse
                 _currentConfig.SoundEnabled = true;
                 _currentConfig.UseGoogleChromeForUrls = true;
                 _currentConfig.TypingDelayMs = TypingDelayFast;
+                _currentConfig.AutoCheckForUpdates = true;
+                _currentConfig.UpdateChannel = "Stable";
+                _currentConfig.SkippedUpdateVersion = string.Empty;
                 Program.SoundEnabled = true;
                 InputSimulator.CharacterDelayMs = TypingDelayFast;
                 App.ApplyTheme(_currentConfig.Theme);
@@ -6291,8 +6467,23 @@ namespace KeyPulse
             });
         }
 
+        private void ResetSearchFilter()
+        {
+            if (this.FindControl<TextBox>("SearchBox") is TextBox box && !string.IsNullOrEmpty(box.Text))
+            {
+                box.Text = string.Empty;
+            }
+            if (this.FindControl<Button>("ClearSearchBtn") is Button clearBtn)
+            {
+                clearBtn.IsVisible = false;
+            }
+            _searchText = string.Empty;
+            RefreshVisibleHotkeys();
+        }
+
         protected override void OnClosing(Avalonia.Controls.WindowClosingEventArgs e)
         {
+            ResetSearchFilter();
             SaveConfig();
             if (((App)Application.Current!).IsExiting
                 || e.CloseReason == WindowCloseReason.ApplicationShutdown

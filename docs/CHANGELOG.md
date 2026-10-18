@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Search Clear Buttons ("✕") & Escape Key Clear**: Added prominent clear buttons to both `MainWindow` and `SettingsDialog` search inputs that appear dynamically while typing. Pressing `Escape` or clicking "✕" immediately resets the search query and returns focus.
+- **Search Auto-Reset on Tray Minimize/Reopen**: Closing or hiding `MainWindow` to the system tray and reopening it now automatically clears any active search text and restores the full shortcut list.
+- **Settings Information Architecture Overhaul**: Reorganized preferences into 4 clear top-tier categories (`General`, `Shortcuts & Typing`, `Appearance & Displays`, `Maintenance & About`):
+  - **Tab 0 (General)**: Co-located Windows Startup and Administrator Privileges with a live session status badge and clear explanation of elevated shortcut injection.
+  - **Tab 1 (Shortcuts & Typing)**: Replaced raw delay controls with 3 one-click speed presets (Fast 1ms, Normal 6ms, Compatible 18ms) plus custom millisecond stepper; replaced binary Chrome checkbox with segmented button selector and live Chrome installation detection.
+  - **Tab 2 (Appearance & Displays)**: Replaced theme ComboBox with 3-way segmented buttons (Match Windows, Light, Dark); maintained direct buttons for Screen Brightness Manager and Desktop Icon Organizer.
+  - **Tab 3 (Maintenance & About)**: Grouped Software Updates (with manual check button and Stable/Beta channel switch), Backup & Import Settings, and an isolated Danger Zone for Factory Reset.
+
+### Fixed
+- **Settings Danger Zone Isolation**: Removed non-destructive Administrator elevation controls from Danger Zone, reserving the red card exclusively for Factory Reset.
+- **Restore Defaults Completeness**: Fixed `Restore Defaults` (both tab-level and global factory reset) to properly reset `AutoCheckForUpdates` (true), `UpdateChannel` ("Stable"), and `SkippedUpdateVersion`.
+- **Settings Tab Switching Filter Collision**: Switching tabs in Settings now automatically clears active search filters to display the selected tab cleanly.
+- **Shortcut Editor Target Layout Collision**: Fixed overlapping text inside the target input area caused by insufficient `RowDefinitions` in `MainWindow.axaml`, which previously caused the action hint text and error blocks to collapse directly onto the target input box.
+
 ## [v2026.10.18.0549] - 2026-10-18
 
 ### Fixed

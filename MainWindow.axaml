@@ -19,7 +19,7 @@
         <Border Grid.Row="0"
                 Classes="Panel"
                 Margin="0,0,0,12">
-            <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+            <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                   ColumnDefinitions="*,*,Auto,Auto">
                 <TextBlock Grid.Row="0"
                            Grid.Column="0"
@@ -208,14 +208,33 @@
             </Grid>
         </Border>
 
-        <TextBox Grid.Row="1"
-                 Name="SearchBox"
-                 HorizontalAlignment="Stretch"
-                 Margin="0,0,0,12"
-                 PlaceholderText="Search shortcuts..."
-                 TextChanged="SearchBox_TextChanged"
-                 TabIndex="9"
-                 ToolTip.Tip="Filter by shortcut keys, action, target or status" />
+        <Grid Grid.Row="1"
+              ColumnDefinitions="*,Auto"
+              Margin="0,0,0,12">
+            <TextBox Grid.Column="0"
+                     Name="SearchBox"
+                     HorizontalAlignment="Stretch"
+                     PlaceholderText="Search shortcuts..."
+                     TextChanged="SearchBox_TextChanged"
+                     KeyDown="SearchBox_KeyDown"
+                     TabIndex="9"
+                     ToolTip.Tip="Filter by shortcut keys, action, target or status" />
+            <Button Grid.Column="1"
+                    Name="ClearSearchBtn"
+                    Content="✕"
+                    Classes="Secondary"
+                    Click="ClearSearch_Click"
+                    IsVisible="False"
+                    Margin="6,0,0,0"
+                    Padding="10,0"
+                    MinWidth="34"
+                    FontWeight="Bold"
+                    HorizontalContentAlignment="Center"
+                    VerticalAlignment="Stretch"
+                    VerticalContentAlignment="Center"
+                    Cursor="Hand"
+                    ToolTip.Tip="Clear search filter (Esc)" />
+        </Grid>
 
         <Border Grid.Row="2"
                 Classes="Panel"
