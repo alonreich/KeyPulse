@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.18.1809] - 2026-10-18
+
 ### Added
 - **NativeAOT COM VTable Shortcut Creation**: Implemented native unmanaged COM VTable function pointers (`delegate* unmanaged[Stdcall]`) in `SetupWindow.cs` for `IShellLinkW` and `IPersistFile`, backed by an autonomous PowerShell `WScript.Shell` fallback, eliminating NativeAOT `PlatformNotSupportedException` during in-app updates and installations.
 - **Git Line Ending Normalization**: Added `.gitattributes` defining text attributes and end-of-line rules, eliminating Git LF/CRLF conversion warnings across environments.
