@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.18.2011] - 2026-10-18
+
 ### Added
 - **Dark Mode Settings Visibility**: Redesigned Settings tabs in Dark Mode with crisp high-contrast outlines, distinct background tiles, and vibrant top accent indicators so every tab is instantly visible and easy to navigate.
 - **Fluent Shortcut Search**: The main window search bar is now neatly aligned to the left with an intuitive "Search:" label, ergonomic width, and a one-click "✕" clear button right inside the box.
