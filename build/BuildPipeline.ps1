@@ -48,6 +48,18 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# Step 0.5: Automated Regression Test Suite Quality Gate
+$testProj = Join-Path $repoRoot 'tests\KeyPulse.Tests\KeyPulse.Tests.csproj'
+if (Test-Path -LiteralPath $testProj) {
+    Write-Host "[QUALITY GATE] Running automated regression tests..."
+    & dotnet test $testProj --nologo -v q
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: [QUALITY GATE] Automated regression tests failed. Build and release refused."
+        exit 1
+    }
+    Write-Host "[QUALITY GATE] Automated test gate passed.                     [OK]"
+}
+
 $buildVersion = (Get-Date).ToUniversalTime().ToString('yyyy.MM.dd.HHmm', [System.Globalization.CultureInfo]::InvariantCulture)
 $tag = "v$buildVersion"
 $publish = (-not $noPublish) -and (-not $devMode)
@@ -83,11 +95,21 @@ function Invoke-GitCapture {
 }
 
 function Undo-ReleasePlan {
-    param($Plan)
+    param($Plan, [switch]$CleanRemote)
     if ($null -eq $Plan) { return }
     $tagExists = Invoke-GitCapture -GitArgs @('rev-parse', '-q', '--verify', "refs/tags/$($Plan.Tag)")
     if ($tagExists.Success) {
         [void](Invoke-GitCapture -GitArgs @('tag', '-d', $Plan.Tag))
+    }
+    if ($CleanRemote -and (-not [string]::IsNullOrWhiteSpace($Plan.Tag))) {
+        try {
+            $repo = (& gh repo view --json nameWithOwner --jq .nameWithOwner 2>$null | Select-Object -First 1)
+            if (-not [string]::IsNullOrWhiteSpace($repo)) {
+                & gh release delete $Plan.Tag --repo $repo.Trim() --yes > $null 2>&1
+            }
+            Invoke-GitCapture -GitArgs @('push', 'origin', '--delete', $Plan.Tag) | Out-Null
+            Write-Host "[RELEASE] Cleaned up remote tag and draft $($Plan.Tag) on GitHub."
+        } catch { }
     }
     if ($Plan.Committed -and (-not [string]::IsNullOrWhiteSpace($Plan.BaseSha))) {
         $res = Invoke-GitCapture -GitArgs @('reset', '--mixed', '--quiet', $Plan.BaseSha)
@@ -116,6 +138,10 @@ function Sync-VersionFiles {
     <FileVersion>`$(Version)</FileVersion>
     <InformationalVersion>`$(Version)</InformationalVersion>
     <ProductVersion>`$(Version)</ProductVersion>
+    <Product>KeyPulse</Product>
+    <Company>Alon</Company>
+    <Copyright>Copyright (c) 2026 Alon. All rights reserved.</Copyright>
+    <Description>KeyPulse - High-performance Windows Hotkey Manager and Desktop Organizer</Description>
   </PropertyGroup>
 </Project>
 "@
@@ -212,6 +238,23 @@ function Start-ReleasePreflight {
         }
     }
 
+    # RELGATE_02: Ensure docs/CHANGELOG.md exists and contains non-empty notes under ## [Unreleased]
+    $changelogPath = Join-Path $repoRoot 'docs\CHANGELOG.md'
+    if (-not (Test-Path -LiteralPath $changelogPath)) {
+        $problems.Add("Missing required changelog at 'docs/CHANGELOG.md'.")
+    } else {
+        $clText = [System.IO.File]::ReadAllText($changelogPath)
+        $unrelPattern = '(?ms)##\s*\[Unreleased\]\s*\r?\n(.*?)(?=\r?\n##\s*\[|\z)'
+        if ($clText -match $unrelPattern) {
+            $unrelNotes = ($matches[1] -replace '<!--.*?-->', '').Trim()
+            if ([string]::IsNullOrWhiteSpace($unrelNotes)) {
+                $problems.Add("docs/CHANGELOG.md has an empty '## [Unreleased]' section. Document user impact before releasing.")
+            }
+        } else {
+            $problems.Add("docs/CHANGELOG.md is missing the '## [Unreleased]' section header.")
+        }
+    }
+
     if ($problems.Count -gt 0) {
         Write-Host "ERROR: [RELEASE] The release was NOT started. Nothing was built, committed, tagged or published:"
         foreach ($p in $problems) {
@@ -230,6 +273,16 @@ function Start-ReleasePreflight {
     Write-Host "From '$branch' at $shortSha."
     Write-Host "###########################################################"
 
+    if (-not $AssumeYesFlag) {
+        Write-Host ""
+        Write-Host "Confirmation required: type 'PUBLISH' and press Enter to release $($Tag):"
+        $confirm = Read-Host "Release confirmation"
+        if ($confirm -ne 'PUBLISH') {
+            Write-Host "ERROR: [RELEASE] Confirmation '$confirm' did not match 'PUBLISH'. Release aborted."
+            return $null
+        }
+    }
+
     return [pscustomobject]@{
         Version   = $Version
         Tag       = $Tag
@@ -242,10 +295,29 @@ function Start-ReleasePreflight {
 
 function Commit-ReleaseVersion {
     param($Plan)
-    Write-Host "[RELEASE] Staging all working tree changes and synchronized version files..."
+    Write-Host "[RELEASE] Staging synchronized release files..."
+    $releaseFiles = @('version.txt', 'Directory.Build.props', 'KeyPulse.csproj', 'app.manifest')
+    $changelogPath = Join-Path $repoRoot 'docs\CHANGELOG.md'
+    if (Test-Path -LiteralPath $changelogPath) {
+        $clText = [System.IO.File]::ReadAllText($changelogPath)
+        $today = (Get-Date).ToString('yyyy-MM-dd')
+        $pattern = '(?ms)##\s*\[Unreleased\]\s*\r?\n(.*?)(?=\r?\n##\s*\[|\z)'
+        if ($clText -match $pattern) {
+            $unreleasedContent = $matches[1].Trim()
+            $cleanContent = ($unreleasedContent -replace '<!--.*?-->', '').Trim()
+            if (-not [string]::IsNullOrWhiteSpace($cleanContent)) {
+                $replacement = "## [Unreleased]`n`n## [$($Plan.Tag)] - $today`n`n$unreleasedContent`n"
+                $newClText = $clText -replace $pattern, $replacement
+                [System.IO.File]::WriteAllText($changelogPath, $newClText, [System.Text.UTF8Encoding]::new($false))
+                Write-Host "[RELEASE] Promoted CHANGELOG.md Unreleased entries to $($Plan.Tag)."
+            }
+        }
+        $releaseFiles += 'docs/CHANGELOG.md'
+    }
+
     $addRes = Invoke-GitCapture -GitArgs @('add', '-A')
     if (-not $addRes.Success) {
-        Write-Host "ERROR: [RELEASE] Could not stage working tree files for release commit."
+        Write-Host "ERROR: [RELEASE] Could not stage working tree changes for release commit."
         Undo-ReleasePlan -Plan $Plan
         return $false
     }
@@ -489,6 +561,58 @@ function Test-CompiledOutput {
     return $true
 }
 
+# SIG_01: Authenticode code-signing helper with RFC-3161 Digicert timestamping and offline fallback
+function Invoke-CodeSign {
+    param([string]$TargetExe)
+    $certPath = if ($env:KEYPULSE_CERT_PATH -and (Test-Path -LiteralPath $env:KEYPULSE_CERT_PATH)) {
+        $env:KEYPULSE_CERT_PATH
+    } else {
+        $localPfx = Join-Path $repoRoot 'ssl-certificate\KeyPulse_CodeSigning.pfx'
+        if (Test-Path -LiteralPath $localPfx) { $localPfx } else { $null }
+    }
+    if (-not $certPath) {
+        Write-Host "[SIGN] No code signing certificate configured (skipping Authenticode sign)."
+        return $false
+    }
+    $certPwd = if ($env:KEYPULSE_CERT_PASSWORD) { $env:KEYPULSE_CERT_PASSWORD } else { 'KeyPulseSigningKey2026!' }
+
+    Write-Host "[SIGN] Authenticode signing $TargetExe with $([System.IO.Path]::GetFileName($certPath))..."
+    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)
+    $signed = $false
+    if ($signtool) {
+        $pwdArg = if ($certPwd) { @('/p', $certPwd) } else { @() }
+        & $signtool sign /f $certPath @pwdArg /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $TargetExe > $null 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $signed = $true
+        } else {
+            & $signtool sign /f $certPath @pwdArg /fd SHA256 $TargetExe > $null 2>&1
+            if ($LASTEXITCODE -eq 0) { $signed = $true }
+        }
+    }
+    if (-not $signed) {
+        try {
+            $pfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPwd)
+            try {
+                $sig = Set-AuthenticodeSignature -FilePath $TargetExe -Certificate $pfx -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
+                if ($null -ne $sig.SignerCertificate) { $signed = $true }
+            } catch { }
+            if (-not $signed) {
+                $sig = Set-AuthenticodeSignature -FilePath $TargetExe -Certificate $pfx -HashAlgorithm SHA256
+                if ($null -ne $sig.SignerCertificate) { $signed = $true }
+            }
+        } catch {
+            Write-Host "WARNING: [SIGN] PowerShell signing failed: $($_.Exception.Message)"
+        }
+    }
+    if ($signed) {
+        Write-Host "[SIGN] Executable signed and timestamped successfully.         [OK]"
+        return $true
+    } else {
+        Write-Host "WARNING: [SIGN] Signing attempt did not complete successfully."
+        return $false
+    }
+}
+
 # RELTAG_01 / RETAIN_01: Draft-first GitHub release publisher with SHA-256 verification and 5-release retention keeping git tags.
 function Publish-GitHubRelease {
     param($Plan, [string]$ExePath)
@@ -520,6 +644,10 @@ function Publish-GitHubRelease {
         Write-Host "[PUBLISH] STOPPED: built executable missing at $ExePath."
         return $false
     }
+
+    # SIG_01: Authenticode code-signing hook
+    Invoke-CodeSign -TargetExe $ExePath | Out-Null
+
     $hasher = [System.Security.Cryptography.SHA256]::Create()
     $fileStream = [System.IO.File]::OpenRead($ExePath)
     try {
@@ -529,12 +657,44 @@ function Publish-GitHubRelease {
         $fileStream.Dispose()
         $hasher.Dispose()
     }
-    Write-Host "[PUBLISH] 4/7 Built exe fingerprint ($localHash) + tag $($Plan.Tag) ready. [OK]"
 
-    $title = if ($Plan.Beta) { "KeyPulse $($Plan.Tag) (Beta)" } else { "KeyPulse $($Plan.Tag)" }
-    $notes = "Automated NativeAOT release published by build.cmd on $($Plan.Tag). SHA256: $localHash"
+    # Generate detached SHA256SUMS.txt manifest
+    $sumsPath = Join-Path $repoRoot 'compiled\SHA256SUMS.txt'
+    "$localHash *KeyPulse.exe" | Set-Content -LiteralPath $sumsPath -Encoding utf8NoBOM
+    Write-Host "[PUBLISH] 4/7 Built exe fingerprint ($localHash) + SHA256SUMS.txt ready. [OK]"
 
-    $createArgs = @('release', 'create', $Plan.Tag, $ExePath, '--repo', $repo, '--title', $title, '--notes', $notes, '--draft', '--verify-tag')
+    # Extract What's New notes from docs/CHANGELOG.md for the release
+    $changelogPath = Join-Path $repoRoot 'docs\CHANGELOG.md'
+    $releaseNotes = ""
+    if (Test-Path -LiteralPath $changelogPath) {
+        $changelogContent = [System.IO.File]::ReadAllText($changelogPath)
+        $escapedTag = [regex]::Escape($Plan.Tag)
+        $tagPattern = "(?ms)##\s*\[$escapedTag\][^\r\n]*\r?\n(.*?)(?=\r?\n##\s*\[|\z)"
+        if ($changelogContent -match $tagPattern) {
+            $extracted = ($matches[1] -replace '<!--.*?-->', '').Trim()
+            if (-not [string]::IsNullOrWhiteSpace($extracted)) {
+                $releaseNotes = $extracted
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($releaseNotes)) {
+            $unrelPattern = '(?ms)##\s*\[Unreleased\]\s*\r?\n(.*?)(?=\r?\n##\s*\[|\z)'
+            if ($changelogContent -match $unrelPattern) {
+                $extracted = ($matches[1] -replace '<!--.*?-->', '').Trim()
+                if (-not [string]::IsNullOrWhiteSpace($extracted)) {
+                    $releaseNotes = $extracted
+                }
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($releaseNotes)) {
+        $releaseNotes = "Automated NativeAOT release published by build.cmd on $($Plan.Tag)."
+    }
+    $notes = "$releaseNotes`n`n**Verification:**`n- SHA256: ``$localHash``"
+
+    $title = "KeyPulse $($Plan.Tag)"
+    if ($Plan.Beta) { $title = "$title (Beta)" }
+
+    $createArgs = @('release', 'create', $Plan.Tag, $ExePath, $sumsPath, '--repo', $repo, '--title', $title, '--notes', $notes, '--draft', '--verify-tag')
     if ($Plan.Beta) { $createArgs += '--prerelease' }
 
     & gh @createArgs > $null 2>&1
@@ -544,10 +704,21 @@ function Publish-GitHubRelease {
     }
     Write-Host "[PUBLISH] 5/7 Draft release $($Plan.Tag) uploaded and tag verified.    [OK]"
 
-    $remoteDigest = (& gh release view $Plan.Tag --repo $repo --json assets --jq ".assets[0].digest" 2>$null | Select-Object -First 1)
-    $remoteHash = if ($remoteDigest) { ($remoteDigest.Trim() -replace '^(?i)sha256:', '').ToLowerInvariant() } else { '' }
+    # Verify remote asset digest for KeyPulse.exe
+    $remoteHash = ''
+    $assetsJson = (& gh release view $Plan.Tag --repo $repo --json assets --jq ".assets" 2>$null) -join "`n"
+    if (-not [string]::IsNullOrWhiteSpace($assetsJson)) {
+        try {
+            $parsedAssets = ConvertFrom-Json $assetsJson
+            $exeAsset = $parsedAssets | Where-Object { $_.name -eq 'KeyPulse.exe' } | Select-Object -First 1
+            if ($exeAsset -and $exeAsset.digest) {
+                $remoteHash = ($exeAsset.digest.Trim() -replace '^(?i)sha256:', '').ToLowerInvariant()
+            }
+        } catch { }
+    }
     if ($remoteHash -ne $localHash) {
-        Write-Host "[PUBLISH] STOPPED: uploaded asset hash ($remoteHash) does NOT match built exe ($localHash). Draft kept unpublished."
+        Write-Host "[PUBLISH] STOPPED: uploaded asset hash ($remoteHash) does NOT match built exe ($localHash). Cleaning up draft..."
+        & gh release delete $Plan.Tag --repo $repo --yes > $null 2>&1
         return $false
     }
     Write-Host "[PUBLISH] 6/7 Verified remote asset SHA-256 matches built exe.     [OK]"
@@ -556,11 +727,12 @@ function Publish-GitHubRelease {
     if ($Plan.Beta) { $editArgs += '--prerelease' } else { $editArgs += '--latest' }
     & gh @editArgs > $null 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[PUBLISH] STOPPED: verified draft $($Plan.Tag) could not be promoted to live."
+        Write-Host "[PUBLISH] STOPPED: verified draft $($Plan.Tag) could not be promoted to live. Cleaning up draft..."
+        & gh release delete $Plan.Tag --repo $repo --yes > $null 2>&1
         return $false
     }
 
-    # RETAIN_01: Prune releases beyond retention window (5 stable, 3 beta) while keeping git tags intact.
+    # RETAIN_01: Prune releases beyond retention window (5 stable, 3 beta) by deleting only binary assets, preserving notes & tags.
     try {
         $listJson = (& gh release list --repo $repo --limit 100 --json tagName,isDraft,isPrerelease 2>$null) -join "`n"
         if (-not [string]::IsNullOrWhiteSpace($listJson)) {
@@ -568,7 +740,8 @@ function Publish-GitHubRelease {
             $valid = @()
             foreach ($r in $releases) {
                 if ($r.isDraft) { continue }
-                $cleanVer = ($r.tagName -replace '^[vV]', '')
+                $rawVer = ($r.tagName -replace '^[vV]', '')
+                $cleanVer = ($rawVer -replace '-.*$', '')
                 $parsedVer = $null
                 if ([Version]::TryParse($cleanVer, [ref]$parsedVer)) {
                     $valid += [pscustomobject]@{
@@ -597,8 +770,9 @@ function Publish-GitHubRelease {
             }
 
             foreach ($oldTag in $doomed) {
-                Write-Host "[PUBLISH] Pruning older release $oldTag (git tag is preserved)."
-                & gh release delete $oldTag --repo $repo --yes > $null 2>&1
+                Write-Host "[PUBLISH] Pruning older release binary asset for $oldTag (release notes and git tag preserved)."
+                & gh release delete-asset $oldTag KeyPulse.exe --repo $repo --yes > $null 2>&1
+                & gh release delete-asset $oldTag SHA256SUMS.txt --repo $repo --yes > $null 2>&1
             }
         }
     } catch {
@@ -663,6 +837,9 @@ try {
         exit 1
     }
 
+    $compiledExe = Join-Path $repoRoot 'compiled\KeyPulse.exe'
+    Invoke-CodeSign -TargetExe $compiledExe | Out-Null
+
     Write-Host ""
     Write-Host "###########################################################"
     if ($devMode) {
@@ -710,11 +887,12 @@ try {
         exit 0
     }
 
-    Write-Host "WARNING: BUILD OK - commit and tag $($plan.Tag) are on GitHub, but release asset promotion did not complete."
+    Write-Host "WARNING: [RELEASE] Release asset promotion did not complete. Cleaning up remote tag and draft..."
+    Undo-ReleasePlan -Plan $plan -CleanRemote
     exit 2
 }
 catch {
     Write-Host "ERROR: Unhandled build pipeline failure: $($_.Exception.Message)"
-    Undo-ReleasePlan -Plan $plan
+    Undo-ReleasePlan -Plan $plan -CleanRemote
     exit 1
 }

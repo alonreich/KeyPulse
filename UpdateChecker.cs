@@ -1,29 +1,56 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace KeyPulse
 {
+    public sealed class GitHubReleaseAsset
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("browser_download_url")]
+        public string BrowserDownloadUrl { get; set; } = string.Empty;
+
+        [JsonPropertyName("size")]
+        public long Size { get; set; }
+
+        [JsonPropertyName("digest")]
+        public string Digest { get; set; } = string.Empty;
+    }
+
     /// <summary>
     /// ISSUE_15: KeyPulse used to report version 1.0.0.0 for every build ever released and never
-    /// looked for a newer one, so a user had no way to tell whether a fix had shipped. This asks
-    /// GitHub once, on demand, and never blocks the UI thread.
+    /// looked for a newer one. This deserializes full release metadata including notes and assets.
     /// </summary>
     public sealed class GitHubRelease
     {
         [JsonPropertyName("tag_name")]
         public string TagName { get; set; } = string.Empty;
 
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
         [JsonPropertyName("html_url")]
         public string HtmlUrl { get; set; } = string.Empty;
+
+        [JsonPropertyName("body")]
+        public string Body { get; set; } = string.Empty;
 
         [JsonPropertyName("draft")]
         public bool Draft { get; set; }
 
         [JsonPropertyName("prerelease")]
         public bool Prerelease { get; set; }
+
+        [JsonPropertyName("assets")]
+        public List<GitHubReleaseAsset> Assets { get; set; } = new();
     }
 
     public readonly struct UpdateCheckResult
@@ -33,32 +60,44 @@ namespace KeyPulse
         public string LatestVersion { get; init; }
         public string Message { get; init; }
         public string? LocalInstallerPath { get; init; }
+        public string? DownloadUrl { get; init; }
+        public string? ReleaseNotes { get; init; }
+        public long AssetSizeBytes { get; init; }
+        public string? ExpectedSha256 { get; init; }
     }
 
     public static class UpdateChecker
     {
         private static readonly HttpClient Client = CreateClient();
+        private static readonly HttpClient DownloadClient = CreateDownloadClient();
 
         private static HttpClient CreateClient()
         {
-            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
+            var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
             client.DefaultRequestHeaders.Add("User-Agent", "KeyPulse-UpdateCheck");
             client.DefaultRequestHeaders.Add("Accept", "application/vnd.github+json");
+            return client;
+        }
+
+        private static HttpClient CreateDownloadClient()
+        {
+            var client = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
+            client.DefaultRequestHeaders.Add("User-Agent", "KeyPulse-UpdateDownload");
             return client;
         }
 
         /// <summary>
         /// DEVUPDATE_01: In dev mode, inspect local .\compiled\KeyPulse.exe instead of querying GitHub.
         /// </summary>
-        public static async Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
+        public static async Task<UpdateCheckResult> CheckAsync(string channel = "Stable", CancellationToken cancellationToken = default)
         {
             try
             {
                 var devUpdateSource = Environment.GetEnvironmentVariable("KEYPULSE_DEV_UPDATE_SOURCE");
                 if (!string.IsNullOrWhiteSpace(devUpdateSource))
                 {
-                    var localExe = System.IO.Path.Combine(devUpdateSource.Trim(), "compiled", "KeyPulse.exe");
-                    if (!System.IO.File.Exists(localExe))
+                    var localExe = Path.Combine(devUpdateSource.Trim(), "compiled", "KeyPulse.exe");
+                    if (!File.Exists(localExe))
                     {
                         return new UpdateCheckResult
                         {
@@ -69,7 +108,7 @@ namespace KeyPulse
 
                     var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(localExe);
                     var rawVer = info.FileVersion ?? "unknown";
-                    var latestLocal = rawVer.EndsWith(".0", StringComparison.Ordinal) && System.Linq.Enumerable.Count(rawVer, c => c == '.') == 3
+                    var latestLocal = rawVer.EndsWith(".0", StringComparison.Ordinal) && rawVer.Count(c => c == '.') == 3
                         ? rawVer.Substring(0, rawVer.Length - 2)
                         : rawVer;
                     var currentVer = Program.AppVersion;
@@ -80,11 +119,20 @@ namespace KeyPulse
                         UpdateAvailable = CompareVersions(latestLocal, currentVer) > 0,
                         LatestVersion = latestLocal,
                         LocalInstallerPath = localExe,
+                        DownloadUrl = null,
+                        ReleaseNotes = "Local developer test build generated by .\\dev_build.cmd.",
+                        AssetSizeBytes = new FileInfo(localExe).Length,
+                        ExpectedSha256 = null,
                         Message = string.Empty
                     };
                 }
 
-                using var response = await Client.GetAsync(Program.LatestReleaseApiUrl, cancellationToken);
+                var isBeta = string.Equals(channel, "Beta", StringComparison.OrdinalIgnoreCase);
+                var apiUrl = isBeta
+                    ? $"https://api.github.com/repos/{Program.RepositorySlug}/releases"
+                    : Program.LatestReleaseApiUrl;
+
+                using var response = await Client.GetAsync(apiUrl, cancellationToken);
                 if (!response.IsSuccessStatusCode)
                 {
                     return new UpdateCheckResult
@@ -95,21 +143,53 @@ namespace KeyPulse
                 }
 
                 var json = await response.Content.ReadAsStringAsync(cancellationToken);
-                var release = System.Text.Json.JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.GitHubRelease);
+                GitHubRelease? release = null;
+                if (isBeta)
+                {
+                    var releases = System.Text.Json.JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.ListGitHubRelease);
+                    release = releases?.FirstOrDefault(r => !r.Draft);
+                }
+                else
+                {
+                    release = System.Text.Json.JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.GitHubRelease);
+                }
 
                 if (release == null || string.IsNullOrWhiteSpace(release.TagName))
                 {
-                    return new UpdateCheckResult { Succeeded = false, Message = "GitHub did not name a latest release." };
+                    return new UpdateCheckResult { Succeeded = false, Message = "GitHub did not name a valid release." };
                 }
 
                 var latest = release.TagName.TrimStart('v', 'V');
                 var current = Program.AppVersion;
+
+                var exeAsset = release.Assets?.FirstOrDefault(a => string.Equals(a.Name, "KeyPulse.exe", StringComparison.OrdinalIgnoreCase));
+                var downloadUrl = exeAsset?.BrowserDownloadUrl ?? $"https://github.com/{Program.RepositorySlug}/releases/download/{release.TagName}/KeyPulse.exe";
+                var assetSize = exeAsset?.Size ?? 0;
+
+                string? expectedSha256 = null;
+                if (!string.IsNullOrWhiteSpace(exeAsset?.Digest))
+                {
+                    var d = exeAsset.Digest.Trim();
+                    expectedSha256 = d.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? d.Substring(7) : d;
+                }
+                if (string.IsNullOrWhiteSpace(expectedSha256) && !string.IsNullOrWhiteSpace(release.Body))
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(release.Body, @"(?:SHA-?256|hash):\s*`?([a-fA-F0-9]{64})`?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (m.Success)
+                    {
+                        expectedSha256 = m.Groups[1].Value.ToLowerInvariant();
+                    }
+                }
 
                 return new UpdateCheckResult
                 {
                     Succeeded = true,
                     UpdateAvailable = CompareVersions(latest, current) > 0,
                     LatestVersion = latest,
+                    DownloadUrl = downloadUrl,
+                    ReleaseNotes = string.IsNullOrWhiteSpace(release.Body) ? "No release notes provided." : release.Body,
+                    AssetSizeBytes = assetSize,
+                    ExpectedSha256 = expectedSha256,
                     Message = string.Empty
                 };
             }
@@ -121,11 +201,133 @@ namespace KeyPulse
         }
 
         /// <summary>
+        /// Downloads the release executable to a staging path with cryptographic integrity verification,
+        /// disk space checks, and complete stream delivery validation.
+        /// </summary>
+        public static async Task<(bool Succeeded, string Message, string? StagedExePath)> DownloadUpdateAsync(
+            string downloadUrl,
+            string targetVersion,
+            string? expectedSha256 = null,
+            IProgress<double>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var updatesDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    Program.IsDevMode ? "KeyPulse_DEV" : "KeyPulse",
+                    "updates");
+                try
+                {
+                    Directory.CreateDirectory(updatesDir);
+                    var drive = new DriveInfo(Path.GetPathRoot(updatesDir) ?? "C:\\");
+                    if (drive.AvailableFreeSpace < 150 * 1024 * 1024)
+                    {
+                        return (false, "Insufficient free disk space in updates directory (< 150 MB free).", null);
+                    }
+                }
+                catch { }
+
+                var tempPath = Path.Combine(updatesDir, $"KeyPulse_Update_{targetVersion}.exe");
+                var partialPath = tempPath + ".download";
+
+                if (File.Exists(partialPath))
+                {
+                    try { File.Delete(partialPath); } catch { }
+                }
+
+                using var response = await DownloadClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                response.EnsureSuccessStatusCode();
+
+                var totalBytes = response.Content.Headers.ContentLength ?? -1L;
+                using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
+                using (var fileStream = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
+                {
+                    var buffer = new byte[81920];
+                    long totalRead = 0;
+                    int bytesRead;
+
+                    while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                    {
+                        await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
+                        totalRead += bytesRead;
+
+                        if (totalBytes > 0 && progress != null)
+                        {
+                            var ratio = (double)totalRead / totalBytes;
+                            progress.Report(Math.Clamp(ratio, 0.0, 1.0));
+                        }
+                    }
+
+                    if (totalBytes > 0 && totalRead != totalBytes)
+                    {
+                        fileStream.Dispose();
+                        try { File.Delete(partialPath); } catch { }
+                        return (false, $"Download interrupted: received {totalRead} of {totalBytes} bytes.", null);
+                    }
+
+                    if (totalRead < 5 * 1024 * 1024)
+                    {
+                        fileStream.Dispose();
+                        try { File.Delete(partialPath); } catch { }
+                        return (false, $"Downloaded file is incomplete ({totalRead} bytes).", null);
+                    }
+                }
+
+                using (var verifyStream = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    var header = new byte[2];
+                    if (verifyStream.Read(header, 0, 2) != 2 || header[0] != 'M' || header[1] != 'Z')
+                    {
+                        verifyStream.Dispose();
+                        try { File.Delete(partialPath); } catch { }
+                        return (false, "Downloaded file is corrupted (invalid Windows PE executable header).", null);
+                    }
+
+                    verifyStream.Position = 0;
+                    using var sha = SHA256.Create();
+                    var hashBytes = sha.ComputeHash(verifyStream);
+                    var computedHash = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+
+                    if (!string.IsNullOrWhiteSpace(expectedSha256))
+                    {
+                        var cleanExpected = expectedSha256.Trim().ToLowerInvariant();
+                        if (!string.Equals(computedHash, cleanExpected, StringComparison.OrdinalIgnoreCase))
+                        {
+                            verifyStream.Dispose();
+                            try { File.Delete(partialPath); } catch { }
+                            return (false, $"Cryptographic SHA-256 verification failed (expected {cleanExpected}, got {computedHash}). Update rejected.", null);
+                        }
+                    }
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
+
+                File.Move(partialPath, tempPath, true);
+                progress?.Report(1.0);
+
+                return (true, string.Empty, tempPath);
+            }
+            catch (OperationCanceledException)
+            {
+                return (false, "Update download was canceled.", null);
+            }
+            catch (Exception ex)
+            {
+                Program.LogCrash("Update download failed: " + ex.Message);
+                return (false, ex.Message, null);
+            }
+        }
+
+        /// <summary>
         /// Compares dotted numeric versions part by part. Returns >0 when left is newer.
         /// Anything unparseable compares as equal rather than as "an update is available", so a
         /// malformed tag never nags the user forever.
         /// </summary>
-        internal static int CompareVersions(string left, string right)
+        public static int CompareVersions(string left, string right)
         {
             var leftParts = Split(left);
             var rightParts = Split(right);

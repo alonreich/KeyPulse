@@ -53,7 +53,7 @@ class Program
     private static string ExitAppEventName => IsDevMode ? "KeyPulse_ExitApp_DEV" : "KeyPulse_ExitApp";
 
     /// <summary>ISSUE_19: target handed over from the Explorer "Add to KeyPulse" context menu.</summary>
-    public static readonly string StagedAddPath = Path.Combine(ConfigStore.ConfigDirectory, "staged-add.txt");
+    public static string StagedAddPath => Path.Combine(ConfigStore.ConfigDirectory, "staged-add.txt");
 
     /// <summary>ISSUE_19: set when this launch was started with --add-target and owns the window.</summary>
     public static string? PendingAddTarget;
@@ -148,7 +148,8 @@ class Program
     /// ISSUE_8: logs live inside %APPDATA%\KeyPulse so the uninstaller's existing purge of that
     /// folder removes them. In Dev Mode (DEVDATA_01), logs go to KEYPULSE_DEV_LOG_DIR (%TMP%\KeyPulse_DEV or .devlogs).
     /// </summary>
-    public static string LogDir = ResolveLogDir();
+    private static string? _logDir;
+    public static string LogDir => _logDir ??= ResolveLogDir();
 
     private static string ResolveLogDir()
     {
@@ -157,15 +158,18 @@ class Program
             return Path.GetFullPath(devLogDir);
         if (IsDevMode)
             return Path.Combine(Path.GetTempPath(), "KeyPulse_DEV");
-        return Path.Combine(ConfigStore.ConfigDirectory, "logs");
+        var baseDir = !string.IsNullOrEmpty(ConfigStore.ConfigDirectory)
+            ? ConfigStore.ConfigDirectory
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
+        return Path.Combine(baseDir, "logs");
     }
 
     /// <summary>ISSUE_19: mirrors AppConfig.SoundEnabled so PlaySound can be muted.</summary>
     public static volatile bool SoundEnabled = true;
 
     private static object _logLock = new object();
-    private static string DebugLogPath = Path.Combine(LogDir, "keypulse_debug.txt");
-    private static string CrashLogPath = Path.Combine(LogDir, "keypulse_crash.txt");
+    private static string DebugLogPath => Path.Combine(LogDir, "keypulse_debug.txt");
+    private static string CrashLogPath => Path.Combine(LogDir, "keypulse_crash.txt");
 
     public static void LogDebug(string msg) => RollingLog(DebugLogPath, msg);
     public static void LogCrash(string msg) => RollingLog(CrashLogPath, msg);
@@ -247,15 +251,101 @@ class Program
         }
     }
 
+    public static string CanaryFilePath => Path.Combine(ConfigStore.ConfigDirectory, ".post_update_canary");
+
+    private static void CheckPostUpdateCanaryRecovery()
+    {
+        try
+        {
+            if (!File.Exists(CanaryFilePath)) return;
+
+            var lines = File.ReadAllLines(CanaryFilePath);
+            if (lines.Length == 0) return;
+
+            var parts = lines[0].Split('|');
+            var version = parts.Length > 0 ? parts[0] : "unknown";
+            var backupExe = parts.Length > 2 ? parts[2] : string.Empty;
+            var crashCount = parts.Length > 3 && int.TryParse(parts[3], out var cc) ? cc : 0;
+
+            if (crashCount >= 2 && !string.IsNullOrWhiteSpace(backupExe) && File.Exists(backupExe))
+            {
+                var prompt = $"KeyPulse encountered repeated startup failures after updating to v{version}.\n\n"
+                           + "Would you like to restore the previous working version?";
+                var choice = MessageBox(IntPtr.Zero, prompt, "KeyPulse - Update Crash Recovery", 0x24 /* MB_YESNO | MB_ICONQUESTION */);
+                if (choice == 6 /* IDYES */)
+                {
+                    try
+                    {
+                        File.Delete(CanaryFilePath);
+                        File.Move(backupExe, ExePath, true);
+                        Process.Start(new ProcessStartInfo(ExePath) { UseShellExecute = true });
+                        Environment.Exit(0);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox(IntPtr.Zero, "Failed to restore backup: " + ex.Message, "KeyPulse", 0x10);
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
+    public static void IncrementCanaryCrashCount()
+    {
+        try
+        {
+            if (!File.Exists(CanaryFilePath)) return;
+            var lines = File.ReadAllLines(CanaryFilePath);
+            if (lines.Length == 0) return;
+            var parts = lines[0].Split('|');
+            var version = parts.Length > 0 ? parts[0] : "unknown";
+            var time = parts.Length > 1 ? parts[1] : DateTime.UtcNow.ToString("O");
+            var backupExe = parts.Length > 2 ? parts[2] : string.Empty;
+            var crashCount = (parts.Length > 3 && int.TryParse(parts[3], out var cc) ? cc : 0) + 1;
+            File.WriteAllText(CanaryFilePath, $"{version}|{time}|{backupExe}|{crashCount}");
+        }
+        catch { }
+    }
+
+    public static void ClearPostUpdateCanary()
+    {
+        try
+        {
+            if (File.Exists(CanaryFilePath))
+            {
+                var lines = File.ReadAllLines(CanaryFilePath);
+                if (lines.Length > 0)
+                {
+                    var parts = lines[0].Split('|');
+                    var backupExe = parts.Length > 2 ? parts[2] : string.Empty;
+                    if (!string.IsNullOrWhiteSpace(backupExe) && File.Exists(backupExe))
+                    {
+                        try { File.Delete(backupExe); } catch { }
+                    }
+                }
+                File.Delete(CanaryFilePath);
+            }
+        }
+        catch { }
+    }
+
     [STAThread]
     public static void Main(string[] args)
     {
+        CheckPostUpdateCanaryRecovery();
+
         var isUninstall = args.Contains("--uninstall");
         var isInstallWorker = args.Contains("--install-worker");
-        var isSetupMode = isUninstall || isInstallWorker;
+        var isUpdateWorker = args.Contains("--update-worker") || args.Contains("--update");
+        var isSetupMode = isUninstall || isInstallWorker || isUpdateWorker;
 
         AppDomain.CurrentDomain.UnhandledException += (s, e) =>
         {
+            if (e.IsTerminating)
+            {
+                IncrementCanaryCrashCount();
+            }
             LogCrash($"Unhandled Exception: {e.ExceptionObject}");
         };
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) =>
@@ -293,7 +383,9 @@ class Program
                 return;
             }
 
-            var tempUninstaller = Path.Combine(Path.GetTempPath(), "KeyPulse_Uninstaller.exe");
+            var stagingDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), IsDevMode ? "KeyPulse_DEV_Uninstall" : "KeyPulse_Uninstall");
+            Directory.CreateDirectory(stagingDir);
+            var tempUninstaller = Path.Combine(stagingDir, "KeyPulse_Uninstaller.exe");
             if (!Environment.ProcessPath!.Equals(tempUninstaller, StringComparison.OrdinalIgnoreCase))
             {
                 try
@@ -306,7 +398,7 @@ class Program
                     LogCrash($"Could not stage the uninstaller at {tempUninstaller}: {ex}");
                     MessageBox(IntPtr.Zero,
                         "KeyPulse could not start its uninstaller.\n\n" + ex.Message +
-                        "\n\nClose any running KeyPulse setup window, make sure there is free space in your temporary folder, and try again.",
+                        "\n\nClose any running KeyPulse setup window, make sure there is free space in your user profile folder, and try again.",
                         "KeyPulse", 0x10);
                     return;
                 }
@@ -345,7 +437,7 @@ class Program
             return;
         }
 
-        if (isInstallWorker)
+        if (isInstallWorker || isUpdateWorker)
         {
             if (!TryAcquireSetupLock(10000))
             {
@@ -769,18 +861,112 @@ class Program
         return state;
     }
 
+    private static readonly Guid CLSID_TaskScheduler = new Guid("0f87369f-a4e5-4cfc-bd3e-73e6154572dd");
+    private static ITaskService CreateTaskService() => ComActivation.CreateInstance<ITaskService>(CLSID_TaskScheduler);
+
+    private static bool TryGetAdminTaskViaCom(out string? xml, out bool isEnabled, out bool notFound)
+    {
+        xml = null;
+        isEnabled = false;
+        notFound = false;
+        try
+        {
+            var service = CreateTaskService();
+            service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
+            var folder = service.GetFolder(@"\");
+            try
+            {
+                var task = folder.GetTask(AdminTaskName);
+                if (task != null)
+                {
+                    xml = task.Xml;
+                    isEnabled = task.Enabled;
+                    return true;
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                notFound = true;
+                return false;
+            }
+            catch (COMException ex) when ((uint)ex.HResult == 0x80070002 || (uint)ex.HResult == 0x80041318)
+            {
+                notFound = true;
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Task Scheduler COM query failed: {ex.Message}");
+        }
+        return false;
+    }
+
+    private static bool TryRegisterAdminTaskViaCom(string xml, out string error)
+    {
+        error = string.Empty;
+        try
+        {
+            var service = CreateTaskService();
+            service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
+            var folder = service.GetFolder(@"\");
+            var task = folder.RegisterTask(AdminTaskName, xml, 6, Type.Missing, Type.Missing, 3, Type.Missing);
+            if (task != null) return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            LogDebug($"Task Scheduler COM registration failed: {ex.Message}");
+        }
+        return false;
+    }
+
+    private static bool TryDeleteAdminTaskViaCom()
+    {
+        try
+        {
+            var service = CreateTaskService();
+            service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
+            var folder = service.GetFolder(@"\");
+            folder.DeleteTask(AdminTaskName, 0);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return true;
+        }
+        catch (COMException ex) when ((uint)ex.HResult == 0x80070002 || (uint)ex.HResult == 0x80041318)
+        {
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Task Scheduler COM delete failed: {ex.Message}");
+            return false;
+        }
+    }
+
     private static AdminTaskState QueryAdminTaskState()
     {
         if (IsDevMode) return AdminTaskState.NotPresent;
 
+        if (TryGetAdminTaskViaCom(out var taskXml, out var isEnabled, out var notFound))
+        {
+            return isEnabled ? AdminTaskState.Enabled : AdminTaskState.Disabled;
+        }
+        if (notFound)
+        {
+            return AdminTaskState.NotPresent;
+        }
+
         if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var xml))
         {
             var taskFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "Tasks", AdminTaskName);
-            var notFound = !File.Exists(taskFilePath)
+            var missing = !File.Exists(taskFilePath)
                 || xml.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase)
                 || xml.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
                 || xml.Contains("cannot find", StringComparison.OrdinalIgnoreCase);
-            return notFound ? AdminTaskState.NotPresent : AdminTaskState.Unknown;
+            return missing ? AdminTaskState.NotPresent : AdminTaskState.Unknown;
         }
 
         return xml.Contains("<Enabled>false</Enabled>", StringComparison.OrdinalIgnoreCase)
@@ -820,6 +1006,12 @@ class Program
     {
         message = string.Empty;
         if (GetAdminTaskState() == AdminTaskState.NotPresent) return true;
+
+        if (TryDeleteAdminTaskViaCom())
+        {
+            InvalidateAdminTaskState();
+            if (GetAdminTaskState() == AdminTaskState.NotPresent) return true;
+        }
 
         RunSchtasks($"/Delete /TN \"{AdminTaskName}\" /F", out var code, out var output);
         InvalidateAdminTaskState();
@@ -889,10 +1081,17 @@ class Program
     {
         try
         {
-            if (!RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var xml) || string.IsNullOrWhiteSpace(xml))
+            string? xml = null;
+            if (TryGetAdminTaskViaCom(out var comXml, out _, out _))
             {
-                return false;
+                xml = comXml;
             }
+            else if (RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var schtasksXml) && !string.IsNullOrWhiteSpace(schtasksXml))
+            {
+                xml = schtasksXml;
+            }
+
+            if (string.IsNullOrWhiteSpace(xml)) return false;
 
             var needsUpdate = xml.Contains("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>", StringComparison.OrdinalIgnoreCase)
                            || xml.Contains("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>", StringComparison.OrdinalIgnoreCase)
@@ -921,7 +1120,14 @@ class Program
                 updatedXml = updatedXml.Replace("<StopOnIdleEnd>true</StopOnIdleEnd>", "<StopOnIdleEnd>false</StopOnIdleEnd>", StringComparison.OrdinalIgnoreCase);
             }
 
-            var tempXmlPath = Path.Combine(Path.GetTempPath(), $"keypulse_task_heal_{Guid.NewGuid():N}.xml");
+            if (TryRegisterAdminTaskViaCom(updatedXml, out _))
+            {
+                InvalidateAdminTaskState();
+                return true;
+            }
+
+            var safeDir = Directory.Exists(InstallDir) ? InstallDir : Path.GetTempPath();
+            var tempXmlPath = Path.Combine(safeDir, $"keypulse_task_heal_{Guid.NewGuid():N}.xml");
             try
             {
                 File.WriteAllText(tempXmlPath, updatedXml, System.Text.Encoding.Unicode);
@@ -991,7 +1197,14 @@ class Program
   </Actions>
 </Task>";
 
-        var tempXmlPath = Path.Combine(Path.GetTempPath(), $"keypulse_task_{Guid.NewGuid():N}.xml");
+        if (TryRegisterAdminTaskViaCom(xmlTemplate, out var comError))
+        {
+            InvalidateAdminTaskState();
+            return true;
+        }
+
+        var safeDir = Directory.Exists(InstallDir) ? InstallDir : Path.GetTempPath();
+        var tempXmlPath = Path.Combine(safeDir, $"keypulse_task_{Guid.NewGuid():N}.xml");
         bool created = false;
         int exitCode = -1;
         string output = string.Empty;
@@ -1279,18 +1492,36 @@ class Program
         }
         catch (Exception ex)
         {
-            LogCrash($"Could not create the runtime library folder '{outDir}': {ex.Message}. Falling back to TEMP.");
-            outDir = RuntimeFallbackDir;
-            try { Directory.CreateDirectory(outDir); } catch { }
+            LogCrash($"Could not create the secure runtime library folder '{outDir}': {ex.Message}.");
+            var msg = "KeyPulse could not create its secure runtime library directory:\n\n"
+                    + outDir + "\n\n"
+                    + ex.Message + "\n\n"
+                    + "For security reasons, KeyPulse refuses to load native binaries from shared temporary folders. Check folder permissions and disk space.";
+            MessageBox(IntPtr.Zero, msg, "KeyPulse - Security Initialization Error", 0x10 /* MB_ICONERROR */);
+            Environment.Exit(1);
+            return;
         }
 
         var failedLibs = new List<string>();
 
         foreach (var res in resources)
         {
-            if (!res.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
+            bool isGz = res.EndsWith(".dll.gz", StringComparison.OrdinalIgnoreCase);
+            if (!isGz && !res.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
 
-            var dllFileName = res.Split('.').SkipLast(1).Last() + ".dll";
+            string dllFileName;
+            var parts = res.Split('.');
+            if (isGz)
+            {
+                if (parts.Length < 3) continue;
+                dllFileName = parts[^3] + ".dll";
+            }
+            else
+            {
+                if (parts.Length < 2) continue;
+                dllFileName = parts[^2] + ".dll";
+            }
+
             var target = Path.Combine(outDir, dllFileName);
             var stampPath = target + ".stamp";
 
@@ -1305,12 +1536,20 @@ class Program
 
                 var expectedHash = ComputeHash(stream);
                 var expectedHashHex = Convert.ToHexString(expectedHash);
+                var expectedStamp = stream.Length + "|" + expectedHashHex;
 
-                if (File.Exists(target) && FileHashMatches(target, expectedHash))
+                if (File.Exists(target) && File.Exists(stampPath))
                 {
-                    LogDebug($"{dllFileName} verified by SHA-256 content hash.");
-                    WriteStamp(stampPath, stream.Length, expectedHashHex);
-                    continue;
+                    try
+                    {
+                        var existingStamp = File.ReadAllText(stampPath).Trim();
+                        if (string.Equals(existingStamp, expectedStamp, StringComparison.OrdinalIgnoreCase))
+                        {
+                            LogDebug($"{dllFileName} verified by stamp cache.");
+                            continue;
+                        }
+                    }
+                    catch { }
                 }
 
                 LogDebug($"Extracting or repairing native component {target}");
@@ -1319,13 +1558,22 @@ class Program
                 var tempTarget = Path.Combine(outDir, $"{dllFileName}.tmp-{Guid.NewGuid():N}");
                 using (var fs = File.Create(tempTarget))
                 {
-                    stream.CopyTo(fs);
+                    if (isGz)
+                    {
+                        using var gz = new System.IO.Compression.GZipStream(stream, System.IO.Compression.CompressionMode.Decompress);
+                        gz.CopyTo(fs);
+                    }
+                    else
+                    {
+                        stream.CopyTo(fs);
+                    }
                 }
 
-                if (!FileHashMatches(tempTarget, expectedHash))
+                var extractedInfo = new FileInfo(tempTarget);
+                if (!extractedInfo.Exists || extractedInfo.Length == 0)
                 {
                     try { File.Delete(tempTarget); } catch { }
-                    failedLibs.Add($"{dllFileName} (extracted temporary file corrupted)");
+                    failedLibs.Add($"{dllFileName} (extracted file empty or missing)");
                     continue;
                 }
 
@@ -1433,14 +1681,33 @@ class Program
 
         if (taskState == AdminTaskState.Enabled || taskState == AdminTaskState.Disabled)
         {
-            var verb = enable ? "/ENABLE" : "/DISABLE";
-            var changed = RunSchtasks($"/Change /TN \"{AdminTaskName}\" {verb}", out var code, out var output);
-            InvalidateAdminTaskState();
-
-            if (!changed)
+            bool comToggled = false;
+            try
             {
-                error = $"Windows refused to change the KeyPulse logon task (error {code}). {output.Trim()}";
-                return false;
+                var service = CreateTaskService();
+                service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
+                var folder = service.GetFolder(@"\");
+                var task = folder.GetTask(AdminTaskName);
+                if (task != null)
+                {
+                    task.Enabled = enable;
+                    comToggled = true;
+                    InvalidateAdminTaskState();
+                }
+            }
+            catch { }
+
+            if (!comToggled)
+            {
+                var verb = enable ? "/ENABLE" : "/DISABLE";
+                var changed = RunSchtasks($"/Change /TN \"{AdminTaskName}\" {verb}", out var code, out var output);
+                InvalidateAdminTaskState();
+
+                if (!changed)
+                {
+                    error = $"Windows refused to change the KeyPulse logon task (error {code}). {output.Trim()}";
+                    return false;
+                }
             }
 
             if (IsStartupEnabled() != enable)
@@ -1483,17 +1750,15 @@ class Program
             }
 
             var vbsPath = Path.Combine(InstallDir, "boot.vbs");
+            try { if (File.Exists(vbsPath)) File.Delete(vbsPath); } catch { }
+
             if (enable)
             {
                 Directory.CreateDirectory(InstallDir);
+                var runCmd = $"\"{ExePath}\" --hidden";
+                key.SetValue(AppName, runCmd);
 
-                var vbsCode = $@"On Error Resume Next
-Set WshShell = CreateObject(""WScript.Shell"")
-WshShell.Run """"""{ExePath}"""" --hidden"", 0, False";
-                File.WriteAllText(vbsPath, vbsCode);
-                key.SetValue(AppName, $"wscript.exe \"{vbsPath}\"");
-
-                if (!File.Exists(vbsPath) || key.GetValue(AppName)?.ToString()?.Contains(vbsPath, StringComparison.OrdinalIgnoreCase) != true)
+                if (key.GetValue(AppName)?.ToString()?.Contains(ExePath, StringComparison.OrdinalIgnoreCase) != true)
                 {
                     error = "Windows startup entry was not saved.";
                     return false;
@@ -1502,7 +1767,6 @@ WshShell.Run """"""{ExePath}"""" --hidden"", 0, False";
             else
             {
                 key.DeleteValue(AppName, false);
-                if (File.Exists(vbsPath)) File.Delete(vbsPath);
 
                 if (key.GetValue(AppName) != null)
                 {
@@ -1572,4 +1836,63 @@ WshShell.Run """"""{ExePath}"""" --hidden"", 0, False";
             .UsePlatformDetect()
             .WithInterFont()
             .LogToTrace();
+}
+
+
+[ComImport, Guid("2FABA4C7-4DA9-4013-9697-20CC3FD40F85"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+internal interface ITaskService
+{
+    [return: MarshalAs(UnmanagedType.Interface)]
+    ITaskFolder GetFolder([MarshalAs(UnmanagedType.BStr)] string path);
+    void DummyGetRunningTasks();
+    void DummyNewTask();
+    void Connect(
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object serverName,
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object user,
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object domain,
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object password);
+    bool Connected { get; }
+}
+
+[ComImport, Guid("8CFAC062-A080-4C15-9A88-AA7C2AF80DFC"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+internal interface ITaskFolder
+{
+    string Name { [return: MarshalAs(UnmanagedType.BStr)] get; }
+    string Path { [return: MarshalAs(UnmanagedType.BStr)] get; }
+    [return: MarshalAs(UnmanagedType.Interface)]
+    ITaskFolder GetFolder([MarshalAs(UnmanagedType.BStr)] string path);
+    void DummyGetFolders();
+    void DummyCreateFolder();
+    void DummyDeleteFolder();
+    [return: MarshalAs(UnmanagedType.Interface)]
+    IRegisteredTask GetTask([MarshalAs(UnmanagedType.BStr)] string path);
+    void DummyGetTasks();
+    void DeleteTask([MarshalAs(UnmanagedType.BStr)] string name, int flags);
+    [return: MarshalAs(UnmanagedType.Interface)]
+    IRegisteredTask RegisterTask(
+        [MarshalAs(UnmanagedType.BStr)] string path,
+        [MarshalAs(UnmanagedType.BStr)] string xmlText,
+        int flags,
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object userId,
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object password,
+        int logonType,
+        [In, Optional, MarshalAs(UnmanagedType.Struct)] object sddl);
+}
+
+[ComImport, Guid("9C86F320-DEE3-4DD1-B972-A303F26B061E"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+internal interface IRegisteredTask
+{
+    string Name { [return: MarshalAs(UnmanagedType.BStr)] get; }
+    string Path { [return: MarshalAs(UnmanagedType.BStr)] get; }
+    int State { get; }
+    bool Enabled { get; [param: MarshalAs(UnmanagedType.VariantBool)] set; }
+    void DummyRun();
+    void DummyRunEx();
+    void DummyGetInstances();
+    void DummyLastRunTime();
+    void DummyLastTaskResult();
+    void DummyNumberOfMissedRuns();
+    void DummyNextRunTime();
+    void DummyDefinition();
+    string Xml { [return: MarshalAs(UnmanagedType.BStr)] get; }
 }

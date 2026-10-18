@@ -17,10 +17,14 @@
 - ☀️ **Hardware-Safe Screen Brightness & Contrast Control**: Active-display-only dynamic layout (automatically hides disconnected screens and resizes overlay to 420px, 540px, or 680px), dual vertical sliders, locked or independent Brightness/Contrast ratios, hardware DDC/CI (`dxva2.dll`) + internal laptop backlight (`\\.\LCD`), stable Hardware ID binding, inline display renaming with explicit `Save`/`Cancel` actions, and intelligent shortcut cycle edge-case handling.
   - 🛡️ **Hardware Protection Protocol**: Rigorous safety guard rails protect your monitor's microcontrollers and GPU I2C bus: sequential multi-display writes (eliminating bus contention), 30ms I2C multiplexer settling delays, 50ms VESA MCCS dual-write pauses, 250ms hardware write speed limiter with trailing-edge final flush, delta-only write filtering, strict raw value clamping to hardware limits, and decoupled zero-thrash disk I/O during slider movement.
 - 🖥️ **Desktop Organizer**: Save, rename, and restore multi-monitor desktop icon layouts with atomic LKG persistence, non-overlapping responsive profile cards, explicit `Save`/`Cancel` inline renaming, customizable placement for unsaved new icons (primary screen center, untouched in place, right-aligned, or secondary monitor center), and optional periodic auto-snapshots with custom day intervals (`1–30 days`, retains latest 5 while protecting manual layouts forever).
+- 🔄 **Automated Boot-Time Update Checks & In-App Updates**: Nonblocking startup check against GitHub releases with configurable release channels (**Stable** and **Beta**), quiet tray notifications on silent boot, formatted "What's New" release notes viewer, in-flight download cancellation with progress indicators, a dedicated 15-minute download client for slow connections, and cryptographic SHA-256 and PE header validation prior to execution.
+- 🛡️ **Update Safety Canary & Automatic Crash Rollback**: Preserves `KeyPulse.exe.bak` during in-place updates, sets a post-update health canary (`.post_update_canary`) with a 15-second startup stabilization window, and automatically prompts for 1-click rollback if a newly updated binary encounters a crash loop during startup.
+- 🔒 **Last Known Good (LKG) Redundancy & Corruption Guard**: Automatically mirrors verified settings to `config.lkg.json`. Deserialization errors automatically recover from LKG and set Read-Only session mode to prevent blank defaults from overwriting user shortcuts.
 - ⚙️ **Consolidated 4-Tab Settings Dialog**: Modern categorized preferences dialog featuring 4 top-level application groupings (**General**, **Typing & Speed**, **Window & Display**, **Advanced & Safety**), instant live search filtering across all settings, customizable character delay stepper (`1–200 ms`), per-tab and global "Restore Defaults", persistent window size/position and active tab memory, and an isolated red Danger Zone.
 - 🛡️ **Conflict Probing**: Actively probes and validates your custom hotkeys against existing OS/App shortcuts to prevent collisions.
-- 💾 **Encrypted Backup & State Persistence**: Remembers your window layouts, sizes, shortcuts, desktop layouts, and brightness presets across reboots, with optional AES-256-GCM encrypted backup/restore.
-- 🚀 **Self-Installing Architecture**: Installs seamlessly into `%LOCALAPPDATA%`, sets up Start Menu shortcuts, registers safely into `appwiz.cpl` (Programs & Features), and operates silently from the System Tray.
+- 💾 **Encrypted Backup & State Persistence**: Remembers your window layouts, sizes, shortcuts, desktop layouts, and brightness presets across reboots, with optional AES-256-GCM encrypted backup/restore and multi-store rollback copies protecting `config.json`, `desktop_organizer.json`, and `screen_brightness.json`.
+- 🚀 **Self-Installing Architecture**: Installs seamlessly into `%LOCALAPPDATA%`, sets up Start Menu shortcuts, registers safely into `appwiz.cpl` (Programs & Features), and operates silently from the System Tray. Upgrades preserve Administrator privileges seamlessly and use headless `--update-worker` auto-restarts without prompt interruptions.
+- 🧪 **Automated Quality Gates & Test Suite**: Pre-release CI/CD test gates (`tests/KeyPulse.Tests`) blocking broken builds, NativeAOT platform linker and trimming gates (`-p:PublishAot=true`), detached SHA-256 checksum manifests (`SHA256SUMS.txt`), and Authenticode code-signing integration.
 
 ## Installation
 
@@ -37,7 +41,7 @@ KeyPulse fully registers itself within Windows. To remove it cleanly:
 
 ## Usage
 
-- Double-click the tray icon or right-click and select **Settings** to access the UI.
+- Click or double-click the tray icon to toggle the main shortcut manager window, or right-click the tray icon to access quick actions, Screen Brightness, Desktop Organizer, or **Settings**.
 - Click on the **Press keys...** text box and physically press the combination you want (e.g., `Ctrl+Alt+A`).
 - Select your Action, provide the Target (Path/URL/Text), and click **Add**.
 - Close the window to minimize KeyPulse to the System Tray.

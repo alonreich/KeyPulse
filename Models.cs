@@ -497,6 +497,14 @@ namespace KeyPulse
 
     public class AppConfig
     {
+        public int SchemaVersion { get; set; } = 1;
+        public bool AutoCheckForUpdates { get; set; } = true;
+        public string UpdateChannel { get; set; } = "Stable";
+        public string SkippedUpdateVersion { get; set; } = string.Empty;
+
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+
         public List<HotkeyEntry> Hotkeys { get; set; } = new();
         public double MainWindowX { get; set; } = double.NaN;
         public double MainWindowY { get; set; } = double.NaN;
@@ -749,6 +757,7 @@ namespace KeyPulse
 
     public class DesktopOrganizerConfig
     {
+        public int SchemaVersion { get; set; } = 1;
         public bool AutoRestoreOnDisplayChange { get; set; } = false;
         public bool AutoPeriodicSnapshotEnabled { get; set; } = false;
         public int AutoSnapshotIntervalDays { get; set; } = 3;
@@ -788,6 +797,7 @@ namespace KeyPulse
 
     public class ScreenBrightnessConfig
     {
+        public int SchemaVersion { get; set; } = 1;
         public bool GlobalLockBrightnessContrast { get; set; } = true;
         public string LastCycleProfileId { get; set; } = string.Empty;
         public List<ScreenHardwareSetting> Screens { get; set; } = new();
@@ -799,6 +809,10 @@ namespace KeyPulse
     [JsonSerializable(typeof(BackupEnvelope))]
     [JsonSerializable(typeof(BackupPayload))]
     [JsonSerializable(typeof(GitHubRelease))]
+    [JsonSerializable(typeof(List<GitHubRelease>))]
+    [JsonSerializable(typeof(GitHubReleaseAsset))]
+    [JsonSerializable(typeof(List<GitHubReleaseAsset>))]
+    [JsonSerializable(typeof(Dictionary<string, JsonElement>))]
     [JsonSerializable(typeof(DesktopOrganizerConfig))]
     [JsonSerializable(typeof(DesktopLayoutProfile))]
     [JsonSerializable(typeof(DesktopIconSnapshot))]

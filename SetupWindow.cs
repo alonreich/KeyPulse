@@ -32,12 +32,15 @@ namespace KeyPulse
         private AppConfig _config = new AppConfig();
         private readonly string ConfigPath = ConfigStore.ConfigPath;
 
-        public SetupWindow(bool isUninstall)
+        private readonly bool _isUpdate;
+
+        public SetupWindow(bool isUninstall, bool isUpdate = false)
         {
             _isUninstall = isUninstall;
+            _isUpdate = isUpdate;
             _elevatedRetry = Environment.GetCommandLineArgs()
                 .Any(a => string.Equals(a, "--elevated-retry", StringComparison.OrdinalIgnoreCase));
-            Title = isUninstall ? "KeyPulse Setup - Uninstalling" : "KeyPulse Setup - Installing";
+            Title = isUninstall ? "KeyPulse Setup - Uninstalling" : (isUpdate ? "KeyPulse - Updating" : "KeyPulse Setup - Installing");
             Width = 550;
             Height = 400;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -46,14 +49,14 @@ namespace KeyPulse
 
             _headerText = new TextBlock
             {
-                Text = isUninstall ? "Processing Uninstallation..." : "Processing Installation...",
+                Text = isUninstall ? "Processing Uninstallation..." : (isUpdate ? "Applying KeyPulse Update..." : "Processing Installation..."),
                 Margin = new Thickness(15, 15, 15, 5),
                 Classes = { "SectionTitle" }
             };
 
             _progressText = new TextBlock
             {
-                Text = isUninstall ? "Preparing uninstall..." : "Preparing install...",
+                Text = isUninstall ? "Preparing uninstall..." : (isUpdate ? "Preparing update..." : "Preparing install..."),
                 Classes = { "Muted" },
                 Margin = new Thickness(15, 0, 15, 4)
             };
@@ -190,20 +193,19 @@ namespace KeyPulse
             var fallbackDir = Program.RuntimeFallbackDir;
             var self = Environment.ProcessPath;
 
-            var selfDeleteScript =
-                $"/c for /L %i in (1,1,30) do (ping 127.0.0.1 -n 2 > nul & rmdir /S /Q \"{legacyDir}\" & rmdir /S /Q \"{fallbackDir}\" & del /F /q \"{self}\" & if not exist \"{self}\" exit)";
+            try { if (Directory.Exists(legacyDir)) Directory.Delete(legacyDir, true); } catch { }
+            try { if (Directory.Exists(fallbackDir)) Directory.Delete(fallbackDir, true); } catch { }
 
-            try
+            if (!string.IsNullOrEmpty(self) && File.Exists(self))
             {
-                using var cleanup = Process.Start(new ProcessStartInfo("cmd.exe", selfDeleteScript)
+                try
                 {
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                });
-            }
-            catch (Exception ex)
-            {
-                Program.LogDebug("Uninstall self-delete could not be started: " + ex.Message);
+                    MoveFileEx(self, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+                }
+                catch (Exception ex)
+                {
+                    Program.LogDebug("Uninstall MoveFileEx cleanup failed: " + ex.Message);
+                }
             }
         }
 
@@ -379,6 +381,11 @@ namespace KeyPulse
             }
         }
 
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool MoveFileEx(string lpExistingFileName, string? lpNewFileName, int dwFlags);
+
+        private const int MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
+
         [DllImport("shell32.dll")]
         private static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
 
@@ -505,11 +512,6 @@ namespace KeyPulse
             }
         }
 
-        [ComImport]
-        [Guid("00021401-0000-0000-C000-000000000046")]
-        internal class ShellLink
-        {
-        }
 
         [ComImport]
         [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -558,9 +560,10 @@ namespace KeyPulse
 
             await Task.Run(() =>
             {
+                var clsidLink = new Guid("00021401-0000-0000-C000-000000000046");
                 try
                 {
-                    IShellLink link = (IShellLink)new ShellLink();
+                    IShellLink link = ComActivation.CreateInstance<IShellLink>(clsidLink);
                     link.SetPath(Program.ExePath);
                     link.SetWorkingDirectory(Program.InstallDir);
                     link.SetDescription("KeyPulse - Global Hotkey & Shortcut Manager");
@@ -577,7 +580,7 @@ namespace KeyPulse
                 {
                     try
                     {
-                        IShellLink link2 = (IShellLink)new ShellLink();
+                        IShellLink link2 = ComActivation.CreateInstance<IShellLink>(clsidLink);
                         link2.SetPath(Program.ExePath);
                         link2.SetWorkingDirectory(Program.InstallDir);
                         link2.SetDescription("KeyPulse - Global Hotkey & Shortcut Manager");
@@ -818,6 +821,9 @@ namespace KeyPulse
 
         private async Task RunInstall()
         {
+            var backupExe = Program.ExePath + ".bak";
+            bool hadPreviousExe = File.Exists(Program.ExePath);
+
             try
             {
                 SetProgress("Preparing installation...", 0, 6);
@@ -826,6 +832,18 @@ namespace KeyPulse
                 try { DeleteMatchingFilesExceptCurrent("keypulse_*.txt"); } catch { }
                 try { if (Directory.Exists(Program.LegacyNativeLibDir)) Directory.Delete(Program.LegacyNativeLibDir, true); } catch { }
                 try { if (Directory.Exists(Program.LegacyLogDir)) Directory.Delete(Program.LegacyLogDir, true); } catch { }
+                try
+                {
+                    var tempDir = Path.GetTempPath();
+                    var myProc = Environment.ProcessPath ?? string.Empty;
+                    foreach (var f in Directory.GetFiles(tempDir, "KeyPulse_Update_*"))
+                    {
+                        if (!string.Equals(f, myProc, StringComparison.OrdinalIgnoreCase))
+                        {
+                            try { File.Delete(f); } catch { }
+                        }
+                    }
+                } catch { }
                 var installWarnings = new List<string>();
 
                 bool wasRunningAsAdmin = false;
@@ -854,39 +872,89 @@ namespace KeyPulse
                 bool isUpgrade = File.Exists(Program.ExePath);
                 if (isUpgrade)
                 {
-                    SetProgress("Waiting for upgrade choice...", 0, 6);
-                    var tcs = new TaskCompletionSource<bool>();
-                    Dispatcher.UIThread.Post(() =>
+                    string installedVer = "unknown";
+                    try
                     {
-                        var panel = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Spacing = 14, MaxWidth = 470 };
-                        panel.Children.Add(new TextBlock { Text = "Existing Installation Detected", Classes = { "SectionTitle" }, HorizontalAlignment = HorizontalAlignment.Center });
-                        panel.Children.Add(new TextBlock { Text = "Keep your existing shortcuts and settings, or wipe them for a fresh install.", TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
-                        panel.Children.Add(new TextBlock { Text = "Wiping settings deletes saved shortcuts and app preferences.", Classes = { "ErrorText" }, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
-
-                        var btnKeep = new Button { Content = "Keep Settings & Upgrade", Classes = { "Primary" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 0 };
-                        var btnWipe = new Button { Content = "Wipe Settings", Classes = { "Danger" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 1 };
-
-                        btnKeep.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(false); };
-                        btnWipe.Click += async (s, e) =>
+                        var vi = FileVersionInfo.GetVersionInfo(Program.ExePath);
+                        if (!string.IsNullOrWhiteSpace(vi.FileVersion))
                         {
-                            var confirmed = await ConfirmWipeAsync();
-                            if (!confirmed)
+                            installedVer = vi.FileVersion.EndsWith(".0", StringComparison.Ordinal) && vi.FileVersion.Count(c => c == '.') == 3
+                                ? vi.FileVersion.Substring(0, vi.FileVersion.Length - 2)
+                                : vi.FileVersion;
+                        }
+                    }
+                    catch { }
+
+                    var currentVer = Program.AppVersion;
+                    var cmp = UpdateChecker.CompareVersions(currentVer, installedVer);
+                    bool isDowngrade = cmp < 0 && installedVer != "unknown";
+
+                    bool wipe = false;
+                    if (!_isUpdate)
+                    {
+                        SetProgress(isDowngrade ? "Warning: Downgrade detected..." : "Waiting for upgrade choice...", 0, 6);
+                        var tcs = new TaskCompletionSource<bool>();
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            var panel = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Spacing = 14, MaxWidth = 490 };
+                            panel.Children.Add(new TextBlock { Text = isDowngrade ? "Downgrade Warning Detected" : "Existing Installation Detected", Classes = { "SectionTitle" }, HorizontalAlignment = HorizontalAlignment.Center });
+
+                            if (isDowngrade)
                             {
-                                Log("Wipe was canceled. Nothing was deleted.");
-                                return;
+                                panel.Children.Add(new TextBlock
+                                {
+                                    Text = $"⚠️ You are attempting to install version v{currentVer}, but a newer version (v{installedVer}) is already installed on this PC.\nDowngrading can cause settings incompatibility, broken shortcuts, or data corruption.",
+                                    Classes = { "ErrorText" },
+                                    TextWrapping = TextWrapping.Wrap,
+                                    TextAlignment = TextAlignment.Center
+                                });
                             }
-                            Content = _mainGrid;
-                            tcs.TrySetResult(true);
-                        };
+                            else
+                            {
+                                panel.Children.Add(new TextBlock { Text = $"Installed version: v{installedVer}  →  New version: v{currentVer}\nKeep your existing shortcuts and settings, or wipe them for a fresh install.", TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
+                            }
 
-                        panel.Children.Add(btnKeep);
-                        panel.Children.Add(btnWipe);
+                            panel.Children.Add(new TextBlock { Text = "Wiping settings deletes saved shortcuts and app preferences.", Classes = { "ErrorText" }, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
 
-                        Content = new Border { Classes = { "Panel" }, Margin = new Thickness(24), Child = panel };
-                        btnKeep.Focus();
-                    });
+                            var btnKeep = new Button { Content = isDowngrade ? "Proceed with Downgrade (Keep Settings)" : "Keep Settings & Upgrade", Classes = { isDowngrade ? "Danger" : "Primary" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 0 };
+                            var btnWipe = new Button { Content = isDowngrade ? "Wipe Settings & Install Older Version" : "Wipe Settings", Classes = { "Danger" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 1 };
+                            var btnCancel = new Button { Content = "Cancel Installation (Recommended)", Classes = { "Primary" }, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center, Padding = new Thickness(10), Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand), TabIndex = 2, IsVisible = isDowngrade };
 
-                    bool wipe = await tcs.Task;
+                            btnKeep.Click += (s, e) => { Content = _mainGrid; tcs.TrySetResult(false); };
+                            btnCancel.Click += (s, e) =>
+                            {
+                                Log("Installation was cancelled by user due to downgrade warning.");
+                                ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
+                            };
+                            btnWipe.Click += async (s, e) =>
+                            {
+                                var confirmed = await ConfirmWipeAsync();
+                                if (!confirmed)
+                                {
+                                    Log("Wipe was canceled. Nothing was deleted.");
+                                    return;
+                                }
+                                Content = _mainGrid;
+                                tcs.TrySetResult(true);
+                            };
+
+                            if (isDowngrade)
+                            {
+                                panel.Children.Add(btnCancel);
+                            }
+                            panel.Children.Add(btnKeep);
+                            panel.Children.Add(btnWipe);
+
+                            Content = new Border { Classes = { "Panel" }, Margin = new Thickness(24), Child = panel };
+                            if (isDowngrade) btnCancel.Focus(); else btnKeep.Focus();
+                        });
+
+                        wipe = await tcs.Task;
+                    }
+                    else
+                    {
+                        Log("In-app update detected. Automatically keeping settings and shortcuts.");
+                    }
                     if (wipe)
                     {
                         _preserveAdminPrivilege = false;
@@ -994,8 +1062,6 @@ namespace KeyPulse
                 Log("  -> Success.");
 
                 SetProgress("Step 3 of 6: Copying application binaries...", 3, 6);
-                Log("Step 3/6: Copying application binaries...");
-
                 var stagedExe = Program.ExePath + ".new";
                 try { if (File.Exists(stagedExe)) File.Delete(stagedExe); } catch { }
 
@@ -1009,8 +1075,35 @@ namespace KeyPulse
                     throw new IOException($"The copied program file is {stagedLength} bytes but should be {sourceLength}. Nothing was replaced.");
                 }
 
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    byte[] sourceHash, stagedHash;
+                    using (var sf = File.OpenRead(Environment.ProcessPath!)) sourceHash = sha.ComputeHash(sf);
+                    using (var tf = File.OpenRead(stagedExe)) stagedHash = sha.ComputeHash(tf);
+                    if (!sourceHash.SequenceEqual(stagedHash))
+                    {
+                        try { File.Delete(stagedExe); } catch { }
+                        throw new IOException("Cryptographic SHA-256 verification failed on the staged binary. Nothing was replaced.");
+                    }
+                }
+
+                if (hadPreviousExe)
+                {
+                    try { File.Copy(Program.ExePath, backupExe, true); }
+                    catch (Exception bEx) { Log("  -> Warning: could not create pre-install backup: " + bEx.Message); }
+                }
+
                 File.Move(stagedExe, Program.ExePath, true);
                 Log("  -> Success.");
+
+                if (isUpgrade && hadPreviousExe)
+                {
+                    try
+                    {
+                        File.WriteAllText(Program.CanaryFilePath, $"{Program.AppVersion}|{DateTime.UtcNow:O}|{backupExe}|0");
+                    }
+                    catch { }
+                }
 
                 SetProgress("Step 4 of 6: Registering with Windows...", 4, 6);
                 Log("Step 4/6: Registering with Programs and Features (appwiz.cpl)...");
@@ -1127,44 +1220,69 @@ namespace KeyPulse
                     Log("  - " + warning);
                 }
                 
-                Dispatcher.UIThread.Post(() =>
+                void LaunchAndExit()
                 {
-                    _headerText.Text = installWarnings.Count == 0 ? "INSTALLATION SUCCESSFUL" : "INSTALLATION COMPLETED WITH WARNINGS";
-                    _headerText.Foreground = installWarnings.Count == 0 ? AppBrush("AppSuccessSoftBrush") : AppBrush("AppWarningBrush");
-                    _actionButton.Content = "Launch KeyPulse & Close";
-                    _actionButton.IsVisible = true;
-                    _actionButton.Focus();
-                    _actionButton.Click += (s, ev) =>
+                    var psi = new ProcessStartInfo
                     {
-                        var psi = new ProcessStartInfo
-                        {
-                            FileName = Program.ExePath,
-                            Arguments = "",
-                            UseShellExecute = true
-                        };
+                        FileName = Program.ExePath,
+                        Arguments = "",
+                        UseShellExecute = true
+                    };
+                    if (_preserveAdminPrivilege)
+                    {
+                        psi.Verb = "runas";
+                    }
+
+                    try
+                    {
+                        using var launched = Process.Start(psi);
+                    }
+                    catch
+                    {
                         if (_preserveAdminPrivilege)
                         {
-                            psi.Verb = "runas";
+                            psi.Verb = "";
+                            try { using var fallback = Process.Start(psi); } catch { }
                         }
+                    }
+                    ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
+                }
 
-                        try
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _headerText.Text = installWarnings.Count == 0 ? (_isUpdate ? "UPDATE SUCCESSFUL - RESTARTING..." : "INSTALLATION SUCCESSFUL") : "COMPLETED WITH WARNINGS";
+                    _headerText.Foreground = installWarnings.Count == 0 ? AppBrush("AppSuccessSoftBrush") : AppBrush("AppWarningBrush");
+                    _actionButton.Content = _isUpdate ? "Restarting KeyPulse..." : "Launch KeyPulse & Close";
+                    _actionButton.IsVisible = true;
+                    _actionButton.Focus();
+                    _actionButton.Click += (s, ev) => LaunchAndExit();
+
+                    if (_isUpdate && installWarnings.Count == 0)
+                    {
+                        _ = Task.Run(async () =>
                         {
-                            using var launched = Process.Start(psi);
-                        }
-                        catch
-                        {
-                            if (_preserveAdminPrivilege)
-                            {
-                                psi.Verb = "";
-                                try { using var fallback = Process.Start(psi); } catch { }
-                            }
-                        }
-                        ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty);
-                    };
+                            await Task.Delay(800);
+                            Dispatcher.UIThread.Post(LaunchAndExit);
+                        });
+                    }
                 });
             }
             catch (Exception ex)
             {
+                if (hadPreviousExe && File.Exists(backupExe))
+                {
+                    try
+                    {
+                        File.Move(backupExe, Program.ExePath, true);
+                        Log("  -> Restored previous working application executable from backup.");
+                        if (File.Exists(Program.CanaryFilePath)) File.Delete(Program.CanaryFilePath);
+                    }
+                    catch (Exception restoreEx)
+                    {
+                        Log("  -> CRITICAL: Failed to restore previous application backup: " + restoreEx.Message);
+                    }
+                }
+
                 SetProgress("Installation failed.", 0, 6);
                 Log($"\nERROR during installation: {ex.Message}");
                 Dispatcher.UIThread.Post(() =>

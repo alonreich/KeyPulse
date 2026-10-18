@@ -34,6 +34,8 @@ namespace KeyPulse
         }
 
         public static readonly string ConfigPath = Path.Combine(ConfigDirectory, "config.json");
+        public static readonly string ConfigLkgPath = Path.Combine(ConfigDirectory, "config.lkg.json");
+        public const int CurrentSchemaVersion = 1;
 
         private static readonly object IoLock = new object();
 
@@ -44,7 +46,27 @@ namespace KeyPulse
 
             lock (IoLock)
             {
-                if (!File.Exists(ConfigPath)) return new AppConfig();
+                if (!File.Exists(ConfigPath))
+                {
+                    if (File.Exists(ConfigLkgPath))
+                    {
+                        try
+                        {
+                            var lkgJson = File.ReadAllText(ConfigLkgPath);
+                            var recovered = JsonSerializer.Deserialize(lkgJson, AppConfigJsonContext.Default.AppConfig);
+                            if (recovered != null)
+                            {
+                                if (recovered.Hotkeys == null) recovered.Hotkeys = new List<HotkeyEntry>();
+                                MigrateConfig(recovered);
+                                Save(recovered, out _);
+                                loadError = "Your KeyPulse settings file was missing and has been automatically restored from your last known good backup.";
+                                return recovered;
+                            }
+                        }
+                        catch { }
+                    }
+                    return new AppConfig();
+                }
 
                 string json;
                 try
@@ -61,8 +83,13 @@ namespace KeyPulse
                 if (string.IsNullOrWhiteSpace(json))
                 {
                     quarantinePath = Quarantine();
-                    loadError = "Your KeyPulse settings file was empty, so KeyPulse started with no shortcuts.";
-                    return new AppConfig();
+                    if (TryRecoverFromLkg(out var lkgRecovered))
+                    {
+                        loadError = "Your KeyPulse settings file was empty and was restored from your last known good backup. Preserved as " + quarantinePath;
+                        return lkgRecovered;
+                    }
+                    loadError = "Your KeyPulse settings file was empty. KeyPulse is in read-only mode to prevent overwriting.";
+                    return new AppConfig { IsReadOnlySession = true };
                 }
 
                 try
@@ -70,13 +97,21 @@ namespace KeyPulse
                     var loaded = JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.AppConfig);
                     if (loaded == null) throw new InvalidDataException("The settings file contained no data.");
                     if (loaded.Hotkeys == null) loaded.Hotkeys = new List<HotkeyEntry>();
+                    MigrateConfig(loaded);
+                    UpdateLkgCopy(json);
                     return loaded;
                 }
                 catch (Exception ex)
                 {
                     quarantinePath = Quarantine();
-                    loadError = "Your KeyPulse settings file is damaged and could not be read (" + ex.Message + ").";
-                    return new AppConfig();
+                    if (TryRecoverFromLkg(out var lkgRecovered))
+                    {
+                        loadError = "Your KeyPulse settings file was damaged (" + ex.Message + ") and has been automatically restored from your last known good backup. The damaged file was preserved as " + quarantinePath + ".";
+                        return lkgRecovered;
+                    }
+
+                    loadError = "Your KeyPulse settings file is damaged and could not be read (" + ex.Message + "). Settings are locked in read-only mode to prevent data loss. Damaged file was preserved as " + quarantinePath + ".";
+                    return new AppConfig { IsReadOnlySession = true };
                 }
             }
         }
@@ -96,14 +131,62 @@ namespace KeyPulse
                 try
                 {
                     Directory.CreateDirectory(ConfigDirectory);
+                    config.SchemaVersion = CurrentSchemaVersion;
                     var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
-                    return AtomicFileWriter.WriteAtomic(ConfigPath, json, out error);
+                    var ok = AtomicFileWriter.WriteAtomic(ConfigPath, json, out error);
+                    if (ok)
+                    {
+                        UpdateLkgCopy(json);
+                    }
+                    return ok;
                 }
                 catch (Exception ex)
                 {
                     error = ex.Message;
                     return false;
                 }
+            }
+        }
+
+        private static bool TryRecoverFromLkg(out AppConfig config)
+        {
+            config = new AppConfig { IsReadOnlySession = true };
+            if (!File.Exists(ConfigLkgPath)) return false;
+
+            try
+            {
+                var lkgJson = File.ReadAllText(ConfigLkgPath);
+                var loaded = JsonSerializer.Deserialize(lkgJson, AppConfigJsonContext.Default.AppConfig);
+                if (loaded != null)
+                {
+                    if (loaded.Hotkeys == null) loaded.Hotkeys = new List<HotkeyEntry>();
+                    MigrateConfig(loaded);
+                    config = loaded;
+                    AtomicFileWriter.WriteAtomic(ConfigPath, lkgJson, out _);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogCrash("Failed to recover from LKG backup: " + ex.Message);
+            }
+            return false;
+        }
+
+        private static void UpdateLkgCopy(string verifiedJson)
+        {
+            try
+            {
+                AtomicFileWriter.WriteAtomic(ConfigLkgPath, verifiedJson, out _);
+            }
+            catch { }
+        }
+
+        private static void MigrateConfig(AppConfig config)
+        {
+            if (config.SchemaVersion < 1)
+            {
+                config.SchemaVersion = 1;
             }
         }
 
@@ -160,6 +243,47 @@ namespace KeyPulse
                     return null;
                 }
             }
+        }
+
+        /// <summary>
+        /// Saves timestamped rollback copies of all active persistent stores (config.json,
+        /// desktop_organizer.json, and screen_brightness.json) before a restore operation.
+        /// </summary>
+        public static List<string> SaveAllRollbackCopies(string reason)
+        {
+            var copies = new List<string>();
+            lock (IoLock)
+            {
+                try
+                {
+                    Directory.CreateDirectory(ConfigDirectory);
+                    var ts = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+
+                    var mainTarget = SaveRollbackCopy(reason);
+                    if (mainTarget != null) copies.Add(mainTarget);
+
+                    var orgPath = Path.Combine(ConfigDirectory, "desktop_organizer.json");
+                    if (File.Exists(orgPath))
+                    {
+                        var orgTarget = Path.Combine(ConfigDirectory, $"desktop_organizer.{reason}-{ts}.json");
+                        File.Copy(orgPath, orgTarget, true);
+                        copies.Add(orgTarget);
+                    }
+
+                    var sbPath = Path.Combine(ConfigDirectory, "screen_brightness.json");
+                    if (File.Exists(sbPath))
+                    {
+                        var sbTarget = Path.Combine(ConfigDirectory, $"screen_brightness.{reason}-{ts}.json");
+                        File.Copy(sbPath, sbTarget, true);
+                        copies.Add(sbTarget);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Program.LogDebug("Could not save all rollback copies: " + ex.Message);
+                }
+            }
+            return copies;
         }
 
         /// <summary>Keeps the five most recent rollback copies and removes the rest.</summary>
@@ -277,6 +401,17 @@ namespace KeyPulse
                         error = $"Failed to copy config.json to safety copy: {ex.Message}";
                         return false;
                     }
+                }
+
+                if (File.Exists(ConfigLkgPath))
+                {
+                    try
+                    {
+                        var target = Path.Combine(parent, $"KeyPulse.config.lkg.before-wipe-{timestamp}.json");
+                        File.Copy(ConfigLkgPath, target, true);
+                        if (File.Exists(target)) createdCopies.Add(target);
+                    }
+                    catch { }
                 }
 
                 var desktopOrganizerPath = Path.Combine(ConfigDirectory, "desktop_organizer.json");

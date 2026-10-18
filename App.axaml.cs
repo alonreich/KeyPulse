@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
@@ -302,9 +302,14 @@ public partial class App : Application
                 desktop.MainWindow = new SetupWindow(true);
                 KeyPulse.Program.LogDebug("Set SetupWindow(uninstall)");
             }
+            else if (System.Linq.Enumerable.Contains(args, "--update-worker") || System.Linq.Enumerable.Contains(args, "--update"))
+            {
+                desktop.MainWindow = new SetupWindow(false, isUpdate: true);
+                KeyPulse.Program.LogDebug("Set SetupWindow(update)");
+            }
             else if (System.Linq.Enumerable.Contains(args, "--install-worker"))
             {
-                desktop.MainWindow = new SetupWindow(false);
+                desktop.MainWindow = new SetupWindow(false, isUpdate: false);
                 KeyPulse.Program.LogDebug("Set SetupWindow(install)");
             }
             else
@@ -350,6 +355,22 @@ public partial class App : Application
                 }
 
                 DesktopOrganizerService.EnsureAutoSnapshotScheduler();
+                _ = System.Threading.Tasks.Task.Run(async () =>
+                {
+                    await System.Threading.Tasks.Task.Delay(15000);
+                    Program.ClearPostUpdateCanary();
+                });
+
+                var appCfg = ConfigStore.Load(out _, out _);
+                if (!Program.IsDevMode && appCfg.AutoCheckForUpdates)
+                {
+                    _ = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        await System.Threading.Tasks.Task.Delay(TimeSpan.FromMinutes(10));
+                        await CheckForUpdatesOnBootAsync(mw, appCfg);
+                    });
+                }
+
                 KeyPulse.Program.LogDebug("Set MainWindow");
             }
         }
@@ -360,6 +381,46 @@ public partial class App : Application
 
         base.OnFrameworkInitializationCompleted();
         KeyPulse.Program.LogDebug("OnFrameworkInitializationCompleted finished");
+    }
+
+    private static async System.Threading.Tasks.Task CheckForUpdatesOnBootAsync(MainWindow mw, AppConfig config)
+    {
+        try
+        {
+            var result = await UpdateChecker.CheckAsync(config.UpdateChannel ?? "Stable");
+            if (result.Succeeded && result.UpdateAvailable)
+            {
+                if (!string.IsNullOrWhiteSpace(config.SkippedUpdateVersion) &&
+                    string.Equals(result.LatestVersion, config.SkippedUpdateVersion, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    KeyPulse.Program.LogDebug($"Update {result.LatestVersion} skipped by user preference.");
+                    return;
+                }
+
+                if (mw.IsHiddenOnLaunch)
+                {
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        var app = Current as App;
+                        if (app != null)
+                        {
+                            var icons = TrayIcon.GetIcons(app);
+                            if (icons != null && icons.Count > 0)
+                            {
+                                icons[0].ToolTipText = $"KeyPulse (v{result.LatestVersion} update available - click tray to view)";
+                            }
+                        }
+                    });
+                    return;
+                }
+
+                mw.ShowUpdateNotification(result);
+            }
+        }
+        catch (System.Exception ex)
+        {
+            KeyPulse.Program.LogDebug("Boot update check failed: " + ex.Message);
+        }
     }
 
     public void OpenKeybinds_Clicked(object? sender, System.EventArgs e)

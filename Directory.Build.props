@@ -5,5 +5,9 @@
     <FileVersion>$(Version)</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <ProductVersion>$(Version)</ProductVersion>
+    <Product>KeyPulse</Product>
+    <Company>Alon</Company>
+    <Copyright>Copyright (c) 2026 Alon. All rights reserved.</Copyright>
+    <Description>KeyPulse - High-performance Windows Hotkey Manager and Desktop Organizer</Description>
   </PropertyGroup>
 </Project>

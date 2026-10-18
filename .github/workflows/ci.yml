@@ -1,0 +1,60 @@
+name: CI / Automated Quality Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build, Verify Sentinels & Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Verify Fix Sentinels & Architectural Invariants
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\build\VerifySentinels.ps1 -RepoRoot .
+
+      - name: Verify Changelog Integrity
+        shell: pwsh
+        run: |
+          $changelog = Get-Content -Raw docs/CHANGELOG.md
+          if (-not ($changelog -match '(?ms)##\s*\[Unreleased\]\s*\r?\n(.*?)(?=\r?\n##\s*\[|\z)')) {
+            throw "docs/CHANGELOG.md is missing '## [Unreleased]' section header."
+          }
+          $notes = ($Matches[1] -replace '<!--.*?-->', '').Trim()
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            throw "docs/CHANGELOG.md has an empty '## [Unreleased]' section. Changes must be documented."
+          }
+          Write-Host "Changelog verified: Unreleased notes are present."
+
+      - name: Restore dependencies
+        run: dotnet restore KeyPulse.csproj
+
+      - name: Run Automated Regression Tests
+        run: dotnet test tests/KeyPulse.Tests/KeyPulse.Tests.csproj --configuration Release --nologo --verbosity normal
+
+      - name: Compile NativeAOT Quality Gate Check
+        run: |
+          dotnet publish KeyPulse.csproj -c Release -r win-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --nologo -o ./publish-ci
+
+      - name: Verify Authenticode Signing
+        shell: pwsh
+        run: |
+          $pfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(".\ssl-certificate\KeyPulse_CodeSigning.pfx", "KeyPulseSigningKey2026!")
+          Set-AuthenticodeSignature -FilePath "./publish-ci/KeyPulse.exe" -Certificate $pfx -HashAlgorithm SHA256
+          $sig = Get-AuthenticodeSignature "./publish-ci/KeyPulse.exe"
+          if ($null -eq $sig.SignerCertificate) {
+            throw "Authenticode signature was not applied to ./publish-ci/KeyPulse.exe"
+          }
+          Write-Host "Authenticode signature verified successfully on CI build."

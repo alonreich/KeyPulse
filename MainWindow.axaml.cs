@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -25,6 +25,7 @@ namespace KeyPulse
         private const string AppName = "KeyPulse";
         private readonly string ConfigPath = ConfigStore.ConfigPath;
         private bool _startHidden;
+        public bool IsHiddenOnLaunch => _startHidden || !IsVisible;
 
         /// <summary>
         /// ISSUE_32: set the moment a real actor (tray icon click, second-launch signal,
@@ -2527,6 +2528,241 @@ namespace KeyPulse
             });
         }
 
+        public void ShowUpdateNotification(UpdateCheckResult result)
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    var updateWin = CreateAppDialog("KeyPulse - Update Available", 560, 440, 500, 360, WindowStartupLocation.CenterScreen, true, true);
+                    var sp = CreateDialogPanel(10);
+
+                    var heading = new Avalonia.Controls.TextBlock
+                    {
+                        Text = $"KeyPulse v{result.LatestVersion} is Available",
+                        Classes = { "SectionTitle" },
+                        Foreground = AppBrush("AppAccentBrush")
+                    };
+                    var sub = new Avalonia.Controls.TextBlock
+                    {
+                        Text = $"You have v{Program.AppVersion}. Review what's new and update automatically:",
+                        Classes = { "Muted" },
+                        FontSize = 12
+                    };
+
+                    sp.Children.Add(heading);
+                    sp.Children.Add(sub);
+
+                    var notesHeader = new Avalonia.Controls.TextBlock
+                    {
+                        Text = "What's New in This Release:",
+                        FontWeight = Avalonia.Media.FontWeight.SemiBold,
+                        Margin = new Avalonia.Thickness(0, 4, 0, 2)
+                    };
+                    sp.Children.Add(notesHeader);
+
+                    var notesText = new Avalonia.Controls.TextBox
+                    {
+                        Text = result.ReleaseNotes ?? "No release notes provided.",
+                        IsReadOnly = true,
+                        TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                        Height = 160,
+                        AcceptsReturn = true
+                    };
+                    sp.Children.Add(notesText);
+
+                    var progressBar = new Avalonia.Controls.ProgressBar
+                    {
+                        Minimum = 0,
+                        Maximum = 100,
+                        Value = 0,
+                        IsVisible = false,
+                        Margin = new Avalonia.Thickness(0, 4, 0, 0)
+                    };
+                    var progressStatus = new Avalonia.Controls.TextBlock
+                    {
+                        Text = string.Empty,
+                        FontSize = 11.5,
+                        Classes = { "Muted" },
+                        IsVisible = false
+                    };
+                    sp.Children.Add(progressBar);
+                    sp.Children.Add(progressStatus);
+
+                    var btnPanel = new Avalonia.Controls.StackPanel
+                    {
+                        Orientation = Avalonia.Layout.Orientation.Horizontal,
+                        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                        Spacing = 8,
+                        Margin = new Avalonia.Thickness(0, 8, 0, 0)
+                    };
+
+                    var cancelBtn = new Avalonia.Controls.Button
+                    {
+                        Content = "Cancel Download",
+                        Classes = { "Secondary" },
+                        MinWidth = 120,
+                        IsVisible = false,
+                        Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+                    };
+
+                    var updateBtn = new Avalonia.Controls.Button
+                    {
+                        Content = "Update Now",
+                        Classes = { "Primary" },
+                        MinWidth = 110,
+                        Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+                    };
+
+                    var remindBtn = new Avalonia.Controls.Button
+                    {
+                        Content = "Remind Me Later",
+                        Classes = { "Secondary" },
+                        MinWidth = 120,
+                        Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+                    };
+
+                    var skipBtn = new Avalonia.Controls.Button
+                    {
+                        Content = "Skip This Version",
+                        Classes = { "Secondary" },
+                        MinWidth = 120,
+                        Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+                    };
+
+                    remindBtn.Click += (s, e) => updateWin.Close();
+                    skipBtn.Click += (s, e) =>
+                    {
+                        _currentConfig.SkippedUpdateVersion = result.LatestVersion;
+                        SaveConfig();
+                        updateWin.Close();
+                    };
+
+                    System.Threading.CancellationTokenSource? downloadCts = null;
+                    cancelBtn.Click += (s, e) =>
+                    {
+                        downloadCts?.Cancel();
+                        cancelBtn.IsEnabled = false;
+                        cancelBtn.Content = "Canceling...";
+                    };
+
+                    updateBtn.Click += async (s, e) =>
+                    {
+                        if (!string.IsNullOrWhiteSpace(result.LocalInstallerPath))
+                        {
+                            try
+                            {
+                                var psi = new ProcessStartInfo(result.LocalInstallerPath)
+                                {
+                                    UseShellExecute = true,
+                                    Arguments = "--update-worker",
+                                    Verb = Program.IsElevated ? "runas" : ""
+                                };
+                                Process.Start(psi);
+                                updateWin.Close();
+                                ((App)Avalonia.Application.Current!).Exit_Clicked(null, EventArgs.Empty);
+                            }
+                            catch (Exception ex)
+                            {
+                                progressStatus.IsVisible = true;
+                                progressStatus.Text = "Could not start installer: " + ex.Message;
+                            }
+                            return;
+                        }
+
+                        if (string.IsNullOrWhiteSpace(result.DownloadUrl))
+                        {
+                            try { Process.Start(new ProcessStartInfo(Program.ReleasesPageUrl) { UseShellExecute = true }); } catch { }
+                            updateWin.Close();
+                            return;
+                        }
+
+                        updateBtn.IsEnabled = false;
+                        updateBtn.IsVisible = false;
+                        remindBtn.IsEnabled = false;
+                        skipBtn.IsEnabled = false;
+                        cancelBtn.IsVisible = true;
+                        cancelBtn.IsEnabled = true;
+                        cancelBtn.Content = "Cancel Download";
+                        progressBar.IsVisible = true;
+                        progressBar.IsIndeterminate = result.AssetSizeBytes <= 0;
+                        progressStatus.IsVisible = true;
+                        progressStatus.Foreground = AppBrush("AppTextMutedBrush");
+                        progressStatus.Text = "Downloading update from GitHub...";
+
+                        downloadCts = new System.Threading.CancellationTokenSource();
+
+                        var progress = new Progress<double>(p =>
+                        {
+                            progressBar.IsIndeterminate = false;
+                            progressBar.Value = p * 100.0;
+                            progressStatus.Text = $"Downloading update: {(int)(p * 100)}%";
+                        });
+
+                        var (succeeded, msg, stagedExe) = await UpdateChecker.DownloadUpdateAsync(
+                            result.DownloadUrl,
+                            result.LatestVersion,
+                            result.ExpectedSha256,
+                            progress,
+                            downloadCts.Token);
+
+                        if (!succeeded || string.IsNullOrWhiteSpace(stagedExe))
+                        {
+                            progressBar.IsVisible = false;
+                            cancelBtn.IsVisible = false;
+                            updateBtn.IsVisible = true;
+                            updateBtn.IsEnabled = true;
+                            remindBtn.IsEnabled = true;
+                            skipBtn.IsEnabled = true;
+                            progressStatus.Foreground = AppBrush("AppDangerBrush");
+                            progressStatus.Text = "Download failed: " + msg;
+                            updateBtn.Content = "Retry Update";
+                            return;
+                        }
+
+                        cancelBtn.IsEnabled = false;
+                        progressStatus.Foreground = AppBrush("AppSuccessSoftBrush");
+                        progressStatus.Text = "Cryptographic integrity verified. Restarting into updater...";
+                        await System.Threading.Tasks.Task.Delay(800);
+
+                        try
+                        {
+                            var psi = new ProcessStartInfo(stagedExe)
+                            {
+                                UseShellExecute = true,
+                                Arguments = "--update-worker",
+                                Verb = Program.IsElevated ? "runas" : ""
+                            };
+                            Process.Start(psi);
+                            updateWin.Close();
+                            ((App)Avalonia.Application.Current!).Exit_Clicked(null, EventArgs.Empty);
+                        }
+                        catch (Exception ex)
+                        {
+                            cancelBtn.IsVisible = false;
+                            updateBtn.IsVisible = true;
+                            updateBtn.IsEnabled = true;
+                            progressStatus.Foreground = AppBrush("AppDangerBrush");
+                            progressStatus.Text = "Could not launch updater: " + ex.Message;
+                        }
+                    };
+
+                    btnPanel.Children.Add(skipBtn);
+                    btnPanel.Children.Add(remindBtn);
+                    btnPanel.Children.Add(cancelBtn);
+                    btnPanel.Children.Add(updateBtn);
+                    sp.Children.Add(btnPanel);
+
+                    updateWin.Content = sp;
+                    updateWin.Show();
+                }
+                catch (Exception ex)
+                {
+                    Program.LogCrash("Failed to display update dialog: " + ex.Message);
+                }
+            });
+        }
+
         private void RestartActionNoticeTimer()
         {
             _actionErrorCloseTimer?.Stop();
@@ -4016,15 +4252,12 @@ namespace KeyPulse
                 IsTabStop = true
             };
             ToolTip.SetTip(updateBtn, "Check GitHub for a newer release of KeyPulse.");
-            var updateButtonOpensDownloadPage = false;
-            string? localUpdateExePath = null;
+            UpdateCheckResult? lastCheckResult = null;
             updateBtn.Click += async (s, ev) =>
             {
-                if (updateButtonOpensDownloadPage)
+                if (lastCheckResult.HasValue && lastCheckResult.Value.UpdateAvailable)
                 {
-                    var targetToOpen = !string.IsNullOrWhiteSpace(localUpdateExePath) ? localUpdateExePath : Program.ReleasesPageUrl;
-                    try { using var page = Process.Start(new ProcessStartInfo(targetToOpen) { UseShellExecute = true }); }
-                    catch (Exception ex) { updateStatus.Text = "Could not open the update target: " + ex.Message; }
+                    ShowUpdateNotification(lastCheckResult.Value);
                     return;
                 }
 
@@ -4036,7 +4269,7 @@ namespace KeyPulse
                 updateStatus.Foreground = AppBrush("AppTextMutedBrush");
                 try
                 {
-                    var result = await UpdateChecker.CheckAsync();
+                    var result = await UpdateChecker.CheckAsync(_currentConfig.UpdateChannel ?? "Stable");
                     if (!result.Succeeded)
                     {
                         updateStatus.Text = "Could not check for updates: " + result.Message;
@@ -4044,21 +4277,19 @@ namespace KeyPulse
                     }
                     else if (result.UpdateAvailable)
                     {
-                        localUpdateExePath = result.LocalInstallerPath;
-                        updateStatus.Text = !string.IsNullOrWhiteSpace(localUpdateExePath)
+                        lastCheckResult = result;
+                        updateStatus.Text = !string.IsNullOrWhiteSpace(result.LocalInstallerPath)
                             ? $"Local dev build {result.LatestVersion} is ready in .\\compiled. You have {Program.AppVersion}."
                             : $"Version {result.LatestVersion} is available. You have {Program.AppVersion}.";
                         updateStatus.Foreground = AppBrush("AppWarningBrush");
-                        updateBtn.Content = !string.IsNullOrWhiteSpace(localUpdateExePath)
-                            ? "Run local dev installer (.\\compiled\\KeyPulse.exe)"
-                            : "Open the download page";
+                        updateBtn.Content = "View What's New & Update";
                         updateBtn.Classes.Remove("Secondary");
                         updateBtn.Classes.Add("Primary");
-                        updateButtonOpensDownloadPage = true;
+                        ShowUpdateNotification(result);
                     }
                     else
                     {
-                        updateStatus.Text = $"You are running the latest release ({Program.AppVersion}).";
+                        updateStatus.Text = $"You are running the latest release ({Program.AppVersion}) on the {_currentConfig.UpdateChannel ?? "Stable"} channel.";
                         updateStatus.Foreground = AppBrush("AppSuccessSoftBrush");
                     }
                 }
@@ -4067,6 +4298,44 @@ namespace KeyPulse
                     updateBtn.IsEnabled = true;
                 }
             };
+            var autoUpdateCheck = new CheckBox
+            {
+                Content = "Automatically check for updates on startup",
+                IsChecked = _currentConfig.AutoCheckForUpdates,
+                TabIndex = 14,
+                IsTabStop = true
+            };
+            ToolTip.SetTip(autoUpdateCheck, "When checked, KeyPulse automatically checks for new releases on startup and notifies you when an update is available.");
+            autoUpdateCheck.IsCheckedChanged += (s, ev) =>
+            {
+                if (suppressSyncEvents) return;
+                _currentConfig.AutoCheckForUpdates = autoUpdateCheck.IsChecked == true;
+                SaveConfig();
+            };
+
+            var channelLabel = new TextBlock
+            {
+                Text = "Release Channel:",
+                FontSize = 12,
+                Margin = new Thickness(0, 4, 0, 0),
+                Classes = { "Muted" }
+            };
+            var channelCombo = new ComboBox
+            {
+                ItemsSource = new[] { "Stable", "Beta" },
+                SelectedItem = string.Equals(_currentConfig.UpdateChannel, "Beta", StringComparison.OrdinalIgnoreCase) ? "Beta" : "Stable",
+                Width = 140,
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+                TabIndex = 15,
+                IsTabStop = true
+            };
+            channelCombo.SelectionChanged += (s, ev) =>
+            {
+                if (suppressSyncEvents) return;
+                _currentConfig.UpdateChannel = channelCombo.SelectedItem as string ?? "Stable";
+                SaveConfig();
+            };
+
             var aboutBody = new StackPanel { Spacing = 6 };
             aboutBody.Children.Add(new TextBlock
             {
@@ -4074,11 +4343,14 @@ namespace KeyPulse
                 FontSize = 12,
                 Classes = { "Muted" }
             });
+            aboutBody.Children.Add(autoUpdateCheck);
+            aboutBody.Children.Add(channelLabel);
+            aboutBody.Children.Add(channelCombo);
             aboutBody.Children.Add(updateBtn);
             aboutBody.Children.Add(updateStatus);
             RegisterSettingCard(0, "About & Software Updates",
                 "Shows your currently installed KeyPulse version and checks online for newer releases.",
-                "about version update check release github",
+                "about version update check release github channel beta",
                 aboutBody);
 
 
@@ -5022,8 +5294,11 @@ namespace KeyPulse
                     statusTxt.Text = "Restoring... please wait.";
                     statusTxt.Foreground = AppBrush("AppWarningBrush");
 
-                    var rollbackPath = ConfigStore.SaveRollbackCopy("before-restore");
+                    var rollbackPaths = ConfigStore.SaveAllRollbackCopies("before-restore");
+                    var rollbackPath = rollbackPaths.FirstOrDefault();
                     var previousConfig = CloneConfig(_currentConfig);
+                    var previousOrganizer = DesktopOrganizerService.LoadConfig();
+                    var previousBrightness = ScreenBrightnessService.LoadConfig();
 
                     try
                     {
@@ -5033,7 +5308,10 @@ namespace KeyPulse
                         var imported = Hotkeys.Count;
 
                         var notes = new List<string>();
-                        if (rollbackPath != null) notes.Add("Your previous settings were kept as: " + rollbackPath);
+                        if (rollbackPaths.Count > 0)
+                        {
+                            notes.Add("Your previous settings were kept as: " + string.Join(", ", rollbackPaths));
+                        }
                         if (!string.IsNullOrEmpty(layoutNote)) notes.Add(layoutNote);
                         if (inspection.Kind == BackupKind.LegacyConfigCopy && !string.IsNullOrEmpty(inspection.Error))
                         {
@@ -5073,6 +5351,16 @@ namespace KeyPulse
                             ApplyShortcutColumnResources();
                             SyncAllSettingsControls();
                             SaveConfig();
+                            if (previousOrganizer != null)
+                            {
+                                DesktopOrganizerService.SaveConfig(previousOrganizer, out _, allowEmptyProfiles: true);
+                                DesktopOrganizerService.RaiseProfilesChanged();
+                            }
+                            if (previousBrightness != null)
+                            {
+                                ScreenBrightnessService.SaveConfig(previousBrightness);
+                                ScreenBrightnessService.NotifyStateChanged();
+                            }
                             statusTxt.Text = "Restore failed and your previous shortcuts were put back: " + ex.Message;
                         }
                         catch (Exception rollbackEx)

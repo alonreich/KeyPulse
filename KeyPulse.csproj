@@ -19,13 +19,16 @@
     <Product>KeyPulse</Product>
     <Company>Alon</Company>
     <AssemblyTitle>KeyPulse</AssemblyTitle>
+    <Copyright>Copyright (c) 2026 Alon. All rights reserved.</Copyright>
+    <Description>KeyPulse - High-performance Windows Hotkey Manager and Desktop Organizer</Description>
+    <TargetName>KeyPulse</TargetName>
   </PropertyGroup>
 
   <ItemGroup>
     <AvaloniaResource Include="KeyPulse.ico" />
-    <EmbeddedResource Include="NativeLibs\av_libglesv2.dll" />
-    <EmbeddedResource Include="NativeLibs\libHarfBuzzSharp.dll" />
-    <EmbeddedResource Include="NativeLibs\libSkiaSharp.dll" />
+    <EmbeddedResource Include="NativeLibs\av_libglesv2.dll.gz" />
+    <EmbeddedResource Include="NativeLibs\libHarfBuzzSharp.dll.gz" />
+    <EmbeddedResource Include="NativeLibs\libSkiaSharp.dll.gz" />
     <PackageReference Include="Avalonia" Version="12.1.1" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
@@ -43,6 +46,9 @@
     <EmbeddedResource Include="Assets\click.wav" />
     <EmbeddedResource Include="Assets\close.wav" />
     <EmbeddedResource Include="Assets\error.wav" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="tests\**" />
   </ItemGroup>
 </Project>
 

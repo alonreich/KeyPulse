@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -79,25 +79,6 @@ namespace KeyPulse
             public uint dwFlags;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct LVITEM
-        {
-            public uint mask;
-            public int iItem;
-            public int iSubItem;
-            public uint state;
-            public uint stateMask;
-            public IntPtr pszText;
-            public int cchTextMax;
-            public int iImage;
-            public IntPtr lParam;
-            public int iIndent;
-            public int iGroupId;
-            public uint cColumns;
-            public IntPtr puColumns;
-            public IntPtr piColFmt;
-            public int iGroup;
-        }
 
         public class MonitorInfoDetail
         {
@@ -139,23 +120,91 @@ namespace KeyPulse
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool UpdateWindow(IntPtr hWnd);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+        [ComImport, Guid("85CB6900-4D95-11CF-960C-0080C7F4EE85"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+        private interface IShellWindows
+        {
+            int Count { get; }
+            [return: MarshalAs(UnmanagedType.IDispatch)] object Item([MarshalAs(UnmanagedType.Struct)] object index);
+            [return: MarshalAs(UnmanagedType.IUnknown)] object _NewEnum();
+            void Register([MarshalAs(UnmanagedType.IDispatch)] object pid, int hwnd, int swClass, out int pdwCookie);
+            void RegisterPending(int lThreadId, [In] ref object pvarloc, [In] ref object pvarlocRoot, int swClass, out int pdwCookie);
+            void Revoke(int dwCookie);
+            void OnNavigated(int dwCookie, [In] ref object pvarloc);
+            [PreserveSig]
+            int FindWindowSW([In] ref object pvarloc, [In] ref object pvarlocRoot, int swClass, out int phwnd, int swflags, [MarshalAs(UnmanagedType.IDispatch)] out object ppdispOut);
+            void OnCreated(int dwCookie, [MarshalAs(UnmanagedType.IUnknown)] object punk);
+            void ProcessAttachDetach(bool fAttach);
+        }
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool VirtualFreeEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint dwFreeType);
+        [ComImport, Guid("6D5140C1-7436-11CE-8034-00AA006009FA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IServiceProvider
+        {
+            [return: MarshalAs(UnmanagedType.IUnknown)]
+            object QueryService([In] ref Guid guidService, [In] ref Guid riid);
+        }
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, IntPtr lpBuffer, int nSize, out IntPtr lpNumberOfBytesRead);
+        [ComImport, Guid("000214E2-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellBrowser
+        {
+            void Dummy1();
+            void GetWindow(out IntPtr phwnd);
+            void ContextSensitiveHelp(int fEnterMode);
+            void InsertMenusSB(IntPtr hmenuShared, IntPtr lpMenuWidths);
+            void SetMenuSB(IntPtr hmenuShared, IntPtr holeMenu, IntPtr hwndActiveObject);
+            void RemoveMenusSB(IntPtr hmenuShared);
+            void SetStatusTextSB([MarshalAs(UnmanagedType.LPWStr)] string pszStatusText);
+            void EnableModelessSB(int fEnable);
+            void TranslateAcceleratorSB(IntPtr pmsg, ushort wID);
+            void BrowseObject(IntPtr pidl, uint wFlags);
+            void GetViewStateStream(uint grfMode, IntPtr ppStm);
+            void GetControlWindow(uint id, out IntPtr phwnd);
+            void SendControlMsg(uint id, uint uMsg, IntPtr wParam, IntPtr lParam, out IntPtr pResult);
+            void QueryActiveShellView(out IntPtr ppshv);
+        }
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, IntPtr lpBuffer, int nSize, out IntPtr lpNumberOfBytesWritten);
+        [ComImport, Guid("000214E3-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellView
+        {
+            void GetWindow(out IntPtr phwnd);
+            void ContextSensitiveHelp(int fEnterMode);
+            void TranslateAccelerator(IntPtr pmsg);
+            void EnableModeless(int fEnable);
+            void UIActivate(uint uState);
+            void Refresh();
+            void CreateViewWindow(IntPtr psavView, IntPtr psfvPns, IntPtr psfsStMode, IntPtr prcView, out IntPtr phwndView);
+            void DestroyViewWindow();
+            void GetCurrentInfo(IntPtr lpfs);
+            void AddPropertySheetPages(uint dwReserved, IntPtr lpfn, IntPtr lparam);
+            void SaveViewState();
+            void SelectItem(IntPtr pidlItem, uint uFlags);
+            void GetItemObject(uint uItem, ref Guid riid, out IntPtr ppv);
+        }
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr hObject);
+        [ComImport, Guid("cde725b0-ccc9-4519-917e-325d72fab4ce"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IFolderView
+        {
+            void GetCurrentViewMode(out uint pViewMode);
+            void SetCurrentViewMode(uint ViewMode);
+            void GetFolder(ref Guid riid, out IntPtr ppv);
+            void Item(int iItemIndex, out IntPtr ppidl);
+            void ItemCount(uint uFlags, out int pcItems);
+            void Items(uint uFlags, ref Guid riid, out IntPtr ppv);
+            void GetSelectionMarkedItem(out int piItem);
+            void GetFocusedItem(out int piItem);
+            void GetItemPosition(IntPtr pidl, out POINT ppt);
+            void GetSpacing([In, Out] ref POINT ppt);
+            void GetDefaultSpacing(out POINT ppt);
+            [PreserveSig] int GetAutoArrange();
+            void SelectItem(int iItem, uint dwFlags);
+            [PreserveSig] int SelectAndPositionItems(uint cidl, [In] IntPtr[] apidl, [In] POINT[] apt, uint dwFlags);
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int SHGetNameFromIDList(IntPtr pidl, uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+
+        [DllImport("ole32.dll")]
+        private static extern void CoTaskMemFree(IntPtr pv);
 
         private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
 
@@ -528,50 +577,77 @@ namespace KeyPulse
             return IntPtr.Zero;
         }
 
+        private static bool TryGetDesktopFolderView(out IFolderView? folderView, out IShellView? shellView, out IntPtr hwndDesktop)
+        {
+            folderView = null;
+            shellView = null;
+            hwndDesktop = IntPtr.Zero;
+            try
+            {
+                var clsid = new Guid("9BA05972-F6A8-11CF-A442-00A0C90A8F39");
+                var shellWindows = ComActivation.CreateInstance<IShellWindows>(clsid);
+                object loc = 0;
+                object empty = Type.Missing;
+                int hr = shellWindows.FindWindowSW(ref loc, ref empty, 8, out int hwnd, 1, out object disp);
+                if (hr != 0 || disp == null) return false;
+                hwndDesktop = (IntPtr)hwnd;
+
+                if (disp is not IServiceProvider sp) return false;
+                var sid = new Guid("4C96BE40-915C-11CF-99D3-00AA004AE837");
+                var iid = typeof(IShellBrowser).GUID;
+                var browserObj = sp.QueryService(ref sid, ref iid);
+                if (browserObj is not IShellBrowser browser) return false;
+
+                browser.QueryActiveShellView(out IntPtr pShellView);
+                if (pShellView == IntPtr.Zero) return false;
+
+                Guid IID_IFolderView = new Guid("cde725b0-ccc9-4519-917e-325d72fab4ce");
+                hr = Marshal.QueryInterface(pShellView, in IID_IFolderView, out IntPtr pFolderView);
+                shellView = (IShellView)Marshal.GetUniqueObjectForIUnknown(pShellView);
+                Marshal.Release(pShellView);
+
+                if (hr == 0 && pFolderView != IntPtr.Zero)
+                {
+                    folderView = (IFolderView)Marshal.GetUniqueObjectForIUnknown(pFolderView);
+                    Marshal.Release(pFolderView);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug($"DesktopOrganizer: COM folder view failed: {ex.Message}");
+            }
+            return false;
+        }
+
         public static bool IsAutoArrangeActive(out bool isDesktopVisible)
         {
             isDesktopVisible = true;
-            IntPtr hwnd = GetDesktopListView();
-            if (hwnd == IntPtr.Zero) return false;
+            if (TryGetDesktopFolderView(out var fv, out _, out var hwnd))
+            {
+                if (hwnd != IntPtr.Zero) isDesktopVisible = IsWindowVisible(hwnd);
+                if (fv != null)
+                {
+                    return fv.GetAutoArrange() == 0;
+                }
+            }
 
-            isDesktopVisible = IsWindowVisible(hwnd);
-            int style = GetWindowLong(hwnd, GWL_STYLE);
+            IntPtr listviewHwnd = GetDesktopListView();
+            if (listviewHwnd == IntPtr.Zero) return false;
+
+            isDesktopVisible = IsWindowVisible(listviewHwnd);
+            int style = GetWindowLong(listviewHwnd, GWL_STYLE);
             return (style & LVS_AUTOARRANGE) != 0;
         }
 
         public static DesktopLayoutProfile? CaptureCurrentLayout(string profileName, out string error, CancellationToken cancellationToken = default)
         {
             error = string.Empty;
-            IntPtr hwnd = GetDesktopListView();
-            if (hwnd == IntPtr.Zero)
+            if (!TryGetDesktopFolderView(out var folderView, out _, out _) || folderView == null)
             {
-                error = "Could not locate the Windows Desktop ListView.";
+                error = "Could not connect to Windows Desktop Shell COM interface.";
                 return null;
             }
-
-            GetWindowThreadProcessId(hwnd, out uint processId);
-            IntPtr hProcess = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, false, processId);
-            if (hProcess == IntPtr.Zero)
-            {
-                error = "Could not open Windows Explorer process memory.";
-                return null;
-            }
-
-            int lvItemSize = Marshal.SizeOf<LVITEM>();
-            int pointSize = Marshal.SizeOf<POINT>();
-            int bufferSize = lvItemSize + 1024 + pointSize;
-
-            IntPtr allocatedMemory = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (allocatedMemory == IntPtr.Zero)
-            {
-                CloseHandle(hProcess);
-                error = "Could not allocate memory in Windows Explorer.";
-                return null;
-            }
-
-            IntPtr pLvItem = allocatedMemory;
-            IntPtr pTextBuffer = allocatedMemory + lvItemSize;
-            IntPtr pPoint = allocatedMemory + lvItemSize + 1024;
 
             try
             {
@@ -596,20 +672,16 @@ namespace KeyPulse
                     });
                 }
 
-                if (SafeSendMessageTimeout(hwnd, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero, 1000, out var spacing))
+                var spacingPt = new POINT();
+                try { folderView.GetSpacing(ref spacingPt); } catch { }
+                if (spacingPt.X <= 0 || spacingPt.Y <= 0)
                 {
-                    profile.IconSpacingX = (int)(spacing.ToInt64() & 0xFFFF);
-                    profile.IconSpacingY = (int)((spacing.ToInt64() >> 16) & 0xFFFF);
+                    try { folderView.GetDefaultSpacing(out spacingPt); } catch { }
                 }
-                if (profile.IconSpacingX <= 0) profile.IconSpacingX = 76;
-                if (profile.IconSpacingY <= 0) profile.IconSpacingY = 100;
+                profile.IconSpacingX = spacingPt.X > 0 ? spacingPt.X : 76;
+                profile.IconSpacingY = spacingPt.Y > 0 ? spacingPt.Y : 100;
 
-                if (!SafeSendMessageTimeout(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero, 1000, out var itemCountPtr))
-                {
-                    error = "Windows Explorer did not answer desktop icon queries in time.";
-                    return null;
-                }
-                int itemCount = (int)itemCountPtr;
+                folderView.ItemCount(0, out int itemCount);
 
                 for (int i = 0; i < itemCount; i++)
                 {
@@ -619,30 +691,21 @@ namespace KeyPulse
                         return null;
                     }
 
-                    var lvi = new LVITEM
+                    folderView.Item(i, out IntPtr pidl);
+                    if (pidl == IntPtr.Zero) continue;
+
+                    string? text = null;
+                    try
                     {
-                        cchTextMax = 512,
-                        pszText = pTextBuffer,
-                        iSubItem = 0
-                    };
+                        if (SHGetNameFromIDList(pidl, 0, out string itemName) == 0)
+                        {
+                            text = itemName;
+                        }
+                    }
+                    catch { }
 
-                    IntPtr pLocalLvi = Marshal.AllocHGlobal(lvItemSize);
-                    Marshal.StructureToPtr(lvi, pLocalLvi, false);
-                    WriteProcessMemory(hProcess, pLvItem, pLocalLvi, lvItemSize, out _);
-                    Marshal.FreeHGlobal(pLocalLvi);
-
-                    SafeSendMessageTimeout(hwnd, LVM_GETITEMTEXTW, (IntPtr)i, pLvItem, 1000, out _);
-
-                    IntPtr pLocalText = Marshal.AllocHGlobal(1024);
-                    ReadProcessMemory(hProcess, pTextBuffer, pLocalText, 1024, out _);
-                    string? text = Marshal.PtrToStringUni(pLocalText);
-                    Marshal.FreeHGlobal(pLocalText);
-
-                    SafeSendMessageTimeout(hwnd, LVM_GETITEMPOSITION, (IntPtr)i, pPoint, 1000, out _);
-                    IntPtr pLocalPoint = Marshal.AllocHGlobal(pointSize);
-                    ReadProcessMemory(hProcess, pPoint, pLocalPoint, pointSize, out _);
-                    var pt = Marshal.PtrToStructure<POINT>(pLocalPoint);
-                    Marshal.FreeHGlobal(pLocalPoint);
+                    folderView.GetItemPosition(pidl, out POINT pt);
+                    CoTaskMemFree(pidl);
 
                     if (!string.IsNullOrEmpty(text))
                     {
@@ -678,11 +741,6 @@ namespace KeyPulse
                 error = "Failed to capture icons: " + ex.Message;
                 return null;
             }
-            finally
-            {
-                VirtualFreeEx(hProcess, allocatedMemory, 0, MEM_RELEASE);
-                CloseHandle(hProcess);
-            }
         }
 
         public static bool RestoreLayout(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, out string report, CancellationToken cancellationToken = default, bool isUndoOperation = false)
@@ -691,13 +749,6 @@ namespace KeyPulse
             if (profile == null || profile.Icons == null || profile.Icons.Count == 0)
             {
                 report = "The selected profile contains no icon positions.";
-                return false;
-            }
-
-            IntPtr hwnd = GetDesktopListView();
-            if (hwnd == IntPtr.Zero)
-            {
-                report = "Could not locate the Windows Desktop ListView.";
                 return false;
             }
 
@@ -725,39 +776,16 @@ namespace KeyPulse
                 preRestoreSnapshot = CaptureCurrentLayout("Pre-Restore Snapshot (" + DateTime.Now.ToString("HH:mm:ss") + ")", out _, cancellationToken);
             }
 
-            GetWindowThreadProcessId(hwnd, out uint processId);
-            IntPtr hProcess = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, false, processId);
-            if (hProcess == IntPtr.Zero)
+            if (!TryGetDesktopFolderView(out var folderView, out var shellView, out var hwndDesktop) || folderView == null)
             {
-                report = "Could not open Windows Explorer process memory.";
+                report = "Could not connect to Windows Desktop Shell COM interface.";
                 return false;
             }
-
-            int lvItemSize = Marshal.SizeOf<LVITEM>();
-            int pointSize = Marshal.SizeOf<POINT>();
-            int bufferSize = lvItemSize + 1024 + pointSize;
-
-            IntPtr allocatedMemory = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)bufferSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (allocatedMemory == IntPtr.Zero)
-            {
-                CloseHandle(hProcess);
-                report = "Could not allocate memory in Windows Explorer.";
-                return false;
-            }
-
-            IntPtr pLvItem = allocatedMemory;
-            IntPtr pTextBuffer = allocatedMemory + lvItemSize;
-            IntPtr pPoint = allocatedMemory + lvItemSize + 1024;
 
             try
             {
                 var primaryMonitor = monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
-                if (!SafeSendMessageTimeout(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero, 1000, out var itemCountPtr))
-                {
-                    report = "Windows Explorer did not answer desktop icon queries in time.";
-                    return false;
-                }
-                int itemCount = (int)itemCountPtr;
+                folderView.ItemCount(0, out int itemCount);
 
                 if (!isUndoOperation && preRestoreSnapshot != null)
                 {
@@ -766,7 +794,7 @@ namespace KeyPulse
 
                 var occupiedSlots = new HashSet<(int X, int Y)>();
                 var consumedSavedIndices = new HashSet<int>();
-                var unsavedItems = new List<int>();
+                var unsavedItems = new List<(int Index, IntPtr Pidl)>();
                 int placedCount = 0;
 
                 int spaceX = profile.IconSpacingX > 0 ? profile.IconSpacingX : 76;
@@ -780,26 +808,24 @@ namespace KeyPulse
                         return false;
                     }
 
-                    var lvi = new LVITEM
+                    folderView.Item(i, out IntPtr pidl);
+                    if (pidl == IntPtr.Zero) continue;
+
+                    string? text = null;
+                    try
                     {
-                        cchTextMax = 512,
-                        pszText = pTextBuffer,
-                        iSubItem = 0
-                    };
+                        if (SHGetNameFromIDList(pidl, 0, out string itemName) == 0)
+                        {
+                            text = itemName;
+                        }
+                    }
+                    catch { }
 
-                    IntPtr pLocalLvi = Marshal.AllocHGlobal(lvItemSize);
-                    Marshal.StructureToPtr(lvi, pLocalLvi, false);
-                    WriteProcessMemory(hProcess, pLvItem, pLocalLvi, lvItemSize, out _);
-                    Marshal.FreeHGlobal(pLocalLvi);
-
-                    SafeSendMessageTimeout(hwnd, LVM_GETITEMTEXTW, (IntPtr)i, pLvItem, 1000, out _);
-
-                    IntPtr pLocalText = Marshal.AllocHGlobal(1024);
-                    ReadProcessMemory(hProcess, pTextBuffer, pLocalText, 1024, out _);
-                    string? text = Marshal.PtrToStringUni(pLocalText);
-                    Marshal.FreeHGlobal(pLocalText);
-
-                    if (string.IsNullOrEmpty(text)) continue;
+                    if (string.IsNullOrEmpty(text))
+                    {
+                        CoTaskMemFree(pidl);
+                        continue;
+                    }
 
                     int matchIdx = -1;
                     for (int s = 0; s < profile.Icons.Count; s++)
@@ -844,12 +870,14 @@ namespace KeyPulse
                         }
 
                         occupiedSlots.Add((destX, destY));
-                        SetItemPosition(hwnd, hProcess, pPoint, i, destX, destY);
+                        var pt = new POINT { X = destX, Y = destY };
+                        folderView.SelectAndPositionItems(1, new IntPtr[] { pidl }, new POINT[] { pt }, 0);
+                        CoTaskMemFree(pidl);
                         placedCount++;
                     }
                     else
                     {
-                        unsavedItems.Add(i);
+                        unsavedItems.Add((i, pidl));
                     }
                 }
 
@@ -901,7 +929,8 @@ namespace KeyPulse
                             }
 
                             occupiedSlots.Add((destX, destY));
-                            SetItemPosition(hwnd, hProcess, pPoint, unsavedItems[k], destX, destY);
+                            var pt = new POINT { X = destX, Y = destY };
+                            folderView.SelectAndPositionItems(1, new IntPtr[] { unsavedItems[k].Pidl }, new POINT[] { pt }, 0);
                             newArranged++;
                         }
                     }
@@ -934,15 +963,25 @@ namespace KeyPulse
                             }
 
                             occupiedSlots.Add((curX, curY));
-                            SetItemPosition(hwnd, hProcess, pPoint, unsavedItems[k], curX, curY);
+                            var pt = new POINT { X = curX, Y = curY };
+                            folderView.SelectAndPositionItems(1, new IntPtr[] { unsavedItems[k].Pidl }, new POINT[] { pt }, 0);
                             newArranged++;
                             curY += spaceY;
                         }
                     }
                 }
 
-                InvalidateRect(hwnd, IntPtr.Zero, true);
-                UpdateWindow(hwnd);
+                foreach (var item in unsavedItems)
+                {
+                    CoTaskMemFree(item.Pidl);
+                }
+
+                try { shellView?.Refresh(); } catch { }
+                if (hwndDesktop != IntPtr.Zero)
+                {
+                    InvalidateRect(hwndDesktop, IntPtr.Zero, true);
+                    UpdateWindow(hwndDesktop);
+                }
 
                 report = newArranged > 0
                     ? $"Restored \"{profile.Name}\": {placedCount} icons restored, {newArranged} new icons organized."
@@ -954,11 +993,6 @@ namespace KeyPulse
             {
                 report = "Restore failed: " + ex.Message;
                 return false;
-            }
-            finally
-            {
-                VirtualFreeEx(hProcess, allocatedMemory, 0, MEM_RELEASE);
-                CloseHandle(hProcess);
             }
         }
 
@@ -978,17 +1012,6 @@ namespace KeyPulse
             }
 
             return false;
-        }
-
-        private static void SetItemPosition(IntPtr hwnd, IntPtr hProcess, IntPtr pPoint, int index, int x, int y)
-        {
-            var pt = new POINT { X = x, Y = y };
-            IntPtr pLocalPoint = Marshal.AllocHGlobal(Marshal.SizeOf<POINT>());
-            Marshal.StructureToPtr(pt, pLocalPoint, false);
-            WriteProcessMemory(hProcess, pPoint, pLocalPoint, Marshal.SizeOf<POINT>(), out _);
-            Marshal.FreeHGlobal(pLocalPoint);
-
-            SafeSendMessageTimeout(hwnd, LVM_SETITEMPOSITION32, (IntPtr)index, pPoint, 1000, out _);
         }
 
         public static void HandleDisplayChangeDebounced()
