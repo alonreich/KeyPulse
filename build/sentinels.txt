@@ -5,31 +5,31 @@
 # ==============================================================================
 
 # Dev Sandbox & Zero Cross-Contamination (DEVDATA_01 / DEVUPDATE_01)
-DEVDATA_01=ConfigStore.cs
-DEVDATA_01=Program.cs
-DEVUPDATE_01=UpdateChecker.cs
-KeyPulse_IPC_DEV_Session_=IpcService.cs
+DEVDATA_01=src/KeyPulse/ConfigStore.cs
+DEVDATA_01=src/KeyPulse/Program.cs
+DEVUPDATE_01=src/KeyPulse/UpdateChecker.cs
+KeyPulse_IPC_DEV_Session_=src/KeyPulse/IpcService.cs
 
 # Single-Instance & Integrity Level Guards
-SharedObjectSddl=Program.cs
-ReleaseSingleInstanceLock=Program.cs
-DisallowStartIfOnBatteries=Program.cs
+SharedObjectSddl=src/KeyPulse/Program.cs
+ReleaseSingleInstanceLock=src/KeyPulse/Program.cs
+DisallowStartIfOnBatteries=src/KeyPulse/Program.cs
 
 # Desktop Organizer Persistence & Empty-Overwrite Guards
-allowEmptyProfiles=DesktopOrganizerService.cs
-_suppressConfigEvents=DesktopOrganizerWindow.axaml.cs
-MaxAutoSnapshots=DesktopOrganizerService.cs
-EnsureAutoSnapshotScheduler=DesktopOrganizerService.cs
+allowEmptyProfiles=src/KeyPulse/DesktopOrganizerService.cs
+_suppressConfigEvents=src/KeyPulse/DesktopOrganizerWindow.axaml.cs
+MaxAutoSnapshots=src/KeyPulse/DesktopOrganizerService.cs
+EnsureAutoSnapshotScheduler=src/KeyPulse/DesktopOrganizerService.cs
 
 # Screen Brightness Hardware & Anti-Cheat Guards
-DestroyPhysicalMonitors=ScreenBrightnessService.cs
-IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS=ScreenBrightnessService.cs
-ScreenWriteThrottle=ScreenBrightnessService.cs
-WS_EX_TRANSPARENT=ScreenBrightnessService.cs
-TriggerShortcutCycleStep=ScreenBrightnessService.cs
+DestroyPhysicalMonitors=src/KeyPulse/ScreenBrightnessService.cs
+IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS=src/KeyPulse/ScreenBrightnessService.cs
+ScreenWriteThrottle=src/KeyPulse/ScreenBrightnessService.cs
+WS_EX_TRANSPARENT=src/KeyPulse/ScreenBrightnessService.cs
+TriggerShortcutCycleStep=src/KeyPulse/ScreenBrightnessService.cs
 
 # Input Simulation, Clipboard & Pre-Wipe Safety Guards
-GetTargetKeyboardLayout=InputSimulator.cs
-GetClipboardSequenceNumber=InputSimulator.cs
-SaveAllWipeSafetyCopies=ConfigStore.cs
-WriteAtomic=AtomicFileWriter.cs
+GetTargetKeyboardLayout=src/KeyPulse/InputSimulator.cs
+GetClipboardSequenceNumber=src/KeyPulse/InputSimulator.cs
+SaveAllWipeSafetyCopies=src/KeyPulse/ConfigStore.cs
+WriteAtomic=src/KeyPulse/AtomicFileWriter.cs

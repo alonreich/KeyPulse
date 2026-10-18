@@ -21,11 +21,9 @@
                     <SolidColorBrush x:Key="AppInputBrush" Color="#111827" />
                     <SolidColorBrush x:Key="AppHoverBrush" Color="#27364d" />
                     <SolidColorBrush x:Key="AppSelectedBrush" Color="#1d4ed833" />
-                    <!-- ISSUE_13: the "more content this way" fades follow the theme. The old
-                         hard-coded black gradients with near-white arrows rendered as dirty grey
-                         smudges with almost invisible arrows in Light mode. -->
-                    <Color x:Key="ScrollFadeEdgeColor">#50000000</Color>
-                    <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#A0f8fafc" />
+                    <!-- ISSUE_13: the "more content this way" fades follow the theme. Subtle elevation glow instead of black-on-black smudge. -->
+                    <Color x:Key="ScrollFadeEdgeColor">#401d4ed8</Color>
+                    <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#A060a5fa" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <SolidColorBrush x:Key="AppSurfaceBrush" Color="#f8fafc" />
@@ -38,10 +36,9 @@
                     <SolidColorBrush x:Key="AppInputBrush" Color="#ffffff" />
                     <SolidColorBrush x:Key="AppHoverBrush" Color="#e2e8f0" />
                     <SolidColorBrush x:Key="AppSelectedBrush" Color="#bfdbfe" />
-                    <!-- ISSUE_13: a soft grey shadow over white instead of a black smudge, with
-                         dark arrows that stay legible. -->
-                    <Color x:Key="ScrollFadeEdgeColor">#2B64748b</Color>
-                    <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#C00f172a" />
+                    <!-- ISSUE_13: soft elevation glow in light mode -->
+                    <Color x:Key="ScrollFadeEdgeColor">#302563eb</Color>
+                    <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#C02563eb" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
@@ -56,6 +53,18 @@
             <SolidColorBrush x:Key="AppOnAccentTextBrush" Color="#ffffff" />
             <SolidColorBrush x:Key="AppDisabledForegroundBrush" Color="#94a3b8" />
             <SolidColorBrush x:Key="AppDisabledBackgroundBrush" Color="#334155" />
+
+            <!-- Resilient top-level fallback theme brushes (ensures C# AppBrush and non-variant lookups never fail) -->
+            <SolidColorBrush x:Key="AppSurfaceBrush" Color="#0f172a" />
+            <SolidColorBrush x:Key="AppPanelBrush" Color="#182235" />
+            <SolidColorBrush x:Key="AppPanelRaisedBrush" Color="#1e293b" />
+            <SolidColorBrush x:Key="AppBorderBrush" Color="#334155" />
+            <SolidColorBrush x:Key="AppBorderStrongBrush" Color="#475569" />
+            <SolidColorBrush x:Key="AppTextPrimaryBrush" Color="#f8fafc" />
+            <SolidColorBrush x:Key="AppTextMutedBrush" Color="#b6c2d0" />
+            <SolidColorBrush x:Key="AppInputBrush" Color="#111827" />
+            <SolidColorBrush x:Key="AppHoverBrush" Color="#27364d" />
+            <SolidColorBrush x:Key="AppSelectedBrush" Color="#1d4ed833" />
 
             <sys:Double x:Key="AppFontSizeSmall">11</sys:Double>
             <sys:Double x:Key="AppFontSizeBase">13</sys:Double>
@@ -82,6 +91,15 @@
 
         <Style Selector="ScrollViewer">
             <Setter Property="AllowAutoHide" Value="False" />
+        </Style>
+
+        <Style Selector="ScrollBar">
+            <Setter Property="AllowAutoHide" Value="False" />
+        </Style>
+
+        <Style Selector="ScrollBar:vertical">
+            <Setter Property="Width" Value="10" />
+            <Setter Property="MinWidth" Value="10" />
         </Style>
 
         <Style Selector="Border.Panel">

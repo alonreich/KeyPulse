@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "PROJECT=KeyPulse.csproj"
+set "PROJECT=src\KeyPulse\KeyPulse.csproj"
 set "CONFIG=Debug"
 set "RUNTIME=win-x64"
 set "DOTNET_WATCH_SUPPRESS_EMOJIS=1"

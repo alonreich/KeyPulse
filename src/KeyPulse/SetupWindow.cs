@@ -552,39 +552,33 @@ namespace KeyPulse
                 {
                     void** vtableLink = *(void***)pShellLink;
 
-                    // Slot 20: SetPath(LPCWSTR pszFile)
                     var setPath = (delegate* unmanaged[Stdcall]<IntPtr, char*, int>)vtableLink[20];
                     fixed (char* pTarget = targetPath) { setPath(pShellLink, pTarget); }
 
-                    // Slot 9: SetWorkingDirectory(LPCWSTR pszDir)
                     if (!string.IsNullOrEmpty(workingDir))
                     {
                         var setWorkingDir = (delegate* unmanaged[Stdcall]<IntPtr, char*, int>)vtableLink[9];
                         fixed (char* pDir = workingDir) { setWorkingDir(pShellLink, pDir); }
                     }
 
-                    // Slot 7: SetDescription(LPCWSTR pszName)
                     if (!string.IsNullOrEmpty(description))
                     {
                         var setDescription = (delegate* unmanaged[Stdcall]<IntPtr, char*, int>)vtableLink[7];
                         fixed (char* pDesc = description) { setDescription(pShellLink, pDesc); }
                     }
 
-                    // Slot 17: SetIconLocation(LPCWSTR pszIconPath, int iIcon)
                     if (!string.IsNullOrEmpty(iconLocation))
                     {
                         var setIconLocation = (delegate* unmanaged[Stdcall]<IntPtr, char*, int, int>)vtableLink[17];
                         fixed (char* pIcon = iconLocation) { setIconLocation(pShellLink, pIcon, 0); }
                     }
 
-                    // Slot 0: QueryInterface(REFIID riid, void **ppvObject)
                     var queryInterface = (delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)vtableLink[0];
                     hr = queryInterface(pShellLink, &iidPersistFile, &pPersistFile);
                     if (hr != 0 || pPersistFile == IntPtr.Zero) return false;
 
                     void** vtablePersist = *(void***)pPersistFile;
 
-                    // Slot 6: Save(LPCOLESTR pszFileName, BOOL fRemember)
                     var save = (delegate* unmanaged[Stdcall]<IntPtr, char*, int, int>)vtablePersist[6];
                     fixed (char* pFile = shortcutPath) { hr = save(pPersistFile, pFile, 0 /* FALSE */); }
 
@@ -946,10 +940,25 @@ namespace KeyPulse
                             try { File.Delete(f); } catch { }
                         }
                     }
+                    var updatesDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Program.IsDevMode ? "KeyPulse_DEV" : "KeyPulse", "updates");
+                    if (Directory.Exists(updatesDir))
+                    {
+                        foreach (var f in Directory.GetFiles(updatesDir, "KeyPulse_Update_*"))
+                        {
+                            if (!string.Equals(f, myProc, StringComparison.OrdinalIgnoreCase))
+                            {
+                                try { File.Delete(f); } catch { }
+                            }
+                        }
+                    }
                 } catch { }
                 var installWarnings = new List<string>();
 
                 bool wasRunningAsAdmin = false;
+                if (Environment.GetCommandLineArgs().Contains("--was-elevated") || Program.IsElevated)
+                {
+                    wasRunningAsAdmin = true;
+                }
                 var currentInstances = FindInstalledInstances(out bool uninspectableFound);
                 if (uninspectableFound)
                 {
@@ -966,7 +975,7 @@ namespace KeyPulse
                         }
                     }
                 }
-                else
+                else if (!wasRunningAsAdmin)
                 {
                     wasRunningAsAdmin = Program.GetAdminTaskState() == Program.AdminTaskState.Enabled;
                 }
@@ -993,7 +1002,7 @@ namespace KeyPulse
                     bool isDowngrade = cmp < 0 && installedVer != "unknown";
 
                     bool wipe = false;
-                    if (!_isUpdate)
+                    if (!_isUpdate || isDowngrade)
                     {
                         SetProgress(isDowngrade ? "Warning: Downgrade detected..." : "Waiting for upgrade choice...", 0, 6);
                         var tcs = new TaskCompletionSource<bool>();
@@ -1224,6 +1233,18 @@ namespace KeyPulse
                 {
                     try { File.Copy(Program.ExePath, backupExe, true); }
                     catch (Exception bEx) { Log("  -> Warning: could not create pre-install backup: " + bEx.Message); }
+
+                    var oldExe = Program.ExePath + ".old";
+                    try
+                    {
+                        if (File.Exists(oldExe)) File.Delete(oldExe);
+                        File.Move(Program.ExePath, oldExe, true);
+                        MoveFileEx(oldExe, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+                    }
+                    catch (Exception mEx)
+                    {
+                        Log("  -> Warning: could not rename current executable to .old: " + mEx.Message);
+                    }
                 }
 
                 File.Move(stagedExe, Program.ExePath, true);
@@ -1406,6 +1427,11 @@ namespace KeyPulse
                 {
                     try
                     {
+                        if (File.Exists(Program.ExePath))
+                        {
+                            var failedExe = Program.ExePath + ".failed-" + Guid.NewGuid().ToString("N")[..8];
+                            try { File.Move(Program.ExePath, failedExe, true); } catch { }
+                        }
                         File.Move(backupExe, Program.ExePath, true);
                         Log("  -> Restored previous working application executable from backup.");
                         if (File.Exists(Program.CanaryFilePath)) File.Delete(Program.CanaryFilePath);

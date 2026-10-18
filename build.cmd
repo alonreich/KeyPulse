@@ -16,7 +16,7 @@ if "%RC%"=="1" (
   echo.
   echo ###########################################################
   echo  BUILD FAILED - nothing was published.
-  echo  Scroll up for the first ERROR line, or read .\build.log
+  echo  Scroll up for the first ERROR line, or read .\developer_tools\build.log
   echo ###########################################################
 )
 

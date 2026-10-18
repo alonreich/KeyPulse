@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Dark Mode Settings Visibility**: Redesigned Settings tabs in Dark Mode with crisp high-contrast outlines, distinct background tiles, and vibrant top accent indicators so every tab is instantly visible and easy to navigate.
+- **Fluent Shortcut Search**: The main window search bar is now neatly aligned to the left with an intuitive "Search:" label, ergonomic width, and a one-click "✕" clear button right inside the box.
+- **Compact Editor Layout**: Reorganized shortcut inputs onto a single horizontal line, keeping Key Combinations, Action Type, and Action Name together while expanding the text box up to 800px with smooth 3-line text wrapping.
+- **Modern Scroll Overflow Shadows**: Upgraded shortcut list scroll indication with clean Windows 11-style elevation drop shadows, completely replacing old vertical arrow indicators.
+- **Never-Collapsing Scrollbar**: Locked the main window scrollbar in a visible state so it remains steady and never auto-hides or jumps while scrolling.
+- **Update Restart Control**: Replaced sudden automatic restarts after update downloads with clear "Restart & Install Now" and "Install Later" choices.
+
+### Fixed
+- **Zero Data Loss & Privilege Retention**: Upgrades and updates now strictly preserve all custom shortcuts, quick typing snippets, obfuscation settings, and elevated Administrator permissions.
+- **Update File Lock Immunity**: Eliminated update crashes caused by Windows file locks on running executables and runtime native components during in-app updates.
+- **Cryptographic Security Hardening**: Downloaded updates strictly verify published SHA-256 digests and Authenticode signatures, rejecting untrusted or corrupted binaries.
+- **Helpful Network Feedback**: When reaching GitHub API query limits or encountering network timeouts, KeyPulse now displays clear, actionable recovery instructions instead of cryptic error codes.
+
 ## [v2026.10.18.1809] - 2026-10-18
 
 ### Added

@@ -135,10 +135,32 @@ namespace KeyPulse
                 using var response = await Client.GetAsync(apiUrl, cancellationToken);
                 if (!response.IsSuccessStatusCode)
                 {
+                    if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                    {
+                        string rateLimitMessage = "GitHub API rate limit exceeded.";
+                        if (response.Headers.TryGetValues("X-RateLimit-Reset", out var resetValues))
+                        {
+                            var rawReset = resetValues.FirstOrDefault();
+                            if (long.TryParse(rawReset, out long resetEpoch))
+                            {
+                                var resetTime = DateTimeOffset.FromUnixTimeSeconds(resetEpoch);
+                                var remaining = resetTime - DateTimeOffset.UtcNow;
+                                var minutes = Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes));
+                                rateLimitMessage = $"GitHub API rate limit reached. Resets in ~{minutes} minute(s). You can download updates directly from https://github.com/{Program.RepositorySlug}/releases.";
+                            }
+                        }
+                        return new UpdateCheckResult { Succeeded = false, Message = rateLimitMessage };
+                    }
+
+                    if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    {
+                        return new UpdateCheckResult { Succeeded = false, Message = $"No release found on GitHub for repository '{Program.RepositorySlug}'." };
+                    }
+
                     return new UpdateCheckResult
                     {
                         Succeeded = false,
-                        Message = $"GitHub answered {(int)response.StatusCode}."
+                        Message = $"GitHub answered {(int)response.StatusCode} ({response.ReasonPhrase})."
                     };
                 }
 
@@ -213,6 +235,11 @@ namespace KeyPulse
                     ExpectedSha256 = expectedSha256,
                     Message = string.Empty
                 };
+            }
+            catch (HttpRequestException ex)
+            {
+                Program.LogDebug("Update check network error: " + ex.Message);
+                return new UpdateCheckResult { Succeeded = false, Message = "Unable to connect to GitHub. Please check your internet connection." };
             }
             catch (Exception ex)
             {
@@ -349,6 +376,7 @@ namespace KeyPulse
                     return (false, $"Download interrupted after {maxRetries} attempts: {downloadError}", null);
                 }
 
+                bool shaVerified = false;
                 using (var verifyStream = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     var header = new byte[2];
@@ -373,23 +401,37 @@ namespace KeyPulse
                             try { File.Delete(partialPath); } catch { }
                             return (false, $"Cryptographic SHA-256 verification failed (expected {cleanExpected}, got {computedHash}). Update rejected.", null);
                         }
+                        shaVerified = true;
                     }
                 }
 
+                bool signatureVerified = false;
                 try
                 {
 #pragma warning disable SYSLIB0057
                     using var cert = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromSignedFile(partialPath);
 #pragma warning restore SYSLIB0057
-                    if (cert != null && !string.IsNullOrWhiteSpace(cert.Subject) && !cert.Subject.Contains("KeyPulse", StringComparison.OrdinalIgnoreCase))
+                    if (cert != null)
                     {
-                        try { File.Delete(partialPath); } catch { }
-                        return (false, "Downloaded executable signature is untrusted (signer does not match KeyPulse). Update rejected.", null);
+                        if (!string.IsNullOrWhiteSpace(cert.Subject) && cert.Subject.Contains("KeyPulse", StringComparison.OrdinalIgnoreCase))
+                        {
+                            signatureVerified = true;
+                        }
+                        else
+                        {
+                            try { File.Delete(partialPath); } catch { }
+                            return (false, "Downloaded executable signature is untrusted (signer does not match KeyPulse). Update rejected.", null);
+                        }
                     }
                 }
                 catch (System.Security.Cryptography.CryptographicException)
                 {
-                    // No embedded signature: SHA-256 hash check serves as primary integrity check
+                }
+
+                if (!shaVerified && !signatureVerified)
+                {
+                    try { File.Delete(partialPath); } catch { }
+                    return (false, "Downloaded executable cannot be cryptographically verified (missing published SHA-256 and missing valid KeyPulse digital signature). Update rejected.", null);
                 }
 
                 if (File.Exists(tempPath))

@@ -19,8 +19,8 @@
         <Border Grid.Row="0"
                 Classes="Panel"
                 Margin="0,0,0,12">
-            <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                  ColumnDefinitions="*,*,Auto,Auto">
+            <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                  ColumnDefinitions="Auto,Auto,Auto,Auto">
                 <TextBlock Grid.Row="0"
                            Grid.Column="0"
                            Text="Shortcuts (Alternative Keys)"
@@ -31,6 +31,11 @@
                            Text="Action Type"
                            Classes="Label"
                            Margin="0,0,8,4" />
+                <TextBlock Grid.Row="0"
+                           Grid.Column="2"
+                           Text="Action Name"
+                           Classes="Label"
+                           Margin="0,0,8,4" />
 
                 <Grid Grid.Row="1"
                       Grid.Column="0"
@@ -39,6 +44,8 @@
                     <TextBox Grid.Column="0"
                              Name="KeyCombo"
                              PlaceholderText="Press keys here (optional)"
+                             MinWidth="200"
+                             MaxWidth="300"
                              HorizontalAlignment="Stretch"
                              IsReadOnly="True"
                              KeyDown="KeyCombo_KeyDown"
@@ -56,6 +63,8 @@
                           Grid.Column="1"
                           Name="ActionCombo"
                           SelectedIndex="0"
+                          MinWidth="200"
+                          MaxWidth="300"
                           HorizontalAlignment="Stretch"
                           TabIndex="1"
                           Margin="0,0,8,0">
@@ -66,27 +75,34 @@
                     <ComboBoxItem>Paste text (instant)</ComboBoxItem>
                     <ComboBoxItem>Cycle screen brightness</ComboBoxItem>
                 </ComboBox>
-                <!-- tab order walks the editor once, top to bottom, left to right:
-                     shortcut(0), action(1), target(2), blur(3), quick action(4), expand(5), browse(6), add(7),
-                     cancel(8). -->
-                <Button Grid.Row="1"
-                        Grid.Column="2"
-                        Name="AddButton"
-                        Content="Add"
-                        Classes="Primary"
-                        Click="Add_Click"
-                        Margin="0,0,8,0"
-                        TabIndex="7"
-                        MinWidth="96" />
-                <Button Grid.Row="1"
-                        Grid.Column="3"
-                        Name="CancelEditButton"
-                        Content="Cancel"
-                        Classes="Secondary"
-                        Click="CancelEdit_Click"
-                        IsVisible="False"
-                        TabIndex="8"
-                        MinWidth="86" />
+                <TextBox Grid.Row="1"
+                         Grid.Column="2"
+                         Name="ActionNameText"
+                         PlaceholderText="Optional label (e.g. 'My Work Signature', 'Dev Dashboard')"
+                         MinWidth="500"
+                         MaxWidth="600"
+                         HorizontalAlignment="Stretch"
+                         MaxHeight="32"
+                         Margin="0,0,8,0" />
+                <StackPanel Grid.Row="1"
+                            Grid.Column="3"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <Button Name="AddButton"
+                            Content="Add"
+                            Classes="Primary"
+                            Click="Add_Click"
+                            Margin="0,0,8,0"
+                            TabIndex="7"
+                            MinWidth="90" />
+                    <Button Name="CancelEditButton"
+                            Content="Cancel"
+                            Classes="Secondary"
+                            Click="CancelEdit_Click"
+                            IsVisible="False"
+                            TabIndex="8"
+                            MinWidth="80" />
+                </StackPanel>
 
                 <!-- Chips displaying all key combinations configured for this action -->
                 <WrapPanel Grid.Row="2"
@@ -110,45 +126,24 @@
                                TextWrapping="Wrap" />
                 </StackPanel>
 
-                <!-- Optional Custom Action Name -->
-                <Grid Grid.Row="4"
-                      Grid.ColumnSpan="4"
-                      ColumnDefinitions="Auto,*"
-                      Margin="0,4,0,2">
-                    <TextBlock Grid.Column="0"
-                               Text="Action Name"
-                               Classes="Label"
-                               VerticalAlignment="Center"
-                               Margin="0,0,8,0" />
-                    <TextBox Grid.Column="1"
-                             Name="ActionNameText"
-                             PlaceholderText="Optional label (e.g. 'My Work Signature', 'Dev Dashboard')"
-                             HorizontalAlignment="Stretch"
-                             MaxHeight="32" />
-                </Grid>
-
-                <TextBlock Grid.Row="5"
+                <TextBlock Grid.Row="4"
                            Grid.ColumnSpan="4"
                            Name="TargetLabel"
                            Text="Folder path"
                            Classes="Label"
                            Margin="0,8,0,4" />
 
-                <Grid Grid.Row="6"
+                <Grid Grid.Row="5"
                       Grid.ColumnSpan="4"
-                      ColumnDefinitions="*,Auto,Auto,Auto,Auto">
-                    <!-- ISSUE_17: no fixed Height. The old code computed one in C# from a guess that
-                         a line holds ~40 characters regardless of the window's real width, capped at
-                         15 lines, and re-applied it on every keystroke. Layout measures it properly
-                         now, and it scrolls once it reaches MaxHeight. -->
+                      ColumnDefinitions="Auto,Auto,Auto,Auto,Auto">
                     <TextBox Grid.Column="0"
                              Name="TargetText"
                              PlaceholderText="Select a folder, app, URL, or text"
-                             HorizontalAlignment="Stretch"
+                             Width="800"
                              AcceptsReturn="True"
                              TextWrapping="Wrap"
                              MinHeight="34"
-                             MaxHeight="180"
+                             MaxHeight="76"
                              VerticalContentAlignment="Top"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
                              TabIndex="2"
@@ -187,7 +182,7 @@
                             ToolTip.Tip="Choose a file or folder" />
                 </Grid>
 
-                <StackPanel Grid.Row="7"
+                <StackPanel Grid.Row="6"
                             Grid.ColumnSpan="4"
                             Margin="0,4,0,0">
                     <TextBlock Name="TargetErrorText"
@@ -197,44 +192,54 @@
                                Classes="WarningText"
                                IsVisible="False"
                                TextWrapping="Wrap" />
+                    <TextBlock Name="TargetHintText"
+                               Classes="Muted"
+                               FontSize="11"
+                               TextWrapping="Wrap"
+                               Margin="0,2,0,0" />
                 </StackPanel>
-                <TextBlock Grid.Row="8"
-                           Grid.ColumnSpan="4"
-                           Name="TargetHintText"
-                           Classes="Muted"
-                           FontSize="11"
-                           TextWrapping="Wrap"
-                           Margin="0,6,0,0" />
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1"
-              ColumnDefinitions="*,Auto"
-              Margin="0,0,0,12">
-            <TextBox Grid.Column="0"
-                     Name="SearchBox"
-                     HorizontalAlignment="Stretch"
+        <StackPanel Grid.Row="1"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    Margin="0,0,0,12"
+                    Spacing="8">
+            <TextBlock Text="Search:"
+                       Classes="Label"
+                       VerticalAlignment="Center"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Margin="0,0,2,0" />
+            <TextBox Name="SearchBox"
+                     MinWidth="250"
+                     MaxWidth="350"
+                     Width="300"
                      PlaceholderText="Search shortcuts..."
                      TextChanged="SearchBox_TextChanged"
                      KeyDown="SearchBox_KeyDown"
                      TabIndex="9"
-                     ToolTip.Tip="Filter by shortcut keys, action, target or status" />
-            <Button Grid.Column="1"
-                    Name="ClearSearchBtn"
-                    Content="✕"
-                    Classes="Secondary"
-                    Click="ClearSearch_Click"
-                    IsVisible="False"
-                    Margin="6,0,0,0"
-                    Padding="10,0"
-                    MinWidth="34"
-                    FontWeight="Bold"
-                    HorizontalContentAlignment="Center"
-                    VerticalAlignment="Stretch"
-                    VerticalContentAlignment="Center"
-                    Cursor="Hand"
-                    ToolTip.Tip="Clear search filter (Esc)" />
-        </Grid>
+                     ToolTip.Tip="Filter by shortcut keys, action, target or status">
+                <TextBox.InnerRightContent>
+                    <Button Name="ClearSearchBtn"
+                            Content="✕"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Click="ClearSearch_Click"
+                            IsVisible="False"
+                            Margin="0,0,4,0"
+                            Padding="6,0"
+                            FontSize="12"
+                            FontWeight="Bold"
+                            HorizontalContentAlignment="Center"
+                            VerticalContentAlignment="Center"
+                            Cursor="Hand"
+                            ToolTip.Tip="Clear search filter (Esc)" />
+                </TextBox.InnerRightContent>
+            </TextBox>
+        </StackPanel>
 
         <Border Grid.Row="2"
                 Classes="Panel"
@@ -356,6 +361,8 @@
                              Classes="ShortcutList"
                              SelectionChanged="HotkeyList_SelectionChanged"
                              ItemsSource="{Binding VisibleHotkeys}"
+                             ScrollViewer.VerticalScrollBarVisibility="Visible"
+                             ScrollViewer.AllowAutoHide="False"
                              ScrollViewer.ScrollChanged="HotkeyList_ScrollChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="local:HotkeyEntry">
@@ -544,51 +551,97 @@
                         </ListBox.ItemTemplate>
                     </ListBox>
 
-                    <!-- ISSUE_13: the edge fades follow the chosen theme instead of fixed black
-                         gradients with near-white arrows that smeared over Light mode. -->
-                    <Border Name="ScrollFadeTop" Height="40" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0">
+                    <!-- Edge elevation drop shadows appear dynamically when list overflows (VS Code & Windows 11 style) -->
+                    <Border Name="ScrollFadeTop" Height="24" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
                                 <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25B2; &#x25B2; &#x25B2;" HorizontalAlignment="Center" VerticalAlignment="Top" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="0,4,0,0"/>
                     </Border>
-                    <Border Name="ScrollFadeBottom" Height="40" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0">
+                    <Border Name="ScrollFadeBottom" Height="28" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
                                 <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25BC; &#x25BC; &#x25BC;" HorizontalAlignment="Center" VerticalAlignment="Bottom" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="0,0,0,4"/>
                     </Border>
-                    <Border Name="ScrollFadeLeft" Width="40" HorizontalAlignment="Left" IsHitTestVisible="False" Opacity="0">
+
+                    <!-- Interactive Floating Pill Indicator: More shortcuts below -->
+                    <Button Name="ScrollMoreDownPill"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Bottom"
+                            Margin="0,0,0,12"
+                            Padding="16,6"
+                            CornerRadius="20"
+                            Background="#F0182235"
+                            BorderBrush="#60a5fa"
+                            BorderThickness="1.5"
+                            Cursor="Hand"
+                            IsVisible="False"
+                            ZIndex="25"
+                            Click="ScrollMoreDownPill_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <TextBlock Text="▼"
+                                       Foreground="#60a5fa"
+                                       FontSize="11"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Name="ScrollMoreDownText"
+                                       Text="More shortcuts below"
+                                       Foreground="#f8fafc"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Text="▼"
+                                       Foreground="#60a5fa"
+                                       FontSize="11"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- Interactive Floating Pill Indicator: Back to top -->
+                    <Button Name="ScrollMoreUpPill"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Top"
+                            Margin="0,12,0,0"
+                            Padding="16,6"
+                            CornerRadius="20"
+                            Background="#F0182235"
+                            BorderBrush="#60a5fa"
+                            BorderThickness="1.5"
+                            Cursor="Hand"
+                            IsVisible="False"
+                            ZIndex="25"
+                            Click="ScrollMoreUpPill_Click">
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <TextBlock Text="▲"
+                                       Foreground="#60a5fa"
+                                       FontSize="11"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Text="Back to top"
+                                       Foreground="#f8fafc"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Border Name="ScrollFadeLeft" Width="20" HorizontalAlignment="Left" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
                                 <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25C0; &#x25C0;" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="4,0,0,0">
-                            <TextBlock.RenderTransform>
-                                <RotateTransform Angle="-90"/>
-                            </TextBlock.RenderTransform>
-                        </TextBlock>
                     </Border>
-                    <Border Name="ScrollFadeRight" Width="40" HorizontalAlignment="Right" IsHitTestVisible="False" Opacity="0">
+                    <Border Name="ScrollFadeRight" Width="20" HorizontalAlignment="Right" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="100%,0%" EndPoint="0%,0%">
                                 <GradientStop Offset="0" Color="{DynamicResource ScrollFadeEdgeColor}"/>
                                 <GradientStop Offset="1" Color="#00000000"/>
                             </LinearGradientBrush>
                         </Border.Background>
-                        <TextBlock Text="&#x25B6; &#x25B6;" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="10" Foreground="{DynamicResource ScrollFadeArrowBrush}" Margin="0,0,4,0">
-                            <TextBlock.RenderTransform>
-                                <RotateTransform Angle="90"/>
-                            </TextBlock.RenderTransform>
-                        </TextBlock>
                     </Border>
 
                     <!-- ISSUE_22: a first-run user used to see a blank grey rectangle. -->

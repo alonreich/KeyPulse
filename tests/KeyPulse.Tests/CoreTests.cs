@@ -41,7 +41,6 @@ namespace KeyPulse.Tests
         public void CompareVersions_HandlesPrereleaseAndPrefixes()
         {
             Assert.IsTrue(UpdateChecker.CompareVersions("v2026.10.18.0100-beta", "2026.10.17.1515") > 0);
-            // SemVer 2.0: normal release has higher precedence than same version with prerelease
             Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515", "2026.10.17.1515-beta.1") > 0);
             Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515-beta.1", "2026.10.17.1515") < 0);
             Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515-beta.2", "2026.10.17.1515-beta.1") > 0);
@@ -70,11 +69,11 @@ namespace KeyPulse.Tests
         public void Changelog_ExistsAndContainsUnreleasedSection()
         {
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "KeyPulse.csproj")))
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "project_structure.txt")) && !File.Exists(Path.Combine(dir.FullName, "src", "KeyPulse", "KeyPulse.csproj")))
             {
                 dir = dir.Parent;
             }
-            Assert.IsNotNull(dir, "Repository root containing KeyPulse.csproj must be found");
+            Assert.IsNotNull(dir, "Repository root must be found");
 
             var changelogPath = Path.Combine(dir.FullName, "docs", "CHANGELOG.md");
             Assert.IsTrue(File.Exists(changelogPath), $"docs/CHANGELOG.md must exist at {changelogPath}");
@@ -82,6 +81,24 @@ namespace KeyPulse.Tests
             var text = File.ReadAllText(changelogPath);
             Assert.IsTrue(text.Contains("## [Unreleased]"), "CHANGELOG.md must contain ## [Unreleased]");
             Assert.IsTrue(text.Contains("AI Agent Directive"), "CHANGELOG.md must contain agent directives");
+        }
+
+        [TestMethod]
+        public void TechnicalChanges_ExistsAndContainsUnreleasedSection()
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null && !File.Exists(Path.Combine(dir.FullName, "project_structure.txt")) && !File.Exists(Path.Combine(dir.FullName, "src", "KeyPulse", "KeyPulse.csproj")))
+            {
+                dir = dir.Parent;
+            }
+            Assert.IsNotNull(dir, "Repository root must be found");
+
+            var changesPath = Path.Combine(dir.FullName, "docs", "changes.md");
+            Assert.IsTrue(File.Exists(changesPath), $"docs/changes.md must exist at {changesPath}");
+
+            var text = File.ReadAllText(changesPath);
+            Assert.IsTrue(text.Contains("## [Unreleased]"), "changes.md must contain ## [Unreleased]");
+            Assert.IsTrue(text.Contains("AI Agent & Developer Directive"), "changes.md must contain agent directives");
         }
 
         [TestMethod]
@@ -148,7 +165,6 @@ namespace KeyPulse.Tests
         [TestMethod]
         public void ConfigStore_AutoDetectsTestEnvironment_NeverPointsToProductionAppData()
         {
-            // Reset custom override to test automatic environment resolution
             ConfigStore.ConfigDirectory = null!;
             var resolved = ConfigStore.ConfigDirectory;
             var prodAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
@@ -176,7 +192,6 @@ namespace KeyPulse.Tests
             var initialSave = ConfigStore.Save(configWithShortcuts, out var err1);
             Assert.IsTrue(initialSave, "Initial save should succeed: " + err1);
 
-            // Now save a config with 0 shortcuts (e.g. accidental wipe or test)
             var emptyConfig = new AppConfig { Hotkeys = new System.Collections.Generic.List<HotkeyEntry>() };
             var emptySave = ConfigStore.Save(emptyConfig, out var err2);
             Assert.IsTrue(emptySave, "Empty save should succeed: " + err2);
@@ -200,7 +215,7 @@ namespace KeyPulse.Tests
                         Id = Guid.NewGuid().ToString("N"),
                         DisplayName = "Future Action Test",
                         KeyCombinations = new System.Collections.Generic.List<string> { "Ctrl+Alt+F12" },
-                        Action = (ActionType)999, // Unknown future action type
+                        Action = (ActionType)999,
                         Target = "quantum://execute"
                     }
                 }

@@ -445,6 +445,24 @@ class Program
 
         if (isInstallWorker || isUpdateWorker)
         {
+            var parentPidStr = GetArgumentValue(args, "--parent-pid");
+            if (!string.IsNullOrEmpty(parentPidStr) && int.TryParse(parentPidStr, out int parentPid))
+            {
+                try
+                {
+                    using var parentProc = Process.GetProcessById(parentPid);
+                    if (!parentProc.HasExited)
+                    {
+                        parentProc.WaitForExit(6000);
+                    }
+                }
+                catch (ArgumentException) { /* Parent process already exited */ }
+                catch (Exception ex)
+                {
+                    LogCrash($"Wait for parent PID {parentPid} error: {ex.Message}");
+                }
+            }
+
             if (!TryAcquireSetupLock(10000))
             {
                 MessageBox(IntPtr.Zero,
@@ -1549,11 +1567,23 @@ class Program
                 {
                     try
                     {
-                        var existingStamp = File.ReadAllText(stampPath).Trim();
-                        if (string.Equals(existingStamp, expectedStamp, StringComparison.OrdinalIgnoreCase))
+                        var fi = new FileInfo(target);
+                        if (fi.Length > 64)
                         {
-                            LogDebug($"{dllFileName} verified by stamp cache.");
-                            continue;
+                            var headerBytes = new byte[2];
+                            using (var headerStream = File.OpenRead(target))
+                            {
+                                int read = headerStream.Read(headerBytes, 0, 2);
+                                if (read == 2 && headerBytes[0] == 0x4D && headerBytes[1] == 0x5A) // 'MZ'
+                                {
+                                    var existingStamp = File.ReadAllText(stampPath).Trim();
+                                    if (string.Equals(existingStamp, expectedStamp, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        LogDebug($"{dllFileName} verified by stamp cache.");
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                     }
                     catch { }

@@ -49,9 +49,6 @@
     <EmbeddedResource Include="Assets\error.wav" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Remove="tests\**" />
-  </ItemGroup>
-  <ItemGroup>
     <InternalsVisibleTo Include="KeyPulse.Tests" />
   </ItemGroup>
 </Project>

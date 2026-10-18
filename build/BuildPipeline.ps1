@@ -60,7 +60,7 @@ if (Test-Path -LiteralPath $testProj) {
 }
 
 $buildVersion = (Get-Date).ToUniversalTime().ToString('yyyy.MM.dd.HHmm', [System.Globalization.CultureInfo]::InvariantCulture)
-$tag = "v$buildVersion"
+$tag = if ($beta) { "v$buildVersion-beta" } else { "v$buildVersion" }
 $publish = (-not $noPublish) -and (-not $devMode)
 $flavor = if ($devMode) { 'Local Dev (NativeAOT win-x64)' } else { 'NativeAOT win-x64' }
 
@@ -147,20 +147,20 @@ function Sync-VersionFiles {
     [System.IO.File]::WriteAllText((Join-Path $repoRoot 'Directory.Build.props'), $dirProps, $utf8NoBom)
     Write-Host "[VERSION] Updated Directory.Build.props"
 
-    $csprojPath = Join-Path $repoRoot 'KeyPulse.csproj'
+    $csprojPath = Join-Path $repoRoot 'src\KeyPulse\KeyPulse.csproj'
     if (Test-Path -LiteralPath $csprojPath) {
         $csproj = [System.IO.File]::ReadAllText($csprojPath)
         $csproj = [regex]::Replace($csproj, '<Version[^>]*>.*?</Version>', "<Version Condition=`"'`$(Version)' == ''`">$Version</Version>")
         [System.IO.File]::WriteAllText($csprojPath, $csproj, $utf8NoBom)
-        Write-Host "[VERSION] Updated KeyPulse.csproj"
+        Write-Host "[VERSION] Updated src/KeyPulse/KeyPulse.csproj"
     }
 
-    $manifestPath = Join-Path $repoRoot 'app.manifest'
+    $manifestPath = Join-Path $repoRoot 'src\KeyPulse\app.manifest'
     if (Test-Path -LiteralPath $manifestPath) {
         $manifest = [System.IO.File]::ReadAllText($manifestPath)
         $manifest = [regex]::Replace($manifest, '(<assemblyIdentity\s+version=")[^"]*(")', "`${1}$Version`${2}")
         [System.IO.File]::WriteAllText($manifestPath, $manifest, $utf8NoBom)
-        Write-Host "[VERSION] Updated app.manifest"
+        Write-Host "[VERSION] Updated src/KeyPulse/app.manifest"
     }
 }
 
@@ -285,7 +285,7 @@ function Start-ReleasePreflight {
 function Commit-ReleaseVersion {
     param($Plan)
     Write-Host "[RELEASE] Staging synchronized release files..."
-    $releaseFiles = @('version.txt', 'Directory.Build.props', 'KeyPulse.csproj', 'app.manifest')
+    $releaseFiles = @('version.txt', 'Directory.Build.props', 'src/KeyPulse/KeyPulse.csproj', 'src/KeyPulse/app.manifest')
     $changelogPath = Join-Path $repoRoot 'docs\CHANGELOG.md'
     if (Test-Path -LiteralPath $changelogPath) {
         $clText = [System.IO.File]::ReadAllText($changelogPath)
@@ -385,7 +385,7 @@ function Clear-BuildArtifacts {
             try { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue } catch { }
         }
     }
-    & dotnet clean "KeyPulse.csproj" -c Release -r win-x64 --nologo -v q -nodeReuse:false > $null 2>&1
+    & dotnet clean (Join-Path $repoRoot 'src\KeyPulse\KeyPulse.csproj') -c Release -r win-x64 --nologo -v q -nodeReuse:false > $null 2>&1
 }
 
 function Initialize-MsvcToolchain {
@@ -440,7 +440,7 @@ function Initialize-MsvcToolchain {
 function Invoke-NativeAotPublish {
     param([string]$Version, [string]$FinalDir, [bool]$SingleThreaded)
     $pubArgs = @(
-        'publish', 'KeyPulse.csproj',
+        'publish', (Join-Path $repoRoot 'src\KeyPulse\KeyPulse.csproj'),
         '-c', 'Release',
         '-r', 'win-x64',
         '-p:TreatWarningsAsErrors=true',
@@ -553,6 +553,22 @@ function Test-CompiledOutput {
 # SIG_01: Authenticode code-signing helper with RFC-3161 Digicert timestamping and offline fallback
 function Invoke-CodeSign {
     param([string]$TargetExe)
+    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)
+    $thumbprint = $env:KEYPULSE_CERT_THUMBPRINT
+    if ($thumbprint -and $signtool) {
+        Write-Host "[SIGN] Authenticode signing $TargetExe using certificate thumbprint $thumbprint..."
+        & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $TargetExe > $null 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[SIGN] Executable signed and timestamped via certificate store. [OK]"
+            return $true
+        }
+        & $signtool sign /sha1 $thumbprint /fd SHA256 $TargetExe > $null 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[SIGN] Executable signed via certificate store (offline).        [OK]"
+            return $true
+        }
+    }
+
     $certPath = if ($env:KEYPULSE_CERT_PATH -and (Test-Path -LiteralPath $env:KEYPULSE_CERT_PATH)) {
         $env:KEYPULSE_CERT_PATH
     } else {
@@ -572,7 +588,6 @@ function Invoke-CodeSign {
     }
 
     Write-Host "[SIGN] Authenticode signing $TargetExe with $([System.IO.Path]::GetFileName($certPath))..."
-    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)
     $signed = $false
     if ($signtool) {
         $pwdArg = if ($certPwd) { @('/p', $certPwd) } else { @() }
@@ -770,7 +785,7 @@ function Publish-GitHubRelease {
             }
             for ($i = 0; $i -lt $betaList.Count; $i++) {
                 $b = $betaList[$i]
-                if ($i -ge $betaReleasesKept -or ($null -ne $newestStable -and $b.VersionObj -le $newestStable)) {
+                if ($i -ge $betaReleasesKept) {
                     $doomed.Add($b.Tag)
                 }
             }

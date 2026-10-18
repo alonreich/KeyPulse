@@ -10,6 +10,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.VisualTree;
 using Microsoft.Win32;
 
 namespace KeyPulse
@@ -217,6 +218,7 @@ namespace KeyPulse
             this.Topmost = false;
 
             VerifyAdminModeIsRealAsync();
+            Avalonia.Threading.Dispatcher.UIThread.Post(UpdateScrollIndicators, Avalonia.Threading.DispatcherPriority.Loaded);
         }
 
         /// <summary>
@@ -242,6 +244,7 @@ namespace KeyPulse
             Activate();
             this.Topmost = false;
             Program.LogDebug("Main window brought to front by a user request.");
+            Avalonia.Threading.Dispatcher.UIThread.Post(UpdateScrollIndicators, Avalonia.Threading.DispatcherPriority.Loaded);
 
             if (PendingUpdateResult.HasValue)
             {
@@ -1338,6 +1341,8 @@ namespace KeyPulse
                         ? $"{Hotkeys.Count} total"
                         : $"showing {VisibleHotkeys.Count} of {Hotkeys.Count}");
             }
+
+            Avalonia.Threading.Dispatcher.UIThread.Post(UpdateScrollIndicators, Avalonia.Threading.DispatcherPriority.Loaded);
         }
 
         /// <summary>ISSUE_22: never show an unexplained empty rectangle.</summary>
@@ -1412,14 +1417,41 @@ namespace KeyPulse
         {
             try
             {
-                if (Application.Current?.FindResource(resourceKey) is Avalonia.Media.IBrush brush) return brush;
-                if (Application.Current?.FindResource("AppTextPrimaryBrush") is Avalonia.Media.IBrush fallback) return fallback;
+                var app = Application.Current;
+                if (app != null)
+                {
+                    if (app.TryGetResource(resourceKey, app.ActualThemeVariant, out var themed) && themed is Avalonia.Media.IBrush themedBrush)
+                        return themedBrush;
+                    if (app.TryGetResource(resourceKey, null, out var generic) && generic is Avalonia.Media.IBrush genericBrush)
+                        return genericBrush;
+                }
             }
             catch
             {
             }
 
-            return new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromUInt32(0));
+            bool isDark = Application.Current?.ActualThemeVariant != Avalonia.Styling.ThemeVariant.Light;
+            return resourceKey switch
+            {
+                "AppSurfaceBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#0f172a" : "#f8fafc")),
+                "AppPanelBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#182235" : "#ffffff")),
+                "AppPanelRaisedBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#1e293b" : "#f1f5f9")),
+                "AppBorderBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#334155" : "#cbd5e1")),
+                "AppBorderStrongBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#475569" : "#94a3b8")),
+                "AppTextPrimaryBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#f8fafc" : "#0f172a")),
+                "AppTextMutedBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#b6c2d0" : "#475569")),
+                "AppInputBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#111827" : "#ffffff")),
+                "AppHoverBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#27364d" : "#e2e8f0")),
+                "AppSelectedBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#1d4ed833" : "#bfdbfe")),
+                "AppAccentBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#60a5fa")),
+                "AppAccentStrongBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#2563eb")),
+                "AppAccentPressedBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#1d4ed8")),
+                "AppSuccessBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#22c55e")),
+                "AppSuccessSoftBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#86efac")),
+                "AppWarningBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#f59e0b")),
+                "AppDangerBrush" => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#ef4444")),
+                _ => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse(isDark ? "#f8fafc" : "#0f172a"))
+            };
         }
 
         private Window CreateAppDialog(string title, double width, double height, double minWidth, double minHeight, WindowStartupLocation startupLocation, bool canResize = true, bool topmost = false)
@@ -2681,27 +2713,52 @@ namespace KeyPulse
                         cancelBtn.Content = "Canceling...";
                     };
 
+                    bool readyToRestart = !string.IsNullOrWhiteSpace(result.LocalInstallerPath);
+                    string targetInstallerExe = result.LocalInstallerPath ?? string.Empty;
+
+                    void ExecuteRestart()
+                    {
+                        try
+                        {
+                            var parentArg = $"--parent-pid {Environment.ProcessId}";
+                            var adminArg = Program.IsElevated ? " --was-elevated" : "";
+                            var psi = new ProcessStartInfo(targetInstallerExe)
+                            {
+                                UseShellExecute = true,
+                                Arguments = $"--update-worker {parentArg}{adminArg}",
+                                Verb = Program.IsElevated ? "runas" : ""
+                            };
+                            Process.Start(psi);
+                            updateWin.Close();
+                            ((App)Avalonia.Application.Current!).Exit_Clicked(null, EventArgs.Empty);
+                        }
+                        catch (Exception ex)
+                        {
+                            updateBtn.IsEnabled = true;
+                            progressStatus.Foreground = AppBrush("AppDangerBrush");
+                            progressStatus.Text = "Could not launch updater: " + ex.Message;
+                        }
+                    }
+
+                    if (readyToRestart)
+                    {
+                        updateBtn.Content = "Restart & Install Now";
+                        remindBtn.Content = "Install Later";
+                        remindBtn.IsVisible = true;
+                        remindBtn.IsEnabled = true;
+                        skipBtn.IsVisible = false;
+                        cancelBtn.IsVisible = false;
+                        progressBar.IsVisible = false;
+                        progressStatus.IsVisible = true;
+                        progressStatus.Foreground = AppBrush("AppSuccessSoftBrush");
+                        progressStatus.Text = "Update is ready to install.";
+                    }
+
                     updateBtn.Click += async (s, e) =>
                     {
-                        if (!string.IsNullOrWhiteSpace(result.LocalInstallerPath))
+                        if (readyToRestart)
                         {
-                            try
-                            {
-                                var psi = new ProcessStartInfo(result.LocalInstallerPath)
-                                {
-                                    UseShellExecute = true,
-                                    Arguments = "--update-worker",
-                                    Verb = Program.IsElevated ? "runas" : ""
-                                };
-                                Process.Start(psi);
-                                updateWin.Close();
-                                ((App)Avalonia.Application.Current!).Exit_Clicked(null, EventArgs.Empty);
-                            }
-                            catch (Exception ex)
-                            {
-                                progressStatus.IsVisible = true;
-                                progressStatus.Text = "Could not start installer: " + ex.Message;
-                            }
+                            ExecuteRestart();
                             return;
                         }
 
@@ -2755,31 +2812,24 @@ namespace KeyPulse
                             return;
                         }
 
-                        cancelBtn.IsEnabled = false;
-                        progressStatus.Foreground = AppBrush("AppSuccessSoftBrush");
-                        progressStatus.Text = "Cryptographic integrity verified. Restarting into updater...";
-                        await System.Threading.Tasks.Task.Delay(800);
+                        targetInstallerExe = stagedExe;
+                        readyToRestart = true;
+                        progressBar.IsVisible = false;
+                        cancelBtn.IsVisible = false;
+                        skipBtn.IsVisible = false;
 
-                        try
-                        {
-                            var psi = new ProcessStartInfo(stagedExe)
-                            {
-                                UseShellExecute = true,
-                                Arguments = "--update-worker",
-                                Verb = Program.IsElevated ? "runas" : ""
-                            };
-                            Process.Start(psi);
-                            updateWin.Close();
-                            ((App)Avalonia.Application.Current!).Exit_Clicked(null, EventArgs.Empty);
-                        }
-                        catch (Exception ex)
-                        {
-                            cancelBtn.IsVisible = false;
-                            updateBtn.IsVisible = true;
-                            updateBtn.IsEnabled = true;
-                            progressStatus.Foreground = AppBrush("AppDangerBrush");
-                            progressStatus.Text = "Could not launch updater: " + ex.Message;
-                        }
+                        remindBtn.Content = "Install Later";
+                        remindBtn.IsEnabled = true;
+                        remindBtn.IsVisible = true;
+
+                        updateBtn.Content = "Restart & Install Now";
+                        updateBtn.Classes.Clear();
+                        updateBtn.Classes.Add("Primary");
+                        updateBtn.IsEnabled = true;
+                        updateBtn.IsVisible = true;
+
+                        progressStatus.Foreground = AppBrush("AppSuccessSoftBrush");
+                        progressStatus.Text = "Update downloaded and verified. Restart to apply update.";
                     };
 
                     btnPanel.Children.Add(skipBtn);
@@ -3585,15 +3635,80 @@ namespace KeyPulse
             }
         }
 
+        private ScrollViewer? _hotkeyScrollViewer;
+
+        private ScrollViewer? GetHotkeyListScrollViewer()
+        {
+            if (_hotkeyScrollViewer != null) return _hotkeyScrollViewer;
+            if (this.FindControl<ListBox>("HotkeyList") is ListBox lb)
+            {
+                _hotkeyScrollViewer = lb.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+            }
+            return _hotkeyScrollViewer;
+        }
+
+        private void UpdateScrollIndicators()
+        {
+            var sv = GetHotkeyListScrollViewer();
+            if (sv == null) return;
+
+            double maxScrollY = Math.Max(0, sv.Extent.Height - sv.Viewport.Height);
+            bool canScrollDown = maxScrollY > 2 && sv.Offset.Y < maxScrollY - 2;
+            bool canScrollUp = sv.Offset.Y > 2;
+
+            if (this.FindControl<Border>("ScrollFadeTop") is Border topFade)
+                topFade.Opacity = canScrollUp ? 1 : 0;
+            if (this.FindControl<Border>("ScrollFadeBottom") is Border bottomFade)
+                bottomFade.Opacity = canScrollDown ? 1 : 0;
+
+            if (this.FindControl<Button>("ScrollMoreDownPill") is Button downPill)
+            {
+                downPill.IsVisible = canScrollDown;
+                if (canScrollDown && this.FindControl<TextBlock>("ScrollMoreDownText") is TextBlock downText)
+                {
+                    double itemHeight = 44.0;
+                    double remainingPx = maxScrollY - sv.Offset.Y;
+                    int hiddenCount = Math.Max(1, (int)Math.Ceiling(remainingPx / itemHeight));
+                    downText.Text = hiddenCount == 1 ? "1 more shortcut below" : $"{hiddenCount} more shortcuts below";
+                }
+            }
+
+            if (this.FindControl<Button>("ScrollMoreUpPill") is Button upPill)
+            {
+                upPill.IsVisible = canScrollUp;
+            }
+        }
+
         private void HotkeyList_ScrollChanged(object? sender, ScrollChangedEventArgs e)
         {
             if (e.Source is ScrollViewer sv)
             {
-                if (this.FindControl<Border>("ScrollFadeTop") is Border top) top.Opacity = sv.Offset.Y > 0 ? 1 : 0;
-                if (this.FindControl<Border>("ScrollFadeBottom") is Border bottom) bottom.Opacity = sv.Offset.Y < sv.Extent.Height - sv.Viewport.Height - 1 ? 1 : 0;
+                _hotkeyScrollViewer = sv;
                 if (this.FindControl<Border>("ScrollFadeLeft") is Border left) left.Opacity = sv.Offset.X > 0 ? 1 : 0;
                 if (this.FindControl<Border>("ScrollFadeRight") is Border right) right.Opacity = sv.Offset.X < sv.Extent.Width - sv.Viewport.Width - 1 ? 1 : 0;
             }
+            UpdateScrollIndicators();
+        }
+
+        public void ScrollMoreDownPill_Click(object? sender, RoutedEventArgs e)
+        {
+            var sv = GetHotkeyListScrollViewer();
+            if (sv == null) return;
+
+            Program.PlaySound("click");
+            double targetY = Math.Min(sv.Extent.Height - sv.Viewport.Height, sv.Offset.Y + Math.Max(44, sv.Viewport.Height * 0.75));
+            sv.Offset = new Avalonia.Vector(sv.Offset.X, targetY);
+            UpdateScrollIndicators();
+        }
+
+        public void ScrollMoreUpPill_Click(object? sender, RoutedEventArgs e)
+        {
+            var sv = GetHotkeyListScrollViewer();
+            if (sv == null) return;
+
+            Program.PlaySound("click");
+            sv.Offset = new Avalonia.Vector(sv.Offset.X, 0);
+            UpdateScrollIndicators();
         }
 
         public void Enabled_Click(object? sender, RoutedEventArgs e)
@@ -4122,12 +4237,15 @@ namespace KeyPulse
                 var ear = new Border
                 {
                     CornerRadius = new Avalonia.CornerRadius(6, 6, 0, 0),
-                    Padding = new Avalonia.Thickness(12, 7),
-                    Margin = new Avalonia.Thickness(0, 0, 3, 0),
+                    Padding = new Avalonia.Thickness(14, 8),
+                    Margin = new Avalonia.Thickness(0, 0, 4, 0),
                     Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
                     Focusable = true,
                     TabIndex = 2 + i,
                     IsTabStop = true,
+                    Background = AppBrush("AppPanelBrush"),
+                    BorderBrush = AppBrush("AppBorderBrush"),
+                    BorderThickness = new Avalonia.Thickness(1, 1, 1, 1),
                     Child = text
                 };
                 tabEars[i] = ear;
@@ -5186,22 +5304,24 @@ namespace KeyPulse
                     if (isActive)
                     {
                         tabEars[i].Background = AppBrush("AppPanelRaisedBrush");
-                        tabEars[i].BorderBrush = AppBrush("AppBorderBrush");
-                        tabEars[i].BorderThickness = new Avalonia.Thickness(1, 1, 1, 0);
-                        tabEars[i].Margin = new Avalonia.Thickness(0, 0, 3, -1);
+                        tabEars[i].BorderBrush = AppBrush("AppAccentBrush");
+                        tabEars[i].BorderThickness = new Avalonia.Thickness(1, 3, 1, 0);
+                        tabEars[i].Margin = new Avalonia.Thickness(0, 0, 4, -1);
                         tabEars[i].ZIndex = 10;
                         tabTexts[i].Foreground = AppBrush("AppAccentBrush");
-                        tabTexts[i].FontWeight = Avalonia.Media.FontWeight.SemiBold;
+                        tabTexts[i].FontWeight = Avalonia.Media.FontWeight.Bold;
+                        tabTexts[i].Opacity = 1.0;
                     }
                     else
                     {
-                        tabEars[i].Background = AppBrush("AppSurfaceBrush");
+                        tabEars[i].Background = AppBrush("AppPanelBrush");
                         tabEars[i].BorderBrush = AppBrush("AppBorderBrush");
                         tabEars[i].BorderThickness = new Avalonia.Thickness(1, 1, 1, 1);
-                        tabEars[i].Margin = new Avalonia.Thickness(0, 0, 3, 0);
+                        tabEars[i].Margin = new Avalonia.Thickness(0, 0, 4, 0);
                         tabEars[i].ZIndex = 1;
-                        tabTexts[i].Foreground = AppBrush("AppTextMutedBrush");
+                        tabTexts[i].Foreground = AppBrush("AppTextPrimaryBrush");
                         tabTexts[i].FontWeight = Avalonia.Media.FontWeight.Normal;
+                        tabTexts[i].Opacity = 0.8;
                     }
                 }
 
@@ -5237,15 +5357,19 @@ namespace KeyPulse
                     if (activeTab != capturedIndex || !string.IsNullOrEmpty(searchBox.Text))
                     {
                         tabEars[capturedIndex].Background = AppBrush("AppHoverBrush");
+                        tabEars[capturedIndex].BorderBrush = AppBrush("AppBorderStrongBrush");
                         tabTexts[capturedIndex].Foreground = AppBrush("AppTextPrimaryBrush");
+                        tabTexts[capturedIndex].Opacity = 1.0;
                     }
                 };
                 tabEars[i].PointerExited += (_, _) =>
                 {
                     if (activeTab != capturedIndex || !string.IsNullOrEmpty(searchBox.Text))
                     {
-                        tabEars[capturedIndex].Background = AppBrush("AppSurfaceBrush");
-                        tabTexts[capturedIndex].Foreground = AppBrush("AppTextMutedBrush");
+                        tabEars[capturedIndex].Background = AppBrush("AppPanelBrush");
+                        tabEars[capturedIndex].BorderBrush = AppBrush("AppBorderBrush");
+                        tabTexts[capturedIndex].Foreground = AppBrush("AppTextPrimaryBrush");
+                        tabTexts[capturedIndex].Opacity = 0.8;
                     }
                 };
                 tabEars[i].PointerPressed += (_, _) =>
@@ -5292,7 +5416,7 @@ namespace KeyPulse
                     "Restore Defaults");
                 if (!confirmed) return;
 
-                if (activeTab == 0) // General
+                if (activeTab == 0)
                 {
                     if (Program.SetStartup(true, out var startErr))
                     {
@@ -5307,41 +5431,41 @@ namespace KeyPulse
                     Program.SoundEnabled = true;
                     SaveConfig();
                 }
-                else if (activeTab == 1) // Hotkeys
+                else if (activeTab == 1)
                 {
                     _currentConfig.UseGoogleChromeForUrls = true;
                     SaveConfig();
                 }
-                else if (activeTab == 2) // Typing
+                else if (activeTab == 2)
                 {
                     _currentConfig.TypingDelayMs = TypingDelayFast;
                     InputSimulator.CharacterDelayMs = TypingDelayFast;
                     SaveConfig();
                 }
-                else if (activeTab == 3) // Theme
+                else if (activeTab == 3)
                 {
                     _currentConfig.Theme = "System";
                     App.ApplyTheme(_currentConfig.Theme);
                     SaveConfig();
                 }
-                else if (activeTab == 4) // Displays
+                else if (activeTab == 4)
                 {
                     ScreenBrightnessService.ResetToDefaults();
                     SaveConfig();
                 }
-                else if (activeTab == 5) // Desktop Icons
+                else if (activeTab == 5)
                 {
                     DesktopOrganizerService.ResetBehavioralDefaults(out _);
                     SaveConfig();
                 }
-                else if (activeTab == 6) // Updates
+                else if (activeTab == 6)
                 {
                     _currentConfig.AutoCheckForUpdates = true;
                     _currentConfig.UpdateChannel = "Stable";
                     _currentConfig.SkippedUpdateVersion = string.Empty;
                     SaveConfig();
                 }
-                else if (activeTab == 7) // Backup
+                else if (activeTab == 7)
                 {
                     statusTxt.Text = "Backup tab settings are manual actions; use Danger Zone below if you wish to reset all settings.";
                     statusTxt.Foreground = AppBrush("AppWarningBrush");

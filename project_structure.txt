@@ -8,6 +8,54 @@
 - **Compilation**: Single-file `NativeAOT` (No .NET runtime dependencies).
 - **OS Target**: Windows x64 Strictly (Heavily relies on Win32 P/Invoke).
 
+### 1.1 Repository Structure
+```
+.
+├── .github/                 # GitHub workflows & CI/CD automation
+├── build/                   # Release pipeline, verification sentinels, and dev sandbox scripts
+│   ├── BuildPipeline.ps1
+│   ├── DevSandbox.ps1
+│   ├── sentinels.txt
+│   └── VerifySentinels.ps1
+├── developer_tools/         # Developer utilities, code analysis tools, logs, and scratch assets
+│   ├── build.log            # Mirrored build execution log (isolated from root)
+│   ├── build.result.txt     # One-line build verdict
+│   ├── scratch/             # Transient icon previews, test images, and scratch artifacts
+│   ├── BuildLog.ps1
+│   ├── Find_and_Remove_Comments.py
+│   ├── Manual_UnInstall.bat
+│   ├── Pull_Code_files.py
+│   ├── Redundant_Code_Finder.py
+│   └── SetConsoleFont.ps1
+├── docs/                    # Architecture documentation, changelog, and changes history
+│   ├── CHANGELOG.md         # Public user-facing release notes (SemVer promoted)
+│   ├── changes.md           # Continuous technical change ledger for AI agents
+│   └── index.md
+├── src/                     # Core application source code and resources
+│   └── KeyPulse/
+│       ├── Assets/          # Sound effects and UI media resources
+│       ├── NativeLibs/      # Native Avalonia dependencies (GZip compressed)
+│       ├── App.axaml / .cs
+│       ├── MainWindow.axaml / .cs
+│       ├── DesktopOrganizerWindow.axaml / .cs
+│       ├── KeyPulse.csproj  # Main project definition
+│       ├── KeyPulse.ico     # Multi-resolution application icon
+│       ├── app.manifest     # DPI & OS manifest
+│       └── *.cs             # All application services, interop, and data models
+├── ssl-certificate/         # Authenticode code-signing scripts and certificates
+├── tests/                   # Automated unit and integration test suite
+│   └── KeyPulse.Tests/
+├── .gitattributes
+├── .gitignore
+├── build.cmd                # Official release and build entry point (non-interactive, pushes to GitHub)
+├── dev.cmd                  # Developer sandbox entry point (watch, rebuild, trace, sandbox)
+├── dev_build.cmd            # Fast local NativeAOT test compiler (no git/tag/remote operations)
+├── Directory.Build.props    # Central build configuration properties
+├── project_structure.txt    # Architecture manifest & single source of truth
+├── README.md                # Project README and quickstart guide
+└── version.txt              # SemVer version stamp
+```
+
 ## 2. CORE ARCHITECTURE & LOGIC FLOW
 
 ### Boot / Initialization (`Program.cs` & `App.axaml.cs`)
@@ -20,7 +68,7 @@
    - If run normally outside of its strict `%LOCALAPPDATA%\Programs\KeyPulse` boundary, it dynamically copies itself to `%LOCALAPPDATA%\KeyPulse_Uninstall` or temporary setup staging and relaunches with `--install-worker` to trigger the installation pipeline (or `--update-worker` during in-app updates to bypass wipe prompts, preserve configurations seamlessly, and auto-restart).
    - `Program.ReleaseSingleInstanceLock()` must be called before ANY `Environment.Exit`. Exit skips finally blocks, so the lock used to be released only by Windows abandoning it at process death, and the replacement instance started only because it caught `AbandonedMutexException`.
 5. **Versioning, Updates & Release Architecture**: `build.cmd` synchronizes `version.txt`, `Directory.Build.props`, `KeyPulse.csproj`, and `app.manifest` and stamps `yyyy.MM.dd.HHmm` into the exe via `-p:Version=` (`dev_build.cmd` stamps `0.0.0-dev.<timestamp>` without touching repository version files). `Program.AppVersion` reads it back with `FileVersionInfo` (no reflection, so NativeAOT-safe). Settings shows it and `UpdateChecker` compares versions using complete **SemVer 2.0 precedence rules** (`CompareVersions`, `SplitSemVer`, `ComparePrereleaseIdentifiers`), ensuring stable releases take precedence over corresponding betas (`1.0.0 > 1.0.0-beta`).
-   - **Secret-Free Code Signing**: CI creates ephemeral in-memory certificates, `.gitignore` excludes `*.pfx`, and `BuildPipeline.ps1` dynamically reads `$env:KEYPULSE_CERT_PASSWORD` with zero hardcoded secret fallbacks.
+   - **Secret-Free Code Signing & Store Support**: CI and release pipelines support automated code signing via Windows Certificate Store thumbprint (`$env:KEYPULSE_CERT_THUMBPRINT`) or certificate paths with environment variable credentials (`$env:KEYPULSE_CERT_PASSWORD`), with zero interactive password prompts.
    - **Cryptographic Asset Integrity & Authenticode**: `UpdateChecker.cs` downloads `SHA256SUMS.txt` if absent in release metadata, strictly validates SHA-256 binary hash, and verifies embedded Authenticode publisher subject via `X509Certificate2.CreateFromSignedFile` (rejecting any binary whose signer is not KeyPulse).
    - **Resumable HTTP Downloads & Backoff**: `UpdateChecker.DownloadUpdateAsync()` supports HTTP `Range: bytes={offset}-` partial downloads and resilient 3-attempt exponential backoff retry.
    - **Background Checks & Notification Retention**: `App.axaml.cs` runs a 24-hour recurring background update check loop and preserves pending notifications (`PendingUpdateResult`) when running hidden in the tray until `MainWindow.BringToFront()` displays them.
@@ -29,7 +77,7 @@
    - **Forward Config Schema Preservation**: `ConfigStore.Save()` uses `Math.Max(config.SchemaVersion, CurrentSchemaVersion)` to prevent downgrading future schema versions.
    - **Forward Backup Compatibility**: `BackupService.ValidatePayload()` skips future unsupported `ActionType` values with user warnings instead of aborting the restore as corrupt.
    - **Atomic Push-After-Verification Pipeline**: `BuildPipeline.ps1` requires a clean git working tree, stages only explicit release files (`$releaseFiles`), and pushes the release commit and tag to `origin` ONLY after remote draft release asset upload and SHA-256 verification succeed, completely preventing orphaned commits on remote.
-   - **Autonomous Changelog & 5-Release Retention**: Every agent modifying code MUST maintain `docs/CHANGELOG.md` under `## [Unreleased]`. The release pipeline automatically promotes unreleased notes into release assets and retains binaries for 5 stable and 3 beta releases FIFO while preserving full release history and tags.
+   - **Dual Changelog Architecture & 5-Release Retention**: Autonomous AI agents and engineers continuously document all granular technical changes, architectural adjustments, and security verifications under `docs/changes.md`. User-facing, consumer-oriented release notes are promoted and curated in `docs/CHANGELOG.md` under `## [Unreleased]`. The release pipeline automatically extracts release notes from `docs/CHANGELOG.md` and retains binary assets for 5 stable and 3 beta releases FIFO while preserving full release history and tags.
 6. **Startup Launcher**: If enabled, `Program.SetStartup` writes the startup command directly into HKCU `Software\Microsoft\Windows\CurrentVersion\Run` (`"<ExePath>" --hidden`). Legacy `boot.vbs` script generation and `wscript.exe` execution were completely eliminated to remove heuristic dropper triggers.
 7. **Single startup authority**: `Program.IsStartupEnabled()` / `Program.SetStartup()` are the ONLY places that decide startup state. They transparently handle BOTH the `Run` registry key and the elevated `KeyPulse_AdminTask` logon task, so the two launchers can never both fire and elevating/de-elevating cannot silently lose the setting. In Dev Mode (`Program.IsDevMode`), `QueryAdminTaskState()`, `QueryStartupState()`, `SetStartup()`, and `TrySetRegistryStartup()` are strictly isolated no-ops so dev runs never modify Windows startup entries or scheduled tasks.
 8. **Elevation & Task Scheduler COM Integration**: `Program.CreateOrUpdateAdminTask`, `EnsureAdminTaskBatterySettings`, and `QueryAdminTaskState` utilize the native Windows `Schedule.Service` COM API (via `ComActivation.cs`) to define, update, and manage the `KeyPulse_AdminTask` directly in memory from XML strings with `<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`, `<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`, and `<StopOnIdleEnd>false</StopOnIdleEnd>`, completely eliminating temporary XML file drops to `%TEMP%` and avoiding unneeded child `schtasks.exe` spawns (with `schtasks.exe` retained solely as a secondary fallback). `MainWindow.VerifyAdminModeIsRealAsync()` runs this check in the background on startup, and `Program.SetStartup` enforces it on startup enablement. `Program.TryRemoveAdminTask` verifies removal and is used by the uninstaller.
@@ -73,6 +121,9 @@
   7. **Updates**: Application version information, update channel selection (Stable vs Beta), and manual update checks.
   8. **Backup**: Configuration snapshot export, previous backup import, and isolated Danger Zone factory reset.
   - **Physical Property Sheet Ear Styling**: Tabs are rendered as top-rounded ears (`CornerRadius = 6, 6, 0, 0`) physically connected to the content page container (`pageContainer`). The active tab has zero bottom border (`BorderThickness = 1, 1, 1, 0`) and overlaps the top border of `pageContainer` by 1px with matching background (`AppPanelRaisedBrush`), creating a continuous surface identical to top-tier Windows property sheets. Inactive tabs have recessed backgrounds, subtle borders, and smooth hover/keyboard transitions. Each tab page features its own descriptive header and dedicated "Restore Tab Defaults" action, while the live search bar filters all settings dynamically across all 8 tabs.
+  - **Resilient Theme-Variant Brush Resolution (`AppBrush`)**: `MainWindow.AppBrush` queries `app.TryGetResource(resourceKey, app.ActualThemeVariant, out var res)` with deterministic dark/light solid brush fallbacks (and global fallback brushes in `<Application.Resources>`), guaranteeing that inactive tabs, panels, and borders never resolve to transparent brushes even when `ThemeDictionaries` lookups fail.
+- **Shortcut Search Filter**: Features a left-aligned `"Search:"` label, a compact `TextBox` with constrained geometry (`MinWidth="250"`, `MaxWidth="350"`), and an embedded right-aligned `"✕"` button to immediately clear the filter.
+- **Top-Tier Interactive Scroll Overflow Indicators & Navigation**: When shortcuts exceed the viewport, an interactive floating pill indicator `ScrollMoreDownPill` (`[ ▼ X more shortcuts below ▼ ]`) dynamically calculates offscreen items and smoothly pages down on click; when scrolled down, `ScrollMoreUpPill` (`[ ▲ Back to top ▲ ]`) provides immediate jump-to-top navigation. `ScrollFadeBottom` / `ScrollFadeTop` cast a theme elevation glow (`#401d4ed8` in dark mode), and the vertical scrollbar is explicitly styled (`Width="10"`, `AllowAutoHide="False"`, high-contrast thumb) so overflow is immediately obvious upon launch.
 - **The shortcut table (`ShortcutHeaderGrid` + the ListBox item template)**: the header and the rows
   are two SEPARATE grids whose `ColumnDefinitions` lists must be kept identical. Column order is
   `0 Status, 1 sep, 2 Shortcut, 3 sep, 4 Action, 5 sep, 6 Target, 7 sep, 8 Actions`. Every resizable
@@ -197,7 +248,7 @@ is, proved it is undamaged, and been read end to end.** Nothing is touched befor
 - **Local NativeAOT Test Build (`.\dev_build.cmd`)**:
   - Compiles the full standalone NativeAOT `.\compiled\KeyPulse.exe` with `0.0.0-dev.<timestamp>` metadata while leaving `version.txt`, `Directory.Build.props`, `KeyPulse.csproj`, `app.manifest`, Git commits/tags, and GitHub completely untouched.
 - **Live Colored Build Logger (`developer_tools\BuildLog.ps1`)**:
-  - Streams live colored console output, enforces `-p:TreatWarningsAsErrors=true`, and writes `.\build.log` (ANSI-colored) and `.\build.result.txt` with an instant first-line verdict (`OK / WARN / FAIL | X errors | Y warnings | exit code | duration`) plus top and bottom summary banners.
+  - Streams live colored console output, enforces `-p:TreatWarningsAsErrors=true`, and writes `developer_tools\build.log` (ANSI-colored) and `developer_tools\build.result.txt` with an instant first-line verdict (`OK / WARN / FAIL | X errors | Y warnings | exit code | duration`) plus top and bottom summary banners, keeping the repository root directory clean.
 - **Official Release Pipeline (`.\build.cmd` & `build\BuildPipeline.ps1`)**:
   - **Quality Gate (Step 0.5)**: Runs automated test suite (`dotnet test tests\KeyPulse.Tests`) before preflight or compilation. Any test failure aborts the pipeline.
   - **Pre-Release Gate (`RELGATE_01`)**: Supports `--beta` and `--no-publish`. Executes non-interactively without blocking confirmation prompts when invoking `.\build.cmd`. Verifies default branch (`main`/`master`), fast-forward remote state (`origin/<branch>` is an ancestor of `HEAD`), unused tag `vYYYY.MM.DD.HHmm` (`-beta` when `--beta`), and `gh auth status`.
@@ -206,6 +257,7 @@ is, proved it is undamaged, and been read end to end.** Nothing is touched befor
   - **Draft-First Upload, SHA-256 Verification & Checksum Manifests (`RELTAG_01` / `SIG_01`)**: Generates detached `SHA256SUMS.txt`, signs via Authenticode hook if certificate is present, atomically pushes release commit and tag, and uploads `.\compiled\KeyPulse.exe` and `SHA256SUMS.txt` as a **draft** (`gh release create ... --draft --verify-tag`). Verifies the remote asset SHA-256 digest before promoting to `--latest` (or `--prerelease` for `--beta`). If remote asset verification or promotion fails, the pipeline automatically purges the draft release and deletes the remote tag (`Undo-ReleasePlan -CleanRemote`) to prevent broken or orphaned release states.
   - **Binary-Only Retention Pruning (`RETAIN_01`)**: Prunes older releases beyond the retention window (**5 stable** and **3 beta** releases kept) by deleting only binary assets (`gh release delete-asset $oldTag KeyPulse.exe`) while preserving all GitHub Release entities, release notes, history, and Git tags.
 - **Developer Utilities (`developer_tools\`)**:
+  - `developer_tools\scratch\`: Isolated sandbox directory for transient preview icons, design mockups, and test artifacts, eliminating root directory clutter.
   - `developer_tools\Pull_Code_files.py` & `developer_tools\pull_code.cmd`: AI codebase packager and staging aggregator. Condenses the entire repository into <= 10 files (1 architectural manifest with invariants and sentinels, 1 intelligent minimap and file locator with bundle cross-reference, and capped code bundles with SHA-256 binary placeholders) into `%USERPROFILE%\Downloads\keypulse` for upload to cloud AI models.
   - `developer_tools\Redundant_Code_Finder.py`: AST/token-normalized fuzzy duplicate detector generating `developer_tools/redundant_code_report.html` (for human visual review) and `developer_tools/redundant_code_report.jsonl` (compact coordinate-only report for AI agents).
   - `developer_tools\Manual_UnInstall.bat`: Standalone system wiper removing running `KeyPulse.exe` instances, `KeyPulse_AdminTask`, HKCU `Uninstall`/`Run` registry keys, shortcuts, `%LOCALAPPDATA%\Programs\KeyPulse`, `%APPDATA%\KeyPulse`, and `%LOCALAPPDATA%\KeyPulse_DEV`.
@@ -321,10 +373,13 @@ is, proved it is undamaged, and been read end to end.** Nothing is touched befor
 - **Explorer Context Menu (registry, HKCU):** `Software\Classes\*\shell\KeyPulse.Add`, `Software\Classes\Directory\shell\KeyPulse.Add`, `Software\Classes\Directory\Background\shell\KeyPulse.Add` - "Add to KeyPulse" on files, folders and folder background (classic menu on Win10, "Show more options" on Win11). Registered by the installer, removed by the uninstaller.
 - **Named shutdown event:** `KeyPulse_ExitApp` (session shared event, same low-label SDDL as the mutex) - the installer's graceful "please exit now" channel, because closing the main window only hides it.
 - **Developer Sandbox Root (`DEVDATA_01`, Dev Mode Only):** `%LOCALAPPDATA%\KeyPulse_DEV` (`data\` for live sandboxed `config.json`, `desktop_organizer.json`, and `screen_brightness.json`; `keep\` for clean-baseline state restoration across `dev.cmd` runs; `runtime\` for isolated dev native libraries; `%TMP%\KeyPulse_DEV` or `.devlogs\` for dev logs; and `\\.\pipe\KeyPulse_IPC_DEV_Session_<SessionId>` for dev IPC).
+- **Build Logging:** `developer_tools\build.log` and `developer_tools\build.result.txt` (isolated from repository root)
+- **Developer Scratch:** `developer_tools\scratch\` (isolated directory for transient icon previews, mockups, and test artifacts)
 
 ### Legacy / Deprecated Paths (Must be cleaned up by Installer/Uninstaller)
 - `C:\Program Files\KeyPulse` (Abandoned global install directory)
 - `C:\Program Files (x86)\KeyPulse` (Abandoned global install directory)
+- `.\build.log` (Legacy build log path at repository root, relocated to `developer_tools\build.log`)
 - `%TEMP%\KeyPulse_NativeLibs` (Legacy temporary native library extraction folder, superseded by the `runtime` subfolder)
 - `%TEMP%\KeyPulse_Runtime` (Deprecated insecure %TEMP% native library fallback extraction folder, eliminated to prevent DLL hijacking)
 - `%LOCALAPPDATA%\KeyPulse` (Legacy log folder holding `keypulse_debug.txt` / `keypulse_crash.txt`. No uninstaller ever removed it, so a record of every shortcut the user pressed survived uninstalling. Both the installer and the uninstaller now delete it.)
