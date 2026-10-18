@@ -660,7 +660,7 @@ function Publish-GitHubRelease {
 
     # Generate detached SHA256SUMS.txt manifest
     $sumsPath = Join-Path $repoRoot 'compiled\SHA256SUMS.txt'
-    "$localHash *KeyPulse.exe" | Set-Content -LiteralPath $sumsPath -Encoding utf8NoBOM
+    [System.IO.File]::WriteAllText($sumsPath, "$localHash *KeyPulse.exe`r`n", [System.Text.UTF8Encoding]::new($false))
     Write-Host "[PUBLISH] 4/7 Built exe fingerprint ($localHash) + SHA256SUMS.txt ready. [OK]"
 
     # Extract What's New notes from docs/CHANGELOG.md for the release
