@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v2026.10.18.0515] - 2026-10-18
-
 ### Added
 - **Self-Signed Authenticode Code Signing**: Added self-signed code signing pipeline in `build/BuildPipeline.ps1` and CI with RFC-3161 Digicert timestamping (`ssl-certificate/`).
 - **High-DPI Multi-Resolution Icon & Complete PE Resources**: Added 256x256 multi-mipmap icon and verified PE metadata (`Company`, `Product`, `Copyright`, `Description`).
