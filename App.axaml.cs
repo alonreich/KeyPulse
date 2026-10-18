@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
@@ -368,6 +368,15 @@ public partial class App : Application
                     {
                         await System.Threading.Tasks.Task.Delay(TimeSpan.FromMinutes(10));
                         await CheckForUpdatesOnBootAsync(mw, appCfg);
+                        while (true)
+                        {
+                            await System.Threading.Tasks.Task.Delay(TimeSpan.FromHours(24));
+                            var currentCfg = ConfigStore.Load(out _, out _);
+                            if (currentCfg.AutoCheckForUpdates)
+                            {
+                                await CheckForUpdatesOnBootAsync(mw, currentCfg);
+                            }
+                        }
                     });
                 }
 
@@ -399,6 +408,7 @@ public partial class App : Application
 
                 if (mw.IsHiddenOnLaunch)
                 {
+                    mw.PendingUpdateResult = result;
                     Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                     {
                         var app = Current as App;

@@ -131,7 +131,7 @@ namespace KeyPulse
                 try
                 {
                     Directory.CreateDirectory(ConfigDirectory);
-                    config.SchemaVersion = CurrentSchemaVersion;
+                    config.SchemaVersion = Math.Max(config.SchemaVersion, CurrentSchemaVersion);
                     var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
                     var ok = AtomicFileWriter.WriteAtomic(ConfigPath, json, out error);
                     if (ok)

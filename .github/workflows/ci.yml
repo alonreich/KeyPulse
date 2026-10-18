@@ -51,8 +51,8 @@ jobs:
       - name: Verify Authenticode Signing
         shell: pwsh
         run: |
-          $pfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(".\ssl-certificate\KeyPulse_CodeSigning.pfx", "KeyPulseSigningKey2026!")
-          Set-AuthenticodeSignature -FilePath "./publish-ci/KeyPulse.exe" -Certificate $pfx -HashAlgorithm SHA256
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=KeyPulse CI, O=KeyPulse, OU=Release Signing" -KeyUsage DigitalSignature -CertStoreLocation "Cert:\CurrentUser\My"
+          Set-AuthenticodeSignature -FilePath "./publish-ci/KeyPulse.exe" -Certificate $cert -HashAlgorithm SHA256
           $sig = Get-AuthenticodeSignature "./publish-ci/KeyPulse.exe"
           if ($null -eq $sig.SignerCertificate) {
             throw "Authenticode signature was not applied to ./publish-ci/KeyPulse.exe"

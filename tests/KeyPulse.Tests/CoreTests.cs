@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using KeyPulse;
@@ -21,7 +21,10 @@ namespace KeyPulse.Tests
         public void CompareVersions_HandlesPrereleaseAndPrefixes()
         {
             Assert.IsTrue(UpdateChecker.CompareVersions("v2026.10.18.0100-beta", "2026.10.17.1515") > 0);
-            Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515-beta.1", "2026.10.17.1515") == 0);
+            // SemVer 2.0: normal release has higher precedence than same version with prerelease
+            Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515", "2026.10.17.1515-beta.1") > 0);
+            Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515-beta.1", "2026.10.17.1515") < 0);
+            Assert.IsTrue(UpdateChecker.CompareVersions("2026.10.17.1515-beta.2", "2026.10.17.1515-beta.1") > 0);
             Assert.IsTrue(UpdateChecker.CompareVersions("invalid", "2026.10.17.1515") == 0);
         }
 
@@ -113,17 +116,48 @@ namespace KeyPulse.Tests
         }
 
         [TestMethod]
-        public void ConfigStore_SaveAllRollbackCopies_ExecutesSafely()
+        public void ConfigStore_PreservesHigherSchemaVersion_OnSave()
         {
-            var copies = ConfigStore.SaveAllRollbackCopies("unit-test");
-            Assert.IsNotNull(copies);
-            foreach (var copy in copies)
+            var config = new AppConfig { SchemaVersion = 99 };
+            var tempDir = Path.Combine(Path.GetTempPath(), $"kp_test_cfg_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(tempDir);
+            try
             {
-                if (File.Exists(copy))
-                {
-                    try { File.Delete(copy); } catch { }
-                }
+                var saveSuccess = ConfigStore.Save(config, out var saveErr);
+                Assert.IsTrue(saveSuccess, "ConfigStore.Save should succeed: " + saveErr);
+                var loaded = ConfigStore.Load(out _, out _);
+                Assert.AreEqual(99, loaded.SchemaVersion, "Future schema version 99 must be preserved on save");
             }
+            finally
+            {
+                // Restore default schema version
+                ConfigStore.Save(new AppConfig { SchemaVersion = 1 }, out _);
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        [TestMethod]
+        public void BackupService_ForwardCompatibility_HandlesFutureActionTypes()
+        {
+            var payload = new BackupPayload
+            {
+                Shortcuts = new System.Collections.Generic.List<BackupShortcut>
+                {
+                    new BackupShortcut
+                    {
+                        Id = Guid.NewGuid().ToString("N"),
+                        DisplayName = "Future Action Test",
+                        KeyCombinations = new System.Collections.Generic.List<string> { "Ctrl+Alt+F12" },
+                        Action = (ActionType)999, // Unknown future action type
+                        Target = "quantum://execute"
+                    }
+                }
+            };
+
+            var valid = BackupService.ValidatePayload(payload, out var fatalError, out var warnings);
+            Assert.IsTrue(valid, "Validation should succeed with warnings for unknown future actions: " + fatalError);
+            Assert.IsTrue(warnings.Count > 0, "Should contain warning about unsupported action type");
+            Assert.IsTrue(warnings[0].Contains("uses an action type not recognized"), "Warning must explain unrecognized action type");
         }
     }
 }

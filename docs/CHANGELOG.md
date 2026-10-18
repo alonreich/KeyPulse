@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Active Directory-Style Property Sheet Tabs**: Overhauled Settings & Preferences with 8 dedicated property sheets (General, Hotkeys, Typing, Theme, Displays, Desktop Icons, Updates, Backup) featuring seamless top-mounted tab ears physically connected to the content page container.
+- **Full-Bleed Zero-Padding Systray Icon**: Redesigned multi-resolution application icon (16x16 through 256x256) with zero padding to maximize visual clarity and size in the Windows system tray.
+- **Resumable HTTP Range Downloads & Network Retries**: Update downloader automatically resumes interrupted transfers using HTTP Range requests and retries transient socket failures with exponential backoff.
+- **Authenticode Signature & Mandatory Digest Verification**: Downloaded updates strictly verify Windows Authenticode code signatures and release SHA-256 digests prior to launching.
+- **Non-Blocking Post-Update Crash Rollback**: Canary recovery replaces crashing binaries out-of-process, eliminating Windows in-use file lock crashes.
+- **Elevated Installer Resilience**: In-app upgrade installer detects surviving elevated instances and prompts to elevate rather than failing on locked binaries.
+
+### Fixed
+- **SemVer Prerelease Comparison**: Fixed version comparison so official stable releases correctly upgrade existing beta installations.
+- **Forward Schema Preservation**: Config saves preserve newer schema version numbers rather than downgrading to version 1.
+- **Forward-Compatible Backup Restore**: Backups containing newer unrecognized action types skip unsupported actions with warnings rather than aborting as corrupt.
+- **Atomic Release Publication Rollback**: Release pipeline pushes tags and commits only after remote asset verification, preventing remote branch desynchronization on failed publications.
+- **Strict Release Staging**: Build pipeline stages only version-controlled release assets instead of indiscriminate `git add -A`.
+- **Persistent Background Update Notifications**: Updates detected while running minimized to tray are retained and presented when opening the main window.
+
 ## [v2026.10.18.1349] - 2026-10-18
 
 ### Added

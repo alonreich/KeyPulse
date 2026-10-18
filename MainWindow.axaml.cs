@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -225,6 +225,8 @@ namespace KeyPulse
         /// MainWindow_Opened, so the first tray click after a --hidden boot opens the window
         /// instead of flashing and hiding it. A maximized window is left maximized.
         /// </summary>
+        public UpdateCheckResult? PendingUpdateResult { get; set; }
+
         public void BringToFront()
         {
             ResetSearchFilter();
@@ -240,6 +242,13 @@ namespace KeyPulse
             Activate();
             this.Topmost = false;
             Program.LogDebug("Main window brought to front by a user request.");
+
+            if (PendingUpdateResult.HasValue)
+            {
+                var update = PendingUpdateResult.Value;
+                PendingUpdateResult = null;
+                ShowUpdateNotification(update);
+            }
         }
 
         /// <summary>
@@ -3981,8 +3990,8 @@ namespace KeyPulse
 
             double settingsW = _currentConfig.SettingsWindowWidth;
             double settingsH = _currentConfig.SettingsWindowHeight;
-            if (double.IsNaN(settingsW) || settingsW < 520) settingsW = 640;
-            if (double.IsNaN(settingsH) || settingsH < 480) settingsH = 680;
+            if (double.IsNaN(settingsW) || settingsW < 640) settingsW = 720;
+            if (double.IsNaN(settingsH) || settingsH < 500) settingsH = 700;
 
             if (double.IsNaN(_currentConfig.SettingsWindowX))
             {
@@ -3992,12 +4001,12 @@ namespace KeyPulse
                     var scale = screen.Scaling <= 0 ? 1.0 : screen.Scaling;
                     var dipWidth = screen.WorkingArea.Width / scale;
                     var dipHeight = screen.WorkingArea.Height / scale;
-                    settingsW = Math.Clamp(640 * dipWidth / 1920.0, 520, Math.Max(520, dipWidth));
-                    settingsH = Math.Clamp(680 * dipHeight / 1080.0, 480, Math.Max(480, dipHeight));
+                    settingsW = Math.Clamp(720 * dipWidth / 1920.0, 580, Math.Max(580, dipWidth));
+                    settingsH = Math.Clamp(700 * dipHeight / 1080.0, 500, Math.Max(500, dipHeight));
                 }
             }
 
-            var w = CreateAppDialog("Settings", settingsW, settingsH, 520, 480, WindowStartupLocation.CenterOwner);
+            var w = CreateAppDialog("Settings", settingsW, settingsH, 580, 500, WindowStartupLocation.CenterOwner);
             if (!double.IsNaN(_currentConfig.SettingsWindowX) && !double.IsNaN(_currentConfig.SettingsWindowY) &&
                 IsPositionOnAConnectedScreen(_currentConfig.SettingsWindowX, _currentConfig.SettingsWindowY))
             {
@@ -4005,7 +4014,7 @@ namespace KeyPulse
                 w.Position = new Avalonia.PixelPoint((int)_currentConfig.SettingsWindowX, (int)_currentConfig.SettingsWindowY);
             }
 
-            int activeTab = Math.Clamp(_currentConfig.LastActiveSettingsTab, 0, 3);
+            int activeTab = Math.Clamp(_currentConfig.LastActiveSettingsTab, 0, 7);
             bool suppressSyncEvents = false;
 
             var rootGrid = new Grid
@@ -4078,41 +4087,54 @@ namespace KeyPulse
             Grid.SetRow(headerGrid, 0);
             rootGrid.Children.Add(headerGrid);
 
-            var tabBarBorder = new Border
-            {
-                Classes = { "Panel" },
-                Padding = new Avalonia.Thickness(8, 6),
-                Margin = new Avalonia.Thickness(0, 0, 0, 12)
-            };
-            var tabBarGrid = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("*,Auto")
-            };
-            var tabButtonsPanel = new WrapPanel
-            {
-                Orientation = Avalonia.Layout.Orientation.Horizontal,
-                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            string[] tabNames = { "General", "Hotkeys", "Typing", "Theme", "Displays", "Desktop Icons", "Updates", "Backup" };
+            string[] tabDescriptions = {
+                "Configure Windows startup behavior, tray integration, administrator privileges, and sound effects.",
+                "Configure web browser launching preferences for keyboard shortcut URLs.",
+                "Adjust simulated typing delay per keystroke and typing cadence presets.",
+                "Select visual appearance theme between Windows system preference, Light, or Dark mode.",
+                "Configure multi-monitor brightness and contrast synchronization.",
+                "Configure automated desktop icon position preservation, backups, and layout restoration.",
+                "Check for updates, configure update channels (Stable vs Beta), and view version details.",
+                "Export settings backups, import previous configurations, and perform factory resets."
             };
 
-            string[] tabNames = { "General", "Shortcuts & Typing", "Appearance & Displays", "Maintenance & About" };
-            var tabButtons = new Button[tabNames.Length];
+            var tabStrip = new WrapPanel
+            {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Bottom,
+                Margin = new Avalonia.Thickness(4, 0, 4, 0)
+            };
+
+            var tabEars = new Border[tabNames.Length];
+            var tabTexts = new TextBlock[tabNames.Length];
             for (int i = 0; i < tabNames.Length; i++)
             {
-                var btn = new Button
+                var text = new TextBlock
                 {
-                    Content = tabNames[i],
-                    Classes = { i == activeTab ? "Primary" : "Secondary" },
-                    Margin = new Avalonia.Thickness(0, 0, 6, 0),
-                    Padding = new Avalonia.Thickness(12, 6),
+                    Text = tabNames[i],
                     FontSize = 12,
-                    TabIndex = 2 + i,
-                    IsTabStop = true
+                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
                 };
-                tabButtons[i] = btn;
-                tabButtonsPanel.Children.Add(btn);
+                tabTexts[i] = text;
+
+                var ear = new Border
+                {
+                    CornerRadius = new Avalonia.CornerRadius(6, 6, 0, 0),
+                    Padding = new Avalonia.Thickness(12, 7),
+                    Margin = new Avalonia.Thickness(0, 0, 3, 0),
+                    Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                    Focusable = true,
+                    TabIndex = 2 + i,
+                    IsTabStop = true,
+                    Child = text
+                };
+                tabEars[i] = ear;
+                tabStrip.Children.Add(ear);
             }
-            Grid.SetColumn(tabButtonsPanel, 0);
-            tabBarGrid.Children.Add(tabButtonsPanel);
+            Grid.SetRow(tabStrip, 1);
+            rootGrid.Children.Add(tabStrip);
 
             var restoreTabDefaultsBtn = new Button
             {
@@ -4121,15 +4143,10 @@ namespace KeyPulse
                 Padding = new Avalonia.Thickness(10, 5),
                 FontSize = 11.5,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                TabIndex = 6,
+                TabIndex = 11,
                 IsTabStop = true
             };
             ToolTip.SetTip(restoreTabDefaultsBtn, "Reset only the settings on this current tab back to their original out-of-the-box defaults.");
-            Grid.SetColumn(restoreTabDefaultsBtn, 1);
-            tabBarGrid.Children.Add(restoreTabDefaultsBtn);
-            tabBarBorder.Child = tabBarGrid;
-            Grid.SetRow(tabBarBorder, 1);
-            rootGrid.Children.Add(tabBarBorder);
 
             var cardsStack = new StackPanel { Spacing = 10, Margin = new Avalonia.Thickness(0, 0, 4, 0) };
             var settingCards = new List<(Border Card, int TabCategory, string Keywords)>();
@@ -4532,7 +4549,7 @@ namespace KeyPulse
                 FontSize = 11.5,
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
-            RegisterSettingCard(1, "Simulated Typing Speed",
+            RegisterSettingCard(2, "Simulated Typing Speed",
                 "Controls the pause (in milliseconds) between keystrokes injected by the 'Type text' action. Fast (1 ms) is instant; Compatible (18 ms) or Custom prevents dropped characters in laggy remote sessions.",
                 "typing speed delay milliseconds ms fast normal compatible console remote rdp",
                 speedBody);
@@ -4673,7 +4690,7 @@ namespace KeyPulse
                 FontSize = 11.5,
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
-            RegisterSettingCard(2, "Appearance & Theme",
+            RegisterSettingCard(3, "Appearance & Theme",
                 "Changes the visual color theme across KeyPulse. 'Match Windows' automatically switches between Light and Dark based on your Windows system settings.",
                 "appearance theme dark light mode color windows",
                 themeBody);
@@ -4733,7 +4750,7 @@ namespace KeyPulse
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
             sbBody.Children.Add(openBrightnessBtn);
-            RegisterSettingCard(2, "Screen Brightness & Contrast",
+            RegisterSettingCard(4, "Screen Brightness & Contrast",
                 "Manage hardware monitor brightness, contrast ratio syncing, and shortcut cycle presets without OSD popups or focus loss.",
                 "screen brightness contrast monitor display ddc backlight preset cycle sync lock",
                 sbBody);
@@ -4775,7 +4792,7 @@ namespace KeyPulse
             var doBody = new StackPanel { Spacing = 6 };
             doBody.Children.Add(doSummaryText);
             doBody.Children.Add(openOrganizerBtn);
-            RegisterSettingCard(2, "Desktop Icon Organizer",
+            RegisterSettingCard(5, "Desktop Icon Organizer",
                 "Saves and restores your desktop icon positions across single or multi-monitor setups, with optional auto-restore when displays connect or change resolution.",
                 "desktop icon organizer layout restore snapshot monitor grid",
                 doBody);
@@ -4901,7 +4918,7 @@ namespace KeyPulse
             updatesBody.Children.Add(autoUpdateCheck);
             updatesBody.Children.Add(channelPanel);
             updatesBody.Children.Add(updateBtnRow);
-            RegisterSettingCard(3, "About & Software Updates",
+            RegisterSettingCard(6, "About & Software Updates",
                 "Application version information, background update check toggles, update channel selection (Stable vs Beta), and manual update checks.",
                 "about version update updates release check github channel stable beta preview upgrade",
                 updatesBody);
@@ -4947,7 +4964,7 @@ namespace KeyPulse
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
             backupBody.Children.Add(backupBtnRow);
-            RegisterSettingCard(3, "Backup & Import Settings",
+            RegisterSettingCard(7, "Backup & Import Settings",
                 "One-click export and import for your entire KeyPulse setup. Backups can be password-encrypted with AES-256-GCM so secret shortcut targets remain protected.",
                 "backup restore export import configuration file json encrypt password",
                 backupBody);
@@ -4973,7 +4990,7 @@ namespace KeyPulse
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
             dangerBody.Children.Add(resetAllBtn);
-            RegisterSettingCard(3, "Danger Zone — Factory Reset",
+            RegisterSettingCard(7, "Danger Zone — Factory Reset",
                 "Destructive preference reset action that restores all out-of-the-box defaults for startup, theme, sounds, typing, brightness, and updates without deleting saved shortcuts.",
                 "danger zone factory reset restore defaults wipe all settings preferences",
                 dangerBody,
@@ -5010,13 +5027,59 @@ namespace KeyPulse
             };
             cardsStack.Children.Add(emptySearchPanel);
 
+            var pageHeaderGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                Margin = new Avalonia.Thickness(2, 0, 2, 10)
+            };
+            var pageHeaderStack = new StackPanel { Spacing = 2 };
+            var tabPageTitle = new TextBlock
+            {
+                Text = tabNames[activeTab],
+                Classes = { "SectionTitle" },
+                FontSize = 14
+            };
+            var tabPageDesc = new TextBlock
+            {
+                Text = tabDescriptions[activeTab],
+                Classes = { "Muted" },
+                FontSize = 11.5,
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap
+            };
+            pageHeaderStack.Children.Add(tabPageTitle);
+            pageHeaderStack.Children.Add(tabPageDesc);
+            Grid.SetColumn(pageHeaderStack, 0);
+            pageHeaderGrid.Children.Add(pageHeaderStack);
+            Grid.SetColumn(restoreTabDefaultsBtn, 1);
+            pageHeaderGrid.Children.Add(restoreTabDefaultsBtn);
+
+            var pageInnerGrid = new Grid
+            {
+                RowDefinitions = new RowDefinitions("Auto,*")
+            };
+            Grid.SetRow(pageHeaderGrid, 0);
+            pageInnerGrid.Children.Add(pageHeaderGrid);
+
             var cardsScroll = new ScrollViewer
             {
                 Content = cardsStack,
                 VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto
             };
-            Grid.SetRow(cardsScroll, 2);
-            rootGrid.Children.Add(cardsScroll);
+            Grid.SetRow(cardsScroll, 1);
+            pageInnerGrid.Children.Add(cardsScroll);
+
+            var pageContainer = new Border
+            {
+                Background = AppBrush("AppPanelRaisedBrush"),
+                BorderBrush = AppBrush("AppBorderBrush"),
+                BorderThickness = new Avalonia.Thickness(1),
+                CornerRadius = new Avalonia.CornerRadius(0, 8, 8, 8),
+                Padding = new Avalonia.Thickness(14, 12),
+                Margin = new Avalonia.Thickness(0, 0, 0, 0),
+                Child = pageInnerGrid
+            };
+            Grid.SetRow(pageContainer, 2);
+            rootGrid.Children.Add(pageContainer);
 
             var statusBorder = new Border
             {
@@ -5117,13 +5180,42 @@ namespace KeyPulse
                 string query = (searchBox.Text ?? string.Empty).Trim().ToLowerInvariant();
                 bool isSearching = !string.IsNullOrEmpty(query);
 
-                for (int i = 0; i < tabButtons.Length; i++)
+                for (int i = 0; i < tabEars.Length; i++)
                 {
-                    tabButtons[i].Classes.Remove("Primary");
-                    tabButtons[i].Classes.Remove("Secondary");
-                    tabButtons[i].Classes.Add((!isSearching && i == activeTab) ? "Primary" : "Secondary");
+                    bool isActive = (!isSearching && i == activeTab);
+                    if (isActive)
+                    {
+                        tabEars[i].Background = AppBrush("AppPanelRaisedBrush");
+                        tabEars[i].BorderBrush = AppBrush("AppBorderBrush");
+                        tabEars[i].BorderThickness = new Avalonia.Thickness(1, 1, 1, 0);
+                        tabEars[i].Margin = new Avalonia.Thickness(0, 0, 3, -1);
+                        tabEars[i].ZIndex = 10;
+                        tabTexts[i].Foreground = AppBrush("AppAccentBrush");
+                        tabTexts[i].FontWeight = Avalonia.Media.FontWeight.SemiBold;
+                    }
+                    else
+                    {
+                        tabEars[i].Background = AppBrush("AppSurfaceBrush");
+                        tabEars[i].BorderBrush = AppBrush("AppBorderBrush");
+                        tabEars[i].BorderThickness = new Avalonia.Thickness(1, 1, 1, 1);
+                        tabEars[i].Margin = new Avalonia.Thickness(0, 0, 3, 0);
+                        tabEars[i].ZIndex = 1;
+                        tabTexts[i].Foreground = AppBrush("AppTextMutedBrush");
+                        tabTexts[i].FontWeight = Avalonia.Media.FontWeight.Normal;
+                    }
                 }
+
                 restoreTabDefaultsBtn.IsVisible = !isSearching;
+                if (isSearching)
+                {
+                    tabPageTitle.Text = $"Search Results for \"{query}\"";
+                    tabPageDesc.Text = "Showing all settings across all categories matching your search query.";
+                }
+                else
+                {
+                    tabPageTitle.Text = tabNames[activeTab];
+                    tabPageDesc.Text = tabDescriptions[activeTab];
+                }
 
                 int shown = 0;
                 foreach (var item in settingCards)
@@ -5137,10 +5229,26 @@ namespace KeyPulse
                 emptySearchPanel.IsVisible = isSearching && shown == 0;
             }
 
-            for (int i = 0; i < tabButtons.Length; i++)
+            for (int i = 0; i < tabEars.Length; i++)
             {
                 int capturedIndex = i;
-                tabButtons[i].Click += (_, _) =>
+                tabEars[i].PointerEntered += (_, _) =>
+                {
+                    if (activeTab != capturedIndex || !string.IsNullOrEmpty(searchBox.Text))
+                    {
+                        tabEars[capturedIndex].Background = AppBrush("AppHoverBrush");
+                        tabTexts[capturedIndex].Foreground = AppBrush("AppTextPrimaryBrush");
+                    }
+                };
+                tabEars[i].PointerExited += (_, _) =>
+                {
+                    if (activeTab != capturedIndex || !string.IsNullOrEmpty(searchBox.Text))
+                    {
+                        tabEars[capturedIndex].Background = AppBrush("AppSurfaceBrush");
+                        tabTexts[capturedIndex].Foreground = AppBrush("AppTextMutedBrush");
+                    }
+                };
+                tabEars[i].PointerPressed += (_, _) =>
                 {
                     Program.PlaySound("click");
                     activeTab = capturedIndex;
@@ -5151,6 +5259,22 @@ namespace KeyPulse
                     }
                     RefreshVisibleCards();
                     SaveConfig();
+                };
+                tabEars[i].KeyDown += (_, ke) =>
+                {
+                    if (ke.Key == Avalonia.Input.Key.Enter || ke.Key == Avalonia.Input.Key.Space)
+                    {
+                        Program.PlaySound("click");
+                        activeTab = capturedIndex;
+                        _currentConfig.LastActiveSettingsTab = activeTab;
+                        if (!string.IsNullOrEmpty(searchBox.Text))
+                        {
+                            searchBox.Text = string.Empty;
+                        }
+                        RefreshVisibleCards();
+                        SaveConfig();
+                        ke.Handled = true;
+                    }
                 };
             }
 
@@ -5168,7 +5292,7 @@ namespace KeyPulse
                     "Restore Defaults");
                 if (!confirmed) return;
 
-                if (activeTab == 0)
+                if (activeTab == 0) // General
                 {
                     if (Program.SetStartup(true, out var startErr))
                     {
@@ -5183,27 +5307,45 @@ namespace KeyPulse
                     Program.SoundEnabled = true;
                     SaveConfig();
                 }
-                else if (activeTab == 1)
+                else if (activeTab == 1) // Hotkeys
                 {
                     _currentConfig.UseGoogleChromeForUrls = true;
+                    SaveConfig();
+                }
+                else if (activeTab == 2) // Typing
+                {
                     _currentConfig.TypingDelayMs = TypingDelayFast;
                     InputSimulator.CharacterDelayMs = TypingDelayFast;
                     SaveConfig();
                 }
-                else if (activeTab == 2)
+                else if (activeTab == 3) // Theme
                 {
                     _currentConfig.Theme = "System";
                     App.ApplyTheme(_currentConfig.Theme);
+                    SaveConfig();
+                }
+                else if (activeTab == 4) // Displays
+                {
                     ScreenBrightnessService.ResetToDefaults();
+                    SaveConfig();
+                }
+                else if (activeTab == 5) // Desktop Icons
+                {
                     DesktopOrganizerService.ResetBehavioralDefaults(out _);
                     SaveConfig();
                 }
-                else if (activeTab == 3)
+                else if (activeTab == 6) // Updates
                 {
                     _currentConfig.AutoCheckForUpdates = true;
                     _currentConfig.UpdateChannel = "Stable";
                     _currentConfig.SkippedUpdateVersion = string.Empty;
                     SaveConfig();
+                }
+                else if (activeTab == 7) // Backup
+                {
+                    statusTxt.Text = "Backup tab settings are manual actions; use Danger Zone below if you wish to reset all settings.";
+                    statusTxt.Foreground = AppBrush("AppWarningBrush");
+                    return;
                 }
 
                 SyncAllSettingsControls();
@@ -6192,7 +6334,7 @@ namespace KeyPulse
             _currentConfig.ShortcutSortColumn = payload.ShortcutSortColumn ?? string.Empty;
             _currentConfig.ShortcutSortDescending = payload.ShortcutSortDescending;
             _currentConfig.HasSeenTrayHint = payload.HasSeenTrayHint;
-            _currentConfig.LastActiveSettingsTab = Math.Clamp(payload.LastActiveSettingsTab, 0, 3);
+            _currentConfig.LastActiveSettingsTab = Math.Clamp(payload.LastActiveSettingsTab, 0, 7);
 
             Program.SoundEnabled = _currentConfig.SoundEnabled;
             InputSimulator.CharacterDelayMs = _currentConfig.TypingDelayMs;

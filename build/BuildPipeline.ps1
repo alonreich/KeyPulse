@@ -179,7 +179,7 @@ function Start-ReleasePreflight {
     if (-not $status.Success) {
         $problems.Add("'git status' failed - is this a git checkout?")
     } elseif ($status.Lines.Count -gt 0) {
-        Write-Host "[RELEASE] Working tree has $($status.Lines.Count) modified/untracked file(s); they will be staged and committed automatically."
+        $problems.Add("Working tree has $($status.Lines.Count) modified/untracked file(s). Releases require a clean working tree. Commit or stash changes before releasing.")
     }
 
     $headRes = Invoke-GitCapture -GitArgs @('symbolic-ref', '--short', 'HEAD')
@@ -315,9 +315,9 @@ function Commit-ReleaseVersion {
         $releaseFiles += 'docs/CHANGELOG.md'
     }
 
-    $addRes = Invoke-GitCapture -GitArgs @('add', '-A')
+    $addRes = Invoke-GitCapture -GitArgs (@('add') + $releaseFiles)
     if (-not $addRes.Success) {
-        Write-Host "ERROR: [RELEASE] Could not stage working tree changes for release commit."
+        Write-Host "ERROR: [RELEASE] Could not stage synchronized release files for release commit."
         Undo-ReleasePlan -Plan $Plan
         return $false
     }
@@ -574,7 +574,7 @@ function Invoke-CodeSign {
         Write-Host "[SIGN] No code signing certificate configured (skipping Authenticode sign)."
         return $false
     }
-    $certPwd = if ($env:KEYPULSE_CERT_PASSWORD) { $env:KEYPULSE_CERT_PASSWORD } else { 'KeyPulseSigningKey2026!' }
+    $certPwd = $env:KEYPULSE_CERT_PASSWORD
 
     Write-Host "[SIGN] Authenticode signing $TargetExe with $([System.IO.Path]::GetFileName($certPath))..."
     $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)
@@ -725,6 +725,15 @@ function Publish-GitHubRelease {
     }
     Write-Host "[PUBLISH] 6/7 Verified remote asset SHA-256 matches built exe.     [OK]"
 
+    # Push release commit and tag only AFTER asset upload & SHA-256 hash verification
+    $pushRes = Invoke-GitCapture -GitArgs @('push', '--atomic', '--quiet', 'origin', "HEAD:refs/heads/$($Plan.Branch)", "refs/tags/$($Plan.Tag)")
+    if (-not $pushRes.Success) {
+        Write-Host "[PUBLISH] STOPPED: could not push release commit and tag $($Plan.Tag) to origin. Cleaning up draft..."
+        & gh release delete $Plan.Tag --repo $repo --yes > $null 2>&1
+        return $false
+    }
+    Write-Host "[RELEASE] Pushed release commit and tag $($Plan.Tag) atomically.        [OK]"
+
     $editArgs = @('release', 'edit', $Plan.Tag, '--repo', $repo, '--draft=false')
     if ($Plan.Beta) { $editArgs += '--prerelease' } else { $editArgs += '--latest' }
     $editOut = & gh @editArgs 2>&1
@@ -874,15 +883,6 @@ try {
     if (-not (Commit-ReleaseVersion -Plan $plan)) {
         exit 1
     }
-
-    $pushRes = Invoke-GitCapture -GitArgs @('push', '--atomic', '--quiet', 'origin', "HEAD:refs/heads/$($plan.Branch)", "refs/tags/$($plan.Tag)")
-    if (-not $pushRes.Success) {
-        Write-Host "ERROR: [RELEASE] The release commit and tag $($plan.Tag) could not be pushed."
-        Undo-ReleasePlan -Plan $plan
-        Write-Host "WARNING: BUILD OK - but nothing was published: release commit and tag were rolled back locally."
-        exit 2
-    }
-    Write-Host "[RELEASE] Pushed release commit and tag $($plan.Tag) atomically."
 
     $compiledExe = Join-Path $repoRoot 'compiled\KeyPulse.exe'
     if (Publish-GitHubRelease -Plan $plan -ExePath $compiledExe) {

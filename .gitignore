@@ -243,7 +243,6 @@ ClientBin/
 *.dbproj.schemaview
 *.jfm
 *.pfx
-!ssl-certificate/*.pfx
 *.publishsettings
 orleans.codegen.cs
 
@@ -492,3 +491,7 @@ test_out/
 build.result.txt
 developer_tools/redundant_code_report.html
 developer_tools/redundant_code_report.jsonl
+*.pfx
+preview_icon*.png
+scratch_icon*.png
+test_out.ico

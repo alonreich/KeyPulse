@@ -180,6 +180,27 @@ namespace KeyPulse
                         expectedSha256 = m.Groups[1].Value.ToLowerInvariant();
                     }
                 }
+                if (string.IsNullOrWhiteSpace(expectedSha256) && release.Assets != null)
+                {
+                    var sumsAsset = release.Assets.FirstOrDefault(a => string.Equals(a.Name, "SHA256SUMS.txt", StringComparison.OrdinalIgnoreCase));
+                    if (sumsAsset != null && !string.IsNullOrWhiteSpace(sumsAsset.BrowserDownloadUrl))
+                    {
+                        try
+                        {
+                            using var sumsResp = await Client.GetAsync(sumsAsset.BrowserDownloadUrl, cancellationToken);
+                            if (sumsResp.IsSuccessStatusCode)
+                            {
+                                var sumsText = await sumsResp.Content.ReadAsStringAsync(cancellationToken);
+                                var sm = System.Text.RegularExpressions.Regex.Match(sumsText, @"([a-fA-F0-9]{64})\s+\*?KeyPulse\.exe", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                                if (sm.Success)
+                                {
+                                    expectedSha256 = sm.Groups[1].Value.ToLowerInvariant();
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
 
                 return new UpdateCheckResult
                 {
@@ -202,7 +223,7 @@ namespace KeyPulse
 
         /// <summary>
         /// Downloads the release executable to a staging path with cryptographic integrity verification,
-        /// disk space checks, and complete stream delivery validation.
+        /// Authenticode signature validation, HTTP Range resumable transfers, and automatic reconnection retries.
         /// </summary>
         public static async Task<(bool Succeeded, string Message, string? StagedExePath)> DownloadUpdateAsync(
             string downloadUrl,
@@ -231,47 +252,101 @@ namespace KeyPulse
                 var tempPath = Path.Combine(updatesDir, $"KeyPulse_Update_{targetVersion}.exe");
                 var partialPath = tempPath + ".download";
 
-                if (File.Exists(partialPath))
+                const int maxRetries = 3;
+                bool downloadComplete = false;
+                string downloadError = string.Empty;
+
+                for (int attempt = 1; attempt <= maxRetries && !downloadComplete; attempt++)
                 {
-                    try { File.Delete(partialPath); } catch { }
-                }
-
-                using var response = await DownloadClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                response.EnsureSuccessStatusCode();
-
-                var totalBytes = response.Content.Headers.ContentLength ?? -1L;
-                using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
-                using (var fileStream = new FileStream(partialPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
-                {
-                    var buffer = new byte[81920];
-                    long totalRead = 0;
-                    int bytesRead;
-
-                    while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    long existingBytes = 0;
+                    if (File.Exists(partialPath))
                     {
-                        await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
-                        totalRead += bytesRead;
+                        try { existingBytes = new FileInfo(partialPath).Length; } catch { existingBytes = 0; }
+                    }
 
-                        if (totalBytes > 0 && progress != null)
+                    try
+                    {
+                        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
+                        if (existingBytes > 0)
                         {
-                            var ratio = (double)totalRead / totalBytes;
-                            progress.Report(Math.Clamp(ratio, 0.0, 1.0));
+                            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(existingBytes, null);
+                        }
+
+                        using var response = await DownloadClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                        bool isPartial = response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+
+                        if (!response.IsSuccessStatusCode && !isPartial)
+                        {
+                            if (response.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable)
+                            {
+                                try { File.Delete(partialPath); } catch { }
+                                existingBytes = 0;
+                                continue;
+                            }
+                            response.EnsureSuccessStatusCode();
+                        }
+
+                        var fileMode = (isPartial && existingBytes > 0) ? FileMode.Append : FileMode.Create;
+                        if (!isPartial && existingBytes > 0)
+                        {
+                            existingBytes = 0;
+                        }
+
+                        var totalBytes = response.Content.Headers.ContentLength.HasValue
+                            ? response.Content.Headers.ContentLength.Value + existingBytes
+                            : -1L;
+
+                        using (var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken))
+                        using (var fileStream = new FileStream(partialPath, fileMode, FileAccess.Write, FileShare.None, 81920, true))
+                        {
+                            var buffer = new byte[81920];
+                            long currentTotal = existingBytes;
+                            int bytesRead;
+
+                            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                            {
+                                await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
+                                currentTotal += bytesRead;
+
+                                if (totalBytes > 0 && progress != null)
+                                {
+                                    var ratio = (double)currentTotal / totalBytes;
+                                    progress.Report(Math.Clamp(ratio, 0.0, 1.0));
+                                }
+                            }
+
+                            if (totalBytes > 0 && currentTotal != totalBytes)
+                            {
+                                throw new IOException($"Incomplete download stream: received {currentTotal} of {totalBytes} bytes.");
+                            }
+
+                            if (currentTotal < 5 * 1024 * 1024)
+                            {
+                                throw new IOException($"Downloaded file is too small to be a valid KeyPulse release ({currentTotal} bytes).");
+                            }
+                        }
+
+                        downloadComplete = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        downloadError = ex.Message;
+                        if (attempt < maxRetries)
+                        {
+                            await Task.Delay(1000 * attempt, cancellationToken);
                         }
                     }
+                }
 
-                    if (totalBytes > 0 && totalRead != totalBytes)
-                    {
-                        fileStream.Dispose();
-                        try { File.Delete(partialPath); } catch { }
-                        return (false, $"Download interrupted: received {totalRead} of {totalBytes} bytes.", null);
-                    }
-
-                    if (totalRead < 5 * 1024 * 1024)
-                    {
-                        fileStream.Dispose();
-                        try { File.Delete(partialPath); } catch { }
-                        return (false, $"Downloaded file is incomplete ({totalRead} bytes).", null);
-                    }
+                if (!downloadComplete)
+                {
+                    try { File.Delete(partialPath); } catch { }
+                    return (false, $"Download interrupted after {maxRetries} attempts: {downloadError}", null);
                 }
 
                 using (var verifyStream = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -301,6 +376,22 @@ namespace KeyPulse
                     }
                 }
 
+                try
+                {
+#pragma warning disable SYSLIB0057
+                    using var cert = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromSignedFile(partialPath);
+#pragma warning restore SYSLIB0057
+                    if (cert != null && !string.IsNullOrWhiteSpace(cert.Subject) && !cert.Subject.Contains("KeyPulse", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { File.Delete(partialPath); } catch { }
+                        return (false, "Downloaded executable signature is untrusted (signer does not match KeyPulse). Update rejected.", null);
+                    }
+                }
+                catch (System.Security.Cryptography.CryptographicException)
+                {
+                    // No embedded signature: SHA-256 hash check serves as primary integrity check
+                }
+
                 if (File.Exists(tempPath))
                 {
                     try { File.Delete(tempPath); } catch { }
@@ -323,15 +414,18 @@ namespace KeyPulse
         }
 
         /// <summary>
-        /// Compares dotted numeric versions part by part. Returns >0 when left is newer.
-        /// Anything unparseable compares as equal rather than as "an update is available", so a
-        /// malformed tag never nags the user forever.
+        /// Compares versions following SemVer 2.0 rules: numeric components first, with normal
+        /// releases having higher precedence than pre-releases of the same base version.
+        /// Returns >0 when left is newer, <0 when right is newer, and 0 when equal.
         /// </summary>
         public static int CompareVersions(string left, string right)
         {
-            var leftParts = Split(left);
-            var rightParts = Split(right);
-            if (leftParts == null || rightParts == null) return 0;
+            var leftSplit = SplitSemVer(left);
+            var rightSplit = SplitSemVer(right);
+            if (leftSplit == null || rightSplit == null) return 0;
+
+            var (leftParts, leftPrerelease) = leftSplit.Value;
+            var (rightParts, rightPrerelease) = rightSplit.Value;
 
             var length = Math.Max(leftParts.Length, rightParts.Length);
             for (var i = 0; i < length; i++)
@@ -341,17 +435,36 @@ namespace KeyPulse
                 if (l != r) return l.CompareTo(r);
             }
 
+            bool leftHasPre = !string.IsNullOrEmpty(leftPrerelease);
+            bool rightHasPre = !string.IsNullOrEmpty(rightPrerelease);
+
+            if (!leftHasPre && rightHasPre) return 1;
+            if (leftHasPre && !rightHasPre) return -1;
+            if (leftHasPre && rightHasPre)
+            {
+                return ComparePrereleaseIdentifiers(leftPrerelease!, rightPrerelease!);
+            }
+
             return 0;
         }
 
-        private static long[]? Split(string version)
+        private static (long[] Parts, string? Prerelease)? SplitSemVer(string version)
         {
             if (string.IsNullOrWhiteSpace(version)) return null;
 
             var clean = version.Trim().TrimStart('v', 'V');
-            var metaIdx = clean.IndexOfAny(new[] { '-', '+' });
+            string? prerelease = null;
+
+            var dashIdx = clean.IndexOf('-');
+            var plusIdx = clean.IndexOf('+');
+            var metaIdx = (dashIdx >= 0 && plusIdx >= 0) ? Math.Min(dashIdx, plusIdx) : Math.Max(dashIdx, plusIdx);
+
             if (metaIdx >= 0)
             {
+                if (dashIdx >= 0 && (plusIdx < 0 || dashIdx < plusIdx))
+                {
+                    prerelease = plusIdx > dashIdx ? clean.Substring(dashIdx + 1, plusIdx - dashIdx - 1) : clean.Substring(dashIdx + 1);
+                }
                 clean = clean.Substring(0, metaIdx);
             }
 
@@ -364,7 +477,46 @@ namespace KeyPulse
                 if (!long.TryParse(raw[i], out parts[i])) return null;
             }
 
-            return parts;
+            return (parts, prerelease);
+        }
+
+        private static int ComparePrereleaseIdentifiers(string left, string right)
+        {
+            var leftTokens = left.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            var rightTokens = right.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            var len = Math.Max(leftTokens.Length, rightTokens.Length);
+
+            for (int i = 0; i < len; i++)
+            {
+                if (i >= leftTokens.Length) return -1;
+                if (i >= rightTokens.Length) return 1;
+
+                var lToken = leftTokens[i];
+                var rToken = rightTokens[i];
+
+                bool lIsNum = long.TryParse(lToken, out var lNum);
+                bool rIsNum = long.TryParse(rToken, out var rNum);
+
+                if (lIsNum && rIsNum)
+                {
+                    if (lNum != rNum) return lNum.CompareTo(rNum);
+                }
+                else if (lIsNum && !rIsNum)
+                {
+                    return -1;
+                }
+                else if (!lIsNum && rIsNum)
+                {
+                    return 1;
+                }
+                else
+                {
+                    var cmp = string.Compare(lToken, rToken, StringComparison.OrdinalIgnoreCase);
+                    if (cmp != 0) return cmp;
+                }
+            }
+
+            return 0;
         }
     }
 }

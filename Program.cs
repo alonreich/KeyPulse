@@ -277,8 +277,14 @@ class Program
                     try
                     {
                         File.Delete(CanaryFilePath);
-                        File.Move(backupExe, ExePath, true);
-                        Process.Start(new ProcessStartInfo(ExePath) { UseShellExecute = true });
+                        var cmd = $"/c ping 127.0.0.1 -n 2 >nul & move /y \"{backupExe}\" \"{ExePath}\" >nul & start \"\" \"{ExePath}\"";
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = "cmd.exe",
+                            Arguments = cmd,
+                            CreateNoWindow = true,
+                            UseShellExecute = false
+                        });
                         Environment.Exit(0);
                     }
                     catch (Exception ex)

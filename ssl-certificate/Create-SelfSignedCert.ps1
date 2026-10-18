@@ -2,7 +2,7 @@
 # Generate Self-Signed Authenticode Code Signing Certificate for KeyPulse
 # ==============================================================================
 param(
-    [string]$CertPassword = "KeyPulseSigningKey2026!",
+    [string]$CertPassword = $(if ($env:KEYPULSE_CERT_PASSWORD) { $env:KEYPULSE_CERT_PASSWORD } else { [System.Guid]::NewGuid().ToString('N') }),
     [int]$ValidYears = 5
 )
 

@@ -259,7 +259,7 @@ namespace KeyPulse
             return matches;
         }
 
-        /// <summary>ISSUE_5: offers to restart the uninstaller with Administrator rights.</summary>
+        /// <summary>ISSUE_5: offers to restart setup with Administrator rights.</summary>
         private async Task<bool> AskToRetryElevatedAsync()
         {
             var tcs = new TaskCompletionSource<bool>();
@@ -267,6 +267,7 @@ namespace KeyPulse
             Dispatcher.UIThread.Post(() =>
             {
                 var previousContent = Content;
+                var opName = _isUninstall ? "uninstaller" : (_isUpdate ? "updater" : "installer");
 
                 var panel = new StackPanel
                 {
@@ -278,7 +279,7 @@ namespace KeyPulse
                 panel.Children.Add(new TextBlock { Text = "KeyPulse Is Running As Administrator", Classes = { "SectionTitle" }, HorizontalAlignment = HorizontalAlignment.Center });
                 panel.Children.Add(new TextBlock
                 {
-                    Text = "KeyPulse is running with Administrator rights, so this uninstaller cannot close it. Restart the uninstaller with Administrator rights to finish, or close KeyPulse yourself from the icon next to the clock and run it again.",
+                    Text = $"KeyPulse is running with Administrator rights, so this {opName} cannot close it. Restart the {opName} with Administrator rights to finish, or close KeyPulse yourself from the icon next to the clock and run it again.",
                     TextWrapping = TextWrapping.Wrap,
                     TextAlignment = TextAlignment.Center
                 });
@@ -300,10 +301,10 @@ namespace KeyPulse
         }
 
         /// <summary>
-        /// Starts this same uninstaller again with a UAC prompt. `--elevated-retry` guarantees the
+        /// Starts this setup worker again with a UAC prompt. `--elevated-retry` guarantees the
         /// elevated copy never offers to elevate a second time, so this cannot loop.
         /// </summary>
-        private static bool RelaunchUninstallerElevated(out string error)
+        private static bool RelaunchSetupElevated(string arguments, out string error)
         {
             error = string.Empty;
             try
@@ -311,7 +312,7 @@ namespace KeyPulse
                 using var elevated = Process.Start(new ProcessStartInfo
                 {
                     FileName = Environment.ProcessPath!,
-                    Arguments = "--uninstall --elevated-retry",
+                    Arguments = arguments,
                     UseShellExecute = true,
                     Verb = "runas"
                 });
@@ -323,6 +324,9 @@ namespace KeyPulse
                 return false;
             }
         }
+
+        private static bool RelaunchUninstallerElevated(out string error) =>
+            RelaunchSetupElevated("--uninstall --elevated-retry", out error);
 
         private void Log(string message)
         {
@@ -964,8 +968,8 @@ namespace KeyPulse
                         await CloseRunningInstancesAsync();
                         await Task.Delay(500);
 
-                        var survivors = FindInstalledInstances(out _);
-                        foreach (var p in survivors)
+                        var wipeSurvivors = FindInstalledInstances(out _);
+                        foreach (var p in wipeSurvivors)
                         {
                             try { p.WaitForExit(3000); } catch { }
                             p.Dispose();
@@ -1043,7 +1047,37 @@ namespace KeyPulse
 
                 await CloseRunningInstancesAsync();
                 await Task.Delay(500);
-                Log("  -> Success.");
+
+                var survivors = FindInstalledInstances(out _);
+                var survivorCount = survivors.Count;
+                foreach (var p in survivors) p.Dispose();
+
+                if (survivorCount > 0)
+                {
+                    if (!Program.IsElevated && !_elevatedRetry)
+                    {
+                        Log($"  -> {survivorCount} KeyPulse process(es) could not be closed - they are running with Administrator rights.");
+                        if (await AskToRetryElevatedAsync())
+                        {
+                            var args = _isUpdate ? "--update-worker --elevated-retry" : "--install-worker --elevated-retry";
+                            if (RelaunchSetupElevated(args, out var relaunchError))
+                            {
+                                Log("  -> Restarting setup with Administrator rights...");
+                                Dispatcher.UIThread.Post(() => ((App)Application.Current!).Exit_Clicked(null, EventArgs.Empty));
+                                return;
+                            }
+                            Log("  -> Warning: Failed to restart with Administrator rights: " + relaunchError);
+                        }
+                    }
+
+                    var stuck = $"{survivorCount} running KeyPulse process(es) could not be closed. Please close KeyPulse from the system tray before proceeding.";
+                    installWarnings.Add(stuck);
+                    Log("  -> Warning: " + stuck);
+                }
+                else
+                {
+                    Log("  -> Success.");
+                }
 
                 SetProgress("Step 2 of 6: Creating installation directory...", 2, 6);
                 Log("Step 2/6: Cleaning legacy directories and creating new installation path...");

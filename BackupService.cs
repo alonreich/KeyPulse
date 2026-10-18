@@ -521,7 +521,7 @@ namespace KeyPulse
 
             var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            for (var i = 0; i < payload.Shortcuts.Count; i++)
+            for (var i = payload.Shortcuts.Count - 1; i >= 0; i--)
             {
                 var item = payload.Shortcuts[i];
                 if (item == null)
@@ -530,15 +530,16 @@ namespace KeyPulse
                     return false;
                 }
 
-                if ((int)item.Action < (int)ActionType.OpenFolder || (int)item.Action > (int)ActionType.CycleBrightness)
-                {
-                    error = $"That backup is damaged (shortcut #{i + 1} has an action code KeyPulse does not recognise).";
-                    return false;
-                }
-
                 var title = !string.IsNullOrWhiteSpace(item.DisplayName)
                     ? item.DisplayName
                     : (!string.IsNullOrWhiteSpace(item.KeyCombination) ? item.KeyCombination : $"Action #{i + 1}");
+
+                if ((int)item.Action < (int)ActionType.OpenFolder || (int)item.Action > (int)ActionType.CycleBrightness)
+                {
+                    warnings.Add($"\"{title}\" uses an action type not recognized by this version of KeyPulse and was skipped.");
+                    payload.Shortcuts.RemoveAt(i);
+                    continue;
+                }
 
                 var combos = item.KeyCombinations != null && item.KeyCombinations.Count > 0
                     ? item.KeyCombinations
