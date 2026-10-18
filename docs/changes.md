@@ -38,6 +38,13 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 - **Beta Tag SemVer Normalization**: Updated `build/BuildPipeline.ps1` to append `-beta` to `$tag` when `--beta` is specified, ensuring SemVer prerelease precedence correctly prioritizes stable releases.
 - **Beta Retention Pruning Fix**: Fixed beta pruning in `build/BuildPipeline.ps1` to prune strictly by FIFO count (`$i -ge $betaReleasesKept`), preventing premature deletion of beta releases when newer stable releases exist.
 
+### Codebase Optimization & Dead Code Pruning
+- **Uncompressed Native Library Cleanup**: Deleted unreferenced uncompressed native DLLs `av_libglesv2.dll` (~5.4 MB), `libHarfBuzzSharp.dll` (~1.8 MB), and `libSkiaSharp.dll` (~11.6 MB) in `src/KeyPulse/NativeLibs/`, freeing ~18.8 MB of repository bloat left behind by embedded GZip compression.
+- **Legacy Interop & Dead Code Removal in DesktopOrganizerService**: Removed unused P/Invokes `SendMessageTimeout` and `GetWindowThreadProcessId`, unused helper `SafeSendMessageTimeout`, unused ListView constants (`LVM_FIRST`, `LVM_GETITEMCOUNT`, `LVM_GETITEMPOSITION`, `LVM_SETITEMPOSITION32`, `LVM_GETITEMTEXTW`, `LVM_GETITEMSPACING`), unused memory constants (`PROCESS_VM_OPERATION`, `PROCESS_VM_READ`, `PROCESS_VM_WRITE`, `MEM_COMMIT`, `MEM_RESERVE`, `MEM_RELEASE`, `PAGE_READWRITE`), unused constant `SMTO_ABORTIFHUNG`, and unreferenced property `LastUndoProfileName`.
+- **Dead Method Removal in Program.cs**: Removed unreferenced native library hashing helper `FileHashMatches`.
+- **Dead Property Removal in Models.cs**: Removed unreferenced `[JsonIgnore]` property `SummaryText` from `DesktopLayoutProfile`.
+- **Orphaned Test Directory Cleanup**: Removed stale MSTest output directory tree in `tests/KeyPulse.Tests/TestResults`.
+
 ## [v2026.10.18.1809] - 2026-10-18
 - Implemented native unmanaged COM VTable function pointers in `SetupWindow.cs` for `IShellLinkW` and `IPersistFile`.
 - Added `.gitattributes` for LF/CRLF normalization.

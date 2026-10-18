@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zero Data Loss & Privilege Retention**: Upgrades and updates now strictly preserve all custom shortcuts, quick typing snippets, obfuscation settings, and elevated Administrator permissions.
 - **Update File Lock Immunity**: Eliminated update crashes caused by Windows file locks on running executables and runtime native components during in-app updates.
 - **Cryptographic Security Hardening**: Downloaded updates strictly verify published SHA-256 digests and Authenticode signatures, rejecting untrusted or corrupted binaries.
-- **Helpful Network Feedback**: When reaching GitHub API query limits or encountering network timeouts, KeyPulse now displays clear, actionable recovery instructions instead of cryptic error codes.
+### Changed
+- **Repository Optimization & Dead Code Removal**: Purged ~18.8 MB of unused uncompressed native DLL libraries, eliminated obsolete Win32 interop declarations and ListView constants, removed unreferenced properties/helpers, and pruned stale test runner directories.
 
 ## [v2026.10.18.1809] - 2026-10-18
 

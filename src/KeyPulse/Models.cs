@@ -750,9 +750,6 @@ namespace KeyPulse
 
         [JsonIgnore]
         public int IconCount => Icons?.Count ?? 0;
-
-        [JsonIgnore]
-        public string SummaryText => $"{DisplayCount} Monitor{(DisplayCount == 1 ? "" : "s")} • {IconCount} Icon{(IconCount == 1 ? "" : "s")}";
     }
 
     public class DesktopOrganizerConfig

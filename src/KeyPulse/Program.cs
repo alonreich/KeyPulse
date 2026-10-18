@@ -1675,25 +1675,6 @@ class Program
         return sha.ComputeHash(stream);
     }
 
-    private static bool FileHashMatches(string path, byte[] expectedHash)
-    {
-        try
-        {
-            using var fs = File.OpenRead(path);
-            var actual = ComputeHash(fs);
-            if (actual.Length != expectedHash.Length) return false;
-            for (var i = 0; i < actual.Length; i++)
-            {
-                if (actual[i] != expectedHash[i]) return false;
-            }
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private static bool IsRunningFromInstallPath()
     {
         return AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/').Equals(InstallDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);

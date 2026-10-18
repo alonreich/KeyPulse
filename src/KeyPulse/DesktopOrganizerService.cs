@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -29,26 +29,10 @@ namespace KeyPulse
 
     public static class DesktopOrganizerService
     {
-        private const uint LVM_FIRST = 0x1000;
-        private const uint LVM_GETITEMCOUNT = LVM_FIRST + 4;
-        private const uint LVM_GETITEMPOSITION = LVM_FIRST + 16;
-        private const uint LVM_SETITEMPOSITION32 = LVM_FIRST + 49;
-        private const uint LVM_GETITEMTEXTW = LVM_FIRST + 115;
-        private const uint LVM_GETITEMSPACING = LVM_FIRST + 51;
-
         private const int GWL_STYLE = -16;
         private const int LVS_AUTOARRANGE = 0x0100;
 
-        private const uint PROCESS_VM_OPERATION = 0x0008;
-        private const uint PROCESS_VM_READ = 0x0010;
-        private const uint PROCESS_VM_WRITE = 0x0020;
-        private const uint MEM_COMMIT = 0x1000;
-        private const uint MEM_RESERVE = 0x2000;
-        private const uint MEM_RELEASE = 0x8000;
-        private const uint PAGE_READWRITE = 0x04;
-
         private const uint MONITORINFOF_PRIMARY = 0x00000001;
-        private const uint SMTO_ABORTIFHUNG = 0x0002;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
@@ -93,20 +77,6 @@ namespace KeyPulse
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string? lpszWindow);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr SendMessageTimeout(
-            IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-
-        private static bool SafeSendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint timeoutMs, out IntPtr result)
-        {
-            result = IntPtr.Zero;
-            var ret = SendMessageTimeout(hWnd, Msg, wParam, lParam, SMTO_ABORTIFHUNG, timeoutMs, out result);
-            return ret != IntPtr.Zero;
-        }
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
@@ -222,7 +192,6 @@ namespace KeyPulse
         private static readonly object SyncLock = new();
 
         public static bool HasUndo => _lastUndoSnapshot != null;
-        public static string LastUndoProfileName => _lastUndoSnapshot?.Name ?? string.Empty;
 
         public static DesktopOrganizerLoadResult LoadConfigDetailed()
         {
