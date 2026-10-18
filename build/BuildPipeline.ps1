@@ -690,19 +690,21 @@ function Publish-GitHubRelease {
         $releaseNotes = "Automated NativeAOT release published by build.cmd on $($Plan.Tag)."
     }
     $notes = "$releaseNotes`n`n**Verification:**`n- SHA256: ``$localHash``"
+    $notesFile = Join-Path $repoRoot 'compiled\release_notes.md'
+    [System.IO.File]::WriteAllText($notesFile, $notes, [System.Text.UTF8Encoding]::new($false))
 
     $title = "KeyPulse $($Plan.Tag)"
     if ($Plan.Beta) { $title = "$title (Beta)" }
 
-    $createArgs = @('release', 'create', $Plan.Tag, $ExePath, $sumsPath, '--repo', $repo, '--title', $title, '--notes', $notes, '--draft', '--verify-tag')
+    $createArgs = @('release', 'create', $Plan.Tag, $ExePath, $sumsPath, '--repo', $repo, '--title', $title, '-F', $notesFile, '--draft')
     if ($Plan.Beta) { $createArgs += '--prerelease' }
 
-    & gh @createArgs > $null 2>&1
+    $ghOut = & gh @createArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[PUBLISH] STOPPED: draft upload for $($Plan.Tag) failed. Existing latest release is untouched."
+        Write-Host "[PUBLISH] STOPPED: draft upload for $($Plan.Tag) failed: $($ghOut -join ' ')"
         return $false
     }
-    Write-Host "[PUBLISH] 5/7 Draft release $($Plan.Tag) uploaded and tag verified.    [OK]"
+    Write-Host "[PUBLISH] 5/7 Draft release $($Plan.Tag) uploaded.                     [OK]"
 
     # Verify remote asset digest for KeyPulse.exe
     $remoteHash = ''
@@ -725,9 +727,9 @@ function Publish-GitHubRelease {
 
     $editArgs = @('release', 'edit', $Plan.Tag, '--repo', $repo, '--draft=false')
     if ($Plan.Beta) { $editArgs += '--prerelease' } else { $editArgs += '--latest' }
-    & gh @editArgs > $null 2>&1
+    $editOut = & gh @editArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[PUBLISH] STOPPED: verified draft $($Plan.Tag) could not be promoted to live. Cleaning up draft..."
+        Write-Host "[PUBLISH] STOPPED: verified draft $($Plan.Tag) could not be promoted to live: $($editOut -join ' ')"
         & gh release delete $Plan.Tag --repo $repo --yes > $null 2>&1
         return $false
     }
