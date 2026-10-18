@@ -3,7 +3,7 @@
   <!-- This manifest is used on Windows only.
        Don't remove it as it might cause problems with window transparency and embedded controls.
        For more details visit https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests -->
-  <assemblyIdentity version="2026.10.18.0549" name="KeyPulse.Desktop"/>
+  <assemblyIdentity version="2026.10.18.1349" name="KeyPulse.Desktop"/>
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>

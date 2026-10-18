@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.18.1349] - 2026-10-18
+
 ### Added
 - **Search Clear Buttons ("✕") & Escape Key Clear**: Added prominent clear buttons to both `MainWindow` and `SettingsDialog` search inputs that appear dynamically while typing. Pressing `Escape` or clicking "✕" immediately resets the search query and returns focus.
 - **Search Auto-Reset on Tray Minimize/Reopen**: Closing or hiding `MainWindow` to the system tray and reopening it now automatically clears any active search text and restores the full shortcut list.
