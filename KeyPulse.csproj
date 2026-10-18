@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>KeyPulse.ico</ApplicationIcon>
@@ -49,6 +50,9 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="tests\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="KeyPulse.Tests" />
   </ItemGroup>
 </Project>
 

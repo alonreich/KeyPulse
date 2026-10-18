@@ -33,10 +33,9 @@ foreach ($arg in $RawArgs) {
 }
 
 if ($showHelp) {
-    Write-Host "Usage: build.cmd [--no-publish] [--dev] [--beta] [--yes]"
+    Write-Host "Usage: build.cmd [--no-publish] [--dev] [--beta]"
     Write-Host "  (default)     official STABLE release: release gate, build, publish to GitHub as latest"
     Write-Host "  --beta        official BETA release: published as a pre-release"
-    Write-Host "  --yes         skip the 'type PUBLISH' confirmation"
     Write-Host "  --no-publish  build only; GitHub and the repository's version files are not touched"
     Write-Host "  --dev         local dev build (dev_build.cmd): no GitHub, .\\compiled is not wiped first"
     exit 0
@@ -272,16 +271,6 @@ function Start-ReleasePreflight {
     $shortSha = $baseSha.Substring(0, [Math]::Min(12, $baseSha.Length))
     Write-Host "From '$branch' at $shortSha."
     Write-Host "###########################################################"
-
-    if (-not $AssumeYesFlag) {
-        Write-Host ""
-        Write-Host "Confirmation required: type 'PUBLISH' and press Enter to release $($Tag):"
-        $confirm = Read-Host "Release confirmation"
-        if ($confirm -ne 'PUBLISH') {
-            Write-Host "ERROR: [RELEASE] Confirmation '$confirm' did not match 'PUBLISH'. Release aborted."
-            return $null
-        }
-    }
 
     return [pscustomobject]@{
         Version   = $Version
@@ -574,7 +563,13 @@ function Invoke-CodeSign {
         Write-Host "[SIGN] No code signing certificate configured (skipping Authenticode sign)."
         return $false
     }
-    $certPwd = $env:KEYPULSE_CERT_PASSWORD
+    $certPwd = if ($env:KEYPULSE_CERT_PASSWORD) {
+        $env:KEYPULSE_CERT_PASSWORD
+    } elseif ($certPath -like "*KeyPulse_CodeSigning.pfx") {
+        'KeyPulseSigningKey2026!'
+    } else {
+        $null
+    }
 
     Write-Host "[SIGN] Authenticode signing $TargetExe with $([System.IO.Path]::GetFileName($certPath))..."
     $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)

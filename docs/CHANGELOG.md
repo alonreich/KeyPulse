@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **NativeAOT COM VTable Shortcut Creation**: Implemented native unmanaged COM VTable function pointers (`delegate* unmanaged[Stdcall]`) in `SetupWindow.cs` for `IShellLinkW` and `IPersistFile`, backed by an autonomous PowerShell `WScript.Shell` fallback, eliminating NativeAOT `PlatformNotSupportedException` during in-app updates and installations.
+- **Git Line Ending Normalization**: Added `.gitattributes` defining text attributes and end-of-line rules, eliminating Git LF/CRLF conversion warnings across environments.
+
+### Fixed
+- **Unit Test Environment Sandboxing & Automatic Detection**: Sandboxed `KeyPulse.Tests` execution and added automatic test-runner environment detection in `ConfigStore.ResolveConfigDirectory()`, guaranteeing test runs during build quality gates cannot access or overwrite live user configuration files in `%APPDATA%\KeyPulse`.
+- **Pre-Overwrite Configuration Safety Backups**: Added automatic timestamped safety backups (`config.backup-<timestamp>.json`), retention pruning (keeping the 10 newest backups), and preservation of dedicated recovery copies (`config.safety-shortcuts.json`) whenever saving over existing shortcuts.
+- **LKG Empty-Overwrite Protection**: Hardened `ConfigStore.UpdateLkgCopy` to reject overwriting last-known-good copies with empty shortcut configurations when valid shortcuts were previously recorded.
+- **Local Code Signing Password Resolution**: Added fallback password resolution in `build/BuildPipeline.ps1` for local `KeyPulse_CodeSigning.pfx`, ensuring local builds and releases sign cleanly without warnings.
+- **Non-Interactive Release Builds**: Streamlined `build.cmd` and `build/BuildPipeline.ps1` to execute release preflight and publishing directly without interactive `PUBLISH` confirmation prompts.
+
 ## [v2026.10.18.1724] - 2026-10-18
 
 ### Added

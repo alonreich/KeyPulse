@@ -8,6 +8,26 @@ namespace KeyPulse.Tests
     [TestClass]
     public class CoreTests
     {
+        private string? _testSandboxDir;
+
+        [TestInitialize]
+        public void SetupTestSandbox()
+        {
+            _testSandboxDir = Path.Combine(Path.GetTempPath(), $"kp_test_sandbox_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(_testSandboxDir);
+            ConfigStore.ConfigDirectory = _testSandboxDir;
+        }
+
+        [TestCleanup]
+        public void CleanupTestSandbox()
+        {
+            ConfigStore.ConfigDirectory = null!;
+            if (!string.IsNullOrEmpty(_testSandboxDir) && Directory.Exists(_testSandboxDir))
+            {
+                try { Directory.Delete(_testSandboxDir, true); } catch { }
+            }
+        }
+
         [TestMethod]
         public void CompareVersions_DetectsNewerVersionCorrectly()
         {
@@ -119,21 +139,53 @@ namespace KeyPulse.Tests
         public void ConfigStore_PreservesHigherSchemaVersion_OnSave()
         {
             var config = new AppConfig { SchemaVersion = 99 };
-            var tempDir = Path.Combine(Path.GetTempPath(), $"kp_test_cfg_{Guid.NewGuid():N}");
-            Directory.CreateDirectory(tempDir);
-            try
+            var saveSuccess = ConfigStore.Save(config, out var saveErr);
+            Assert.IsTrue(saveSuccess, "ConfigStore.Save should succeed: " + saveErr);
+            var loaded = ConfigStore.Load(out _, out _);
+            Assert.AreEqual(99, loaded.SchemaVersion, "Future schema version 99 must be preserved on save");
+        }
+
+        [TestMethod]
+        public void ConfigStore_AutoDetectsTestEnvironment_NeverPointsToProductionAppData()
+        {
+            // Reset custom override to test automatic environment resolution
+            ConfigStore.ConfigDirectory = null!;
+            var resolved = ConfigStore.ConfigDirectory;
+            var prodAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
+            Assert.AreNotEqual(prodAppData, resolved, "ConfigStore must never resolve to production AppData when executing under a test runner");
+            Assert.IsTrue(resolved.Contains("Sandbox", StringComparison.OrdinalIgnoreCase) || resolved.Contains("Temp", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [TestMethod]
+        public void ConfigStore_PreservesSafetyCopy_WhenSavingZeroShortcutsOverExisting()
+        {
+            var configWithShortcuts = new AppConfig
             {
-                var saveSuccess = ConfigStore.Save(config, out var saveErr);
-                Assert.IsTrue(saveSuccess, "ConfigStore.Save should succeed: " + saveErr);
-                var loaded = ConfigStore.Load(out _, out _);
-                Assert.AreEqual(99, loaded.SchemaVersion, "Future schema version 99 must be preserved on save");
-            }
-            finally
-            {
-                // Restore default schema version
-                ConfigStore.Save(new AppConfig { SchemaVersion = 1 }, out _);
-                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
-            }
+                Hotkeys = new System.Collections.Generic.List<HotkeyEntry>
+                {
+                    new HotkeyEntry
+                    {
+                        DisplayName = "Existing Action",
+                        KeyCombinations = new System.Collections.Generic.List<string> { "Ctrl+Alt+1" },
+                        Action = ActionType.BrowseChrome,
+                        Target = "https://example.com"
+                    }
+                }
+            };
+
+            var initialSave = ConfigStore.Save(configWithShortcuts, out var err1);
+            Assert.IsTrue(initialSave, "Initial save should succeed: " + err1);
+
+            // Now save a config with 0 shortcuts (e.g. accidental wipe or test)
+            var emptyConfig = new AppConfig { Hotkeys = new System.Collections.Generic.List<HotkeyEntry>() };
+            var emptySave = ConfigStore.Save(emptyConfig, out var err2);
+            Assert.IsTrue(emptySave, "Empty save should succeed: " + err2);
+
+            var safetyFile = Path.Combine(ConfigStore.ConfigDirectory, "config.safety-shortcuts.json");
+            Assert.IsTrue(File.Exists(safetyFile), "config.safety-shortcuts.json must be preserved when saving 0 shortcuts over existing shortcuts");
+
+            var safetyRaw = File.ReadAllText(safetyFile);
+            Assert.IsTrue(safetyRaw.Contains("Existing Action"), "Safety backup must contain the original shortcut definitions");
         }
 
         [TestMethod]
@@ -158,6 +210,27 @@ namespace KeyPulse.Tests
             Assert.IsTrue(valid, "Validation should succeed with warnings for unknown future actions: " + fatalError);
             Assert.IsTrue(warnings.Count > 0, "Should contain warning about unsupported action type");
             Assert.IsTrue(warnings[0].Contains("uses an action type not recognized"), "Warning must explain unrecognized action type");
+        }
+
+        [TestMethod]
+        public void CreateShortcut_CreatesValidWindowsShortcutFile()
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), $"kp_test_lnk_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(tempDir);
+            var shortcutPath = Path.Combine(tempDir, "TestShortcut.lnk");
+            try
+            {
+                var target = Environment.ProcessPath ?? @"C:\Windows\System32\cmd.exe";
+                var success = SetupWindow.CreateShortcut(shortcutPath, target, tempDir, "Test Description", target, out var error);
+                Assert.IsTrue(success, "CreateShortcut should succeed: " + error);
+                Assert.IsTrue(File.Exists(shortcutPath), "Shortcut file must exist on disk");
+                var fi = new FileInfo(shortcutPath);
+                Assert.IsTrue(fi.Length > 0, "Shortcut file must not be empty");
+            }
+            finally
+            {
+                try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
+            }
         }
     }
 }

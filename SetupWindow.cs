@@ -517,43 +517,163 @@ namespace KeyPulse
         }
 
 
-        [ComImport]
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        [Guid("000214F9-0000-0000-C000-000000000046")]
-        internal interface IShellLink
+        [DllImport("ole32.dll", ExactSpelling = true)]
+        private static extern int CoCreateInstance(
+            [In] ref Guid rclsid,
+            IntPtr pUnkOuter,
+            uint dwClsContext,
+            [In] ref Guid riid,
+            out IntPtr ppv);
+
+        [DllImport("ole32.dll", ExactSpelling = true)]
+        private static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);
+
+        [DllImport("ole32.dll", ExactSpelling = true)]
+        private static extern void CoUninitialize();
+
+        private static bool TryCreateShortcutViaComVTable(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation)
         {
-            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszFile, int cchMaxPath, out IntPtr pfd, int fFlags);
-            void GetIDList(out IntPtr ppidl);
-            void SetIDList(IntPtr pidl);
-            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszName, int cchMaxName);
-            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
-            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszDir, int cchMaxPath);
-            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
-            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszArgs, int cchMaxPath);
-            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
-            void GetHotkey(out short pwHotkey);
-            void SetHotkey(short wHotkey);
-            void GetShowCmd(out int piShowCmd);
-            void SetShowCmd(int iShowCmd);
-            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszIconPath, int cchIconPath, out int piIcon);
-            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
-            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, int dwReserved);
-            void Resolve(IntPtr hwnd, int fFlags);
-            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+            IntPtr pShellLink = IntPtr.Zero;
+            IntPtr pPersistFile = IntPtr.Zero;
+            bool coInit = false;
+            try
+            {
+                int hrInit = CoInitializeEx(IntPtr.Zero, 2 /* COINIT_APARTMENTTHREADED */);
+                coInit = (hrInit == 0 || hrInit == 1);
+
+                var clsidShellLink = new Guid("00021401-0000-0000-C000-000000000046");
+                var iidShellLink = new Guid("000214F9-0000-0000-C000-000000000046");
+                var iidPersistFile = new Guid("0000010b-0000-0000-C000-000000000046");
+
+                int hr = CoCreateInstance(ref clsidShellLink, IntPtr.Zero, 1 /* CLSCTX_INPROC_SERVER */, ref iidShellLink, out pShellLink);
+                if (hr != 0 || pShellLink == IntPtr.Zero) return false;
+
+                unsafe
+                {
+                    void** vtableLink = *(void***)pShellLink;
+
+                    // Slot 20: SetPath(LPCWSTR pszFile)
+                    var setPath = (delegate* unmanaged[Stdcall]<IntPtr, char*, int>)vtableLink[20];
+                    fixed (char* pTarget = targetPath) { setPath(pShellLink, pTarget); }
+
+                    // Slot 9: SetWorkingDirectory(LPCWSTR pszDir)
+                    if (!string.IsNullOrEmpty(workingDir))
+                    {
+                        var setWorkingDir = (delegate* unmanaged[Stdcall]<IntPtr, char*, int>)vtableLink[9];
+                        fixed (char* pDir = workingDir) { setWorkingDir(pShellLink, pDir); }
+                    }
+
+                    // Slot 7: SetDescription(LPCWSTR pszName)
+                    if (!string.IsNullOrEmpty(description))
+                    {
+                        var setDescription = (delegate* unmanaged[Stdcall]<IntPtr, char*, int>)vtableLink[7];
+                        fixed (char* pDesc = description) { setDescription(pShellLink, pDesc); }
+                    }
+
+                    // Slot 17: SetIconLocation(LPCWSTR pszIconPath, int iIcon)
+                    if (!string.IsNullOrEmpty(iconLocation))
+                    {
+                        var setIconLocation = (delegate* unmanaged[Stdcall]<IntPtr, char*, int, int>)vtableLink[17];
+                        fixed (char* pIcon = iconLocation) { setIconLocation(pShellLink, pIcon, 0); }
+                    }
+
+                    // Slot 0: QueryInterface(REFIID riid, void **ppvObject)
+                    var queryInterface = (delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)vtableLink[0];
+                    hr = queryInterface(pShellLink, &iidPersistFile, &pPersistFile);
+                    if (hr != 0 || pPersistFile == IntPtr.Zero) return false;
+
+                    void** vtablePersist = *(void***)pPersistFile;
+
+                    // Slot 6: Save(LPCOLESTR pszFileName, BOOL fRemember)
+                    var save = (delegate* unmanaged[Stdcall]<IntPtr, char*, int, int>)vtablePersist[6];
+                    fixed (char* pFile = shortcutPath) { hr = save(pPersistFile, pFile, 0 /* FALSE */); }
+
+                    return hr == 0 && File.Exists(shortcutPath);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (pPersistFile != IntPtr.Zero)
+                {
+                    unsafe
+                    {
+                        void** vtablePersist = *(void***)pPersistFile;
+                        var release = (delegate* unmanaged[Stdcall]<IntPtr, uint>)vtablePersist[2];
+                        release(pPersistFile);
+                    }
+                }
+                if (pShellLink != IntPtr.Zero)
+                {
+                    unsafe
+                    {
+                        void** vtableLink = *(void***)pShellLink;
+                        var release = (delegate* unmanaged[Stdcall]<IntPtr, uint>)vtableLink[2];
+                        release(pShellLink);
+                    }
+                }
+                if (coInit)
+                {
+                    try { CoUninitialize(); } catch { }
+                }
+            }
         }
 
-        [ComImport]
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        [Guid("0000010b-0000-0000-C000-000000000046")]
-        internal interface IPersistFile
+        private static bool TryCreateShortcutViaPowerShell(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation)
         {
-            void GetClassID(out Guid pClassID);
-            [PreserveSig]
-            int IsDirty();
-            void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
-            void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, [MarshalAs(UnmanagedType.Bool)] bool fRemember);
-            void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
-            void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
+            try
+            {
+                var escShortcut = shortcutPath.Replace("'", "''");
+                var escTarget = targetPath.Replace("'", "''");
+                var escDir = workingDir.Replace("'", "''");
+                var escDesc = description.Replace("'", "''");
+                var escIcon = iconLocation.Replace("'", "''");
+                var psScript = $"$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{escShortcut}'); $s.TargetPath = '{escTarget}'; $s.WorkingDirectory = '{escDir}'; $s.Description = '{escDesc}'; $s.IconLocation = '{escIcon},0'; $s.Save()";
+                var psi = new ProcessStartInfo("powershell.exe", $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{psScript}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    proc.WaitForExit(5000);
+                    return File.Exists(shortcutPath);
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        internal static bool CreateShortcut(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation, out string? errorMessage)
+        {
+            errorMessage = null;
+            try
+            {
+                var dir = Path.GetDirectoryName(shortcutPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+                if (TryCreateShortcutViaComVTable(shortcutPath, targetPath, workingDir, description, iconLocation))
+                {
+                    return true;
+                }
+
+                if (TryCreateShortcutViaPowerShell(shortcutPath, targetPath, workingDir, description, iconLocation))
+                {
+                    return true;
+                }
+
+                errorMessage = "Both native COM VTable and PowerShell shortcut creation attempts failed.";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return false;
+            }
         }
 
         private async Task<List<string>> CreateShortcutsAsync(string startMenuShortcut, string? desktopShortcut)
@@ -564,37 +684,16 @@ namespace KeyPulse
 
             await Task.Run(() =>
             {
-                var clsidLink = new Guid("00021401-0000-0000-C000-000000000046");
-                try
+                if (!CreateShortcut(startMenuShortcut, Program.ExePath, Program.InstallDir, "KeyPulse - Global Hotkey & Shortcut Manager", Program.ExePath, out var errStart))
                 {
-                    IShellLink link = ComActivation.CreateInstance<IShellLink>(clsidLink);
-                    link.SetPath(Program.ExePath);
-                    link.SetWorkingDirectory(Program.InstallDir);
-                    link.SetDescription("KeyPulse - Global Hotkey & Shortcut Manager");
-                    link.SetIconLocation(Program.ExePath, 0);
-                    IPersistFile file = (IPersistFile)link;
-                    file.Save(startMenuShortcut, false);
-                }
-                catch (Exception ex)
-                {
-                    warnings.Add($"Start Menu shortcut creation failed: {ex.Message}");
+                    warnings.Add($"Start Menu shortcut creation failed: {errStart ?? "Shortcut was not created."}");
                 }
 
                 if (desktopShortcut != null)
                 {
-                    try
+                    if (!CreateShortcut(desktopShortcut, Program.ExePath, Program.InstallDir, "KeyPulse - Global Hotkey & Shortcut Manager", Program.ExePath, out var errDesk))
                     {
-                        IShellLink link2 = ComActivation.CreateInstance<IShellLink>(clsidLink);
-                        link2.SetPath(Program.ExePath);
-                        link2.SetWorkingDirectory(Program.InstallDir);
-                        link2.SetDescription("KeyPulse - Global Hotkey & Shortcut Manager");
-                        link2.SetIconLocation(Program.ExePath, 0);
-                        IPersistFile file2 = (IPersistFile)link2;
-                        file2.Save(desktopShortcut, false);
-                    }
-                    catch (Exception ex)
-                    {
-                        warnings.Add($"Desktop shortcut creation failed: {ex.Message}");
+                        warnings.Add($"Desktop shortcut creation failed: {errDesk ?? "Shortcut was not created."}");
                     }
                 }
                 else

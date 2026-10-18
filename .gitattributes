@@ -1,0 +1,12 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Windows scripts and solutions prefer CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sln text eol=crlf
+
+# Linux/Git files prefer LF
+*.sh text eol=lf
+.git* text eol=lf

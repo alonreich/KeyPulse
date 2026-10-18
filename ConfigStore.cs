@@ -12,10 +12,21 @@ namespace KeyPulse
     /// </summary>
     public static class ConfigStore
     {
-        public static readonly string ConfigDirectory = ResolveConfigDirectory();
+        private static string? _customConfigDirectory;
+        public static string ConfigDirectory
+        {
+            get => _customConfigDirectory ?? ResolveConfigDirectory();
+            set => _customConfigDirectory = value;
+        }
+
+        public static string ConfigPath => Path.Combine(ConfigDirectory, "config.json");
+        public static string ConfigLkgPath => Path.Combine(ConfigDirectory, "config.lkg.json");
+        public const int CurrentSchemaVersion = 1;
 
         /// <summary>
         /// DEVDATA_01: Route dev-mode configuration to isolated developer sandbox.
+        /// Also guarantees that any test runner (VSTest, testhost, MSTest) automatically
+        /// resolves to an isolated temporary sandbox instead of production %APPDATA%\KeyPulse.
         /// </summary>
         private static string ResolveConfigDirectory()
         {
@@ -25,17 +36,54 @@ namespace KeyPulse
                 return Path.GetFullPath(envDataDir);
             }
 
+            if (IsTestExecutionEnvironment())
+            {
+                var testDir = Path.Combine(Path.GetTempPath(), "KeyPulse_Test_Sandbox");
+                Directory.CreateDirectory(testDir);
+                return testDir;
+            }
+
             if (Program.IsDevMode)
             {
                 return Path.Combine(Program.DevHomeDir, "data");
             }
 
+            var appDir = AppDomain.CurrentDomain.BaseDirectory;
+            if (File.Exists(Path.Combine(appDir, "portable.dat")))
+            {
+                return Path.Combine(appDir, "data");
+            }
+
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
         }
 
-        public static readonly string ConfigPath = Path.Combine(ConfigDirectory, "config.json");
-        public static readonly string ConfigLkgPath = Path.Combine(ConfigDirectory, "config.lkg.json");
-        public const int CurrentSchemaVersion = 1;
+        private static bool IsTestExecutionEnvironment()
+        {
+            try
+            {
+                var proc = System.Diagnostics.Process.GetCurrentProcess().ProcessName;
+                if (proc.Contains("testhost", StringComparison.OrdinalIgnoreCase) ||
+                    proc.Contains("vstest", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                var entryAssm = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "";
+                if (entryAssm.Contains("test", StringComparison.OrdinalIgnoreCase) ||
+                    entryAssm.Contains("vstest", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("VSTEST_RUNNER")) ||
+                    !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("KEYPULSE_TEST_MODE")))
+                {
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
 
         private static readonly object IoLock = new object();
 
@@ -131,6 +179,39 @@ namespace KeyPulse
                 try
                 {
                     Directory.CreateDirectory(ConfigDirectory);
+
+                    // DATA SAFETY: If a valid config currently exists on disk with configured shortcuts,
+                    // automatically preserve a dated backup before replacing it.
+                    if (File.Exists(ConfigPath))
+                    {
+                        try
+                        {
+                            var existingRaw = File.ReadAllText(ConfigPath);
+                            bool hadShortcuts = existingRaw.Contains("\"KeyCombinations\"") || existingRaw.Contains("\"KeyCombination\"");
+                            if (hadShortcuts)
+                            {
+                                var backupName = $"config.backup-{DateTime.UtcNow:yyyyMMdd-HHmmss}.json";
+                                var backupTarget = Path.Combine(ConfigDirectory, backupName);
+                                if (!File.Exists(backupTarget))
+                                {
+                                    File.WriteAllText(backupTarget, existingRaw);
+                                }
+
+                                // If the incoming configuration has zero shortcuts but the existing configuration had shortcuts,
+                                // preserve a dedicated safety recovery copy to prevent accidental data loss.
+                                if (config.Hotkeys == null || config.Hotkeys.Count == 0)
+                                {
+                                    var safetyPath = Path.Combine(ConfigDirectory, "config.safety-shortcuts.json");
+                                    File.WriteAllText(safetyPath, existingRaw);
+                                    Program.LogDebug("DATA SAFETY: Preserved config.safety-shortcuts.json before saving configuration with 0 shortcuts.");
+                                }
+
+                                PruneOldBackups(ConfigDirectory, 10);
+                            }
+                        }
+                        catch { }
+                    }
+
                     config.SchemaVersion = Math.Max(config.SchemaVersion, CurrentSchemaVersion);
                     var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
                     var ok = AtomicFileWriter.WriteAtomic(ConfigPath, json, out error);
@@ -146,6 +227,23 @@ namespace KeyPulse
                     return false;
                 }
             }
+        }
+
+        private static void PruneOldBackups(string dir, int keepCount)
+        {
+            try
+            {
+                var files = new DirectoryInfo(dir).GetFiles("config.backup-*.json");
+                if (files.Length > keepCount)
+                {
+                    Array.Sort(files, (a, b) => b.CreationTimeUtc.CompareTo(a.CreationTimeUtc));
+                    for (int i = keepCount; i < files.Length; i++)
+                    {
+                        try { files[i].Delete(); } catch { }
+                    }
+                }
+            }
+            catch { }
         }
 
         private static bool TryRecoverFromLkg(out AppConfig config)
@@ -177,6 +275,23 @@ namespace KeyPulse
         {
             try
             {
+                // CRITICAL SAFETY: If the new JSON has 0 shortcuts, but LKG copy exists and had shortcuts,
+                // do NOT immediately overwrite LKG with empty shortcuts unless explicitly desired.
+                if (File.Exists(ConfigLkgPath))
+                {
+                    try
+                    {
+                        var lkgRaw = File.ReadAllText(ConfigLkgPath);
+                        bool lkgHadShortcuts = lkgRaw.Contains("\"KeyCombinations\"") || lkgRaw.Contains("\"KeyCombination\"");
+                        bool newHasShortcuts = verifiedJson.Contains("\"KeyCombinations\"") || verifiedJson.Contains("\"KeyCombination\"");
+                        if (lkgHadShortcuts && !newHasShortcuts)
+                        {
+                            return;
+                        }
+                    }
+                    catch { }
+                }
+
                 AtomicFileWriter.WriteAtomic(ConfigLkgPath, verifiedJson, out _);
             }
             catch { }
