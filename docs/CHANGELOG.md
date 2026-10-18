@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Native Library Extraction Stream Lifetime**: Fixed an `ObjectDisposedException` ("Cannot access a closed Stream") during extraction of GZip-compressed native libraries by preserving underlying stream lifetime (`leaveOpen: true`) and caching resource length before stream decompression.
+
 ## [v2026.10.18.0517] - 2026-10-18
 
 ### Added

@@ -1534,9 +1534,10 @@ class Program
                     continue;
                 }
 
+                var streamLength = stream.Length;
                 var expectedHash = ComputeHash(stream);
                 var expectedHashHex = Convert.ToHexString(expectedHash);
-                var expectedStamp = stream.Length + "|" + expectedHashHex;
+                var expectedStamp = streamLength + "|" + expectedHashHex;
 
                 if (File.Exists(target) && File.Exists(stampPath))
                 {
@@ -1560,7 +1561,7 @@ class Program
                 {
                     if (isGz)
                     {
-                        using var gz = new System.IO.Compression.GZipStream(stream, System.IO.Compression.CompressionMode.Decompress);
+                        using var gz = new System.IO.Compression.GZipStream(stream, System.IO.Compression.CompressionMode.Decompress, leaveOpen: true);
                         gz.CopyTo(fs);
                     }
                     else
@@ -1587,7 +1588,7 @@ class Program
                     {
                         File.Move(tempTarget, target);
                     }
-                    WriteStamp(stampPath, stream.Length, expectedHashHex);
+                    WriteStamp(stampPath, streamLength, expectedHashHex);
                     LogDebug($"{dllFileName} extracted and verified.");
                 }
                 catch (Exception moveEx)
