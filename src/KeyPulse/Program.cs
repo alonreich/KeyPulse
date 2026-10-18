@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1574,7 +1574,7 @@ class Program
                             using (var headerStream = File.OpenRead(target))
                             {
                                 int read = headerStream.Read(headerBytes, 0, 2);
-                                if (read == 2 && headerBytes[0] == 0x4D && headerBytes[1] == 0x5A) // 'MZ'
+                                if (read == 2 && headerBytes[0] == 0x4D && headerBytes[1] == 0x5A)
                                 {
                                     var existingStamp = File.ReadAllText(stampPath).Trim();
                                     if (string.Equals(existingStamp, expectedStamp, StringComparison.OrdinalIgnoreCase))

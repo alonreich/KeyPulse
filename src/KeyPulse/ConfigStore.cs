@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -180,8 +180,6 @@ namespace KeyPulse
                 {
                     Directory.CreateDirectory(ConfigDirectory);
 
-                    // DATA SAFETY: If a valid config currently exists on disk with configured shortcuts,
-                    // automatically preserve a dated backup before replacing it.
                     if (File.Exists(ConfigPath))
                     {
                         try
@@ -197,8 +195,6 @@ namespace KeyPulse
                                     File.WriteAllText(backupTarget, existingRaw);
                                 }
 
-                                // If the incoming configuration has zero shortcuts but the existing configuration had shortcuts,
-                                // preserve a dedicated safety recovery copy to prevent accidental data loss.
                                 if (config.Hotkeys == null || config.Hotkeys.Count == 0)
                                 {
                                     var safetyPath = Path.Combine(ConfigDirectory, "config.safety-shortcuts.json");
@@ -275,8 +271,6 @@ namespace KeyPulse
         {
             try
             {
-                // CRITICAL SAFETY: If the new JSON has 0 shortcuts, but LKG copy exists and had shortcuts,
-                // do NOT immediately overwrite LKG with empty shortcuts unless explicitly desired.
                 if (File.Exists(ConfigLkgPath))
                 {
                     try
