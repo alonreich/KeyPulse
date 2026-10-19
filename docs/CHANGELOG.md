@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.19.2052] - 2026-10-19
+
 ### Added
 - **Comprehensive WCAG 2.2 AA Accessibility Polish**: Standardized minimum 24×24px accessible touch and keyboard focus targets on help badges across all windows with explicit `AutomationProperties.Name`, updated Light theme contrast tokens (`AppAccentBrush` `#2563eb`, `AppSuccessBrush` `#15803d`, `AppSuccessSoftBrush` `#166534`) to exceed the 4.5:1 text and 3:1 UI threshold, implemented ordered keyboard `TabIndex` traversal (0 to 18) throughout editor and action controls, added screen-reader naming to table headers and settings tabs, enabled Enter key layout creation in Desktop Organizer, and wired Escape key dismissal to the Setup wipe confirmation modal.
 - **DDC/CI Concurrency Resilience & Twinkle Tray Coexistence**: Implemented a 3-attempt hardware write retry loop with 35ms settling sleep, a 40ms inter-command pause between brightness and contrast writes, direct DDC/CI writes eliminating redundant pre-write I2C reads, and serialized background multi-screen polling in `ReadAllScreensLiveAsync` to prevent GPU I2C multiplexer collisions when running alongside third-party monitor utilities.
