@@ -800,6 +800,14 @@ namespace KeyPulse
             var result = false;
             keep.Click += (s, e) => w.Close();
             wipe.Click += (s, e) => { result = true; w.Close(); };
+            w.KeyDown += (s, e) =>
+            {
+                if (e.Key == Avalonia.Input.Key.Escape)
+                {
+                    e.Handled = true;
+                    w.Close();
+                }
+            };
 
             w.Content = new ScrollViewer
             {

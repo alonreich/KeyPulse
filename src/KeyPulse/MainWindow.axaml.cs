@@ -329,19 +329,16 @@ namespace KeyPulse
                     + "row and enter its folder, program, link or text again.", true);
             }
 
-            var unprotected = Hotkeys.Count(h => h.TargetProtectionFailed);
-            if (CryptoHelper.ProtectionUnavailable || unprotected > 0)
+            var unprotected = Hotkeys.Count(h => h.IsTargetObfuscated && (h.TargetProtectionFailed || CryptoHelper.ProtectionUnavailable));
+            if (CryptoHelper.ProtectionUnavailable && unprotected > 0)
             {
-                var subject = unprotected > 0
-                    ? $"{unprotected} shortcut{(unprotected == 1 ? " is" : "s are")} stored in readable text"
-                    : "Windows could not protect new targets";
+                var subject = $"{unprotected} hidden shortcut{(unprotected == 1 ? " is" : "s are")} stored in readable text";
                 ShowActionMessage("KeyPulse security notice",
                     subject,
-                    "Windows refused to encrypt this data for your account (this happens with roaming "
-                    + "profiles, a damaged crypto store, or some managed machines). KeyPulse has kept "
-                    + "working, but anything you type into a target - especially with the Blur box "
-                    + "ticked - is stored UNENCRYPTED in the settings file, readable by anyone who can "
-                    + "open it. Affected rows are marked amber in the list.", true);
+                    "Windows was unable to encrypt this data using DPAPI account encryption (this can occur with "
+                    + "temporary profiles, network home drives, or specific Windows security policies). KeyPulse continues to "
+                    + "function, but targets marked with 'Hide secret text' "
+                    + "are stored in readable text in your settings file. Affected rows are marked with a '⚠️ Unencrypted' badge.", true);
             }
 
             var broken = Hotkeys.Where(h => h.IsEnabled && !IsStatus(h, "Active") && !IsStatus(h, "Ready") && !IsStatus(h, "Waiting")).ToList();
@@ -961,6 +958,7 @@ namespace KeyPulse
             }
 
             RefreshStatusSummary();
+            try { ScreenBrightnessService.RegisterBrightnessHotkeys(); } catch { }
             return failures;
         }
 
@@ -1235,7 +1233,24 @@ namespace KeyPulse
         public void ShortcutHeader_Pressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
         {
             if (sender is not Border header || header.Tag is not string column) return;
+            ToggleSort(column);
+            e.Handled = true;
+        }
 
+        public void ShortcutHeader_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+        {
+            if (e.Key == Avalonia.Input.Key.Enter || e.Key == Avalonia.Input.Key.Space)
+            {
+                if (sender is Border header && header.Tag is string column)
+                {
+                    ToggleSort(column);
+                    e.Handled = true;
+                }
+            }
+        }
+
+        private void ToggleSort(string column)
+        {
             if (string.Equals(_sortColumn, column, StringComparison.Ordinal))
             {
                 if (_sortDescending)
@@ -1257,7 +1272,6 @@ namespace KeyPulse
             UpdateSortHeaderText();
             RefreshVisibleHotkeys();
             SaveConfig();
-            e.Handled = true;
         }
 
         private void UpdateSortHeaderText()
@@ -1456,7 +1470,7 @@ namespace KeyPulse
 
         private Window CreateAppDialog(string title, double width, double height, double minWidth, double minHeight, WindowStartupLocation startupLocation, bool canResize = true, bool topmost = false)
         {
-            return new Window
+            var win = new Window
             {
                 Title = title,
                 Width = width,
@@ -1468,6 +1482,15 @@ namespace KeyPulse
                 CanResize = canResize,
                 Icon = this.Icon
             };
+            win.KeyDown += (s, e) =>
+            {
+                if (e.Key == Avalonia.Input.Key.Escape)
+                {
+                    e.Handled = true;
+                    win.Close();
+                }
+            };
+            return win;
         }
 
         private bool CanUseAsDialogOwner()
@@ -1565,9 +1588,9 @@ namespace KeyPulse
             {
                 var isTextAction = actionType == ActionType.TypeText || actionType == ActionType.InsertText;
                 targetText.AcceptsReturn = isTextAction;
-                targetText.TextWrapping = isTextAction ? Avalonia.Media.TextWrapping.Wrap : Avalonia.Media.TextWrapping.NoWrap;
-                targetText.MinHeight = isTextAction ? 92 : 34;
-                targetText.MaxHeight = isTextAction ? 180 : 34;
+                targetText.TextWrapping = Avalonia.Media.TextWrapping.Wrap;
+                targetText.MinHeight = 34;
+                targetText.MaxHeight = 76;
                 targetText.IsEnabled = actionType != ActionType.CycleBrightness;
                 if (actionType == ActionType.CycleBrightness && string.IsNullOrWhiteSpace(targetText.Text))
                 {
@@ -1584,7 +1607,6 @@ namespace KeyPulse
                     ActionType.BrowseChrome => "Web URL",
                     ActionType.TypeText => "Text to type out",
                     ActionType.InsertText => "Text to paste",
-                    ActionType.CycleBrightness => "Screen Brightness cycle behavior",
                     _ => "Target"
                 };
             }
@@ -1598,7 +1620,6 @@ namespace KeyPulse
                     ActionType.BrowseChrome => "Type a website address. The https:// part is added for you.",
                     ActionType.TypeText => "Types your text one key at a time, like a person would. Slower, but works in old console windows and anywhere that ignores paste. Long runs show a Stop button.",
                     ActionType.InsertText => "Pastes your text instantly with no formatting, then puts your previous clipboard back. Use this unless the target app refuses paste.",
-                    ActionType.CycleBrightness => "Cycles your Screen Brightness presets starting from the lowest brightness first, climbing up to the highest, then wrapping back to the lowest. Zero OSD popups in fullscreen games.",
                     _ => string.Empty
                 };
             }
@@ -1623,7 +1644,7 @@ namespace KeyPulse
         private ActionType GetSelectedAction()
         {
             var selectedIndex = this.FindControl<ComboBox>("ActionCombo")?.SelectedIndex ?? 0;
-            if (selectedIndex < 0 || selectedIndex > (int)ActionType.CycleBrightness) return ActionType.OpenFolder;
+            if (selectedIndex < 0 || selectedIndex > (int)ActionType.InsertText) return ActionType.OpenFolder;
             return (ActionType)selectedIndex;
         }
 
@@ -1981,8 +2002,30 @@ namespace KeyPulse
 
         private static bool TryNormalizeUrlTarget(string rawTarget, out string normalizedUrl, out string error)
         {
-            normalizedUrl = rawTarget.Trim();
+            normalizedUrl = rawTarget.Trim().Trim('"');
             error = string.Empty;
+
+            if (normalizedUrl.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+            {
+                if (Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var fileUri))
+                {
+                    normalizedUrl = fileUri.AbsoluteUri;
+                    return true;
+                }
+            }
+
+            if (File.Exists(normalizedUrl) ||
+                normalizedUrl.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+                normalizedUrl.EndsWith(".htm", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var fileUri = new Uri(Path.GetFullPath(normalizedUrl));
+                    normalizedUrl = fileUri.AbsoluteUri;
+                    return true;
+                }
+                catch { }
+            }
 
             if (!normalizedUrl.Contains("://", StringComparison.Ordinal))
             {
@@ -1990,9 +2033,9 @@ namespace KeyPulse
             }
 
             if (!Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var uri)
-                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeFile))
             {
-                error = "Enter a valid web URL";
+                error = "Enter a valid web URL or file path";
                 return false;
             }
 
@@ -2010,7 +2053,7 @@ namespace KeyPulse
             {
                 if (!TrySplitLaunchCommand(rawTarget, out fileName, out arguments, out error)) return false;
 
-                if (File.Exists(fileName)) return true;
+                if (File.Exists(fileName) || Directory.Exists(fileName)) return true;
 
                 if (TryFindExecutableOnPath(fileName, out var resolvedPath))
                 {
@@ -2055,7 +2098,7 @@ namespace KeyPulse
                 return true;
             }
 
-            if (File.Exists(target))
+            if (File.Exists(target) || Directory.Exists(target))
             {
                 fileName = target;
                 return true;
@@ -2065,7 +2108,7 @@ namespace KeyPulse
             while (lastSpace > 0)
             {
                 var possiblePath = target.Substring(0, lastSpace);
-                if (File.Exists(possiblePath))
+                if (File.Exists(possiblePath) || Directory.Exists(possiblePath))
                 {
                     fileName = possiblePath;
                     arguments = target.Substring(lastSpace + 1).Trim();
@@ -2239,10 +2282,10 @@ namespace KeyPulse
                     else if (actionType == ActionType.LaunchProgram)
                     {
                         var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { 
-                            Title = "Select Executable", 
+                            Title = "Select Program or File", 
                             AllowMultiple = false, 
                             FileTypeFilter = new[] { 
-                                new Avalonia.Platform.Storage.FilePickerFileType("Executables") { Patterns = new[] { "*.exe", "*.bat", "*.cmd", "*.ps1", "*.vbs", "*.lnk" } }, 
+                                new Avalonia.Platform.Storage.FilePickerFileType("Programs & Files") { Patterns = new[] { "*.exe", "*.bat", "*.cmd", "*.ps1", "*.vbs", "*.lnk", "*.html", "*.htm" } }, 
                                 new Avalonia.Platform.Storage.FilePickerFileType("All Files") { Patterns = new[] { "*.*" } } 
                             } 
                         };
@@ -2250,6 +2293,22 @@ namespace KeyPulse
                         if (files != null && files.Count > 0)
                         {
                             targetText.Text = "\"" + files[0].Path.LocalPath + "\"";
+                        }
+                    }
+                    else if (actionType == ActionType.BrowseChrome)
+                    {
+                        var options = new Avalonia.Platform.Storage.FilePickerOpenOptions { 
+                            Title = "Select HTML Web Page or File", 
+                            AllowMultiple = false, 
+                            FileTypeFilter = new[] { 
+                                new Avalonia.Platform.Storage.FilePickerFileType("Web Pages") { Patterns = new[] { "*.html", "*.htm", "*.shtml", "*.xhtml", "*.svg" } }, 
+                                new Avalonia.Platform.Storage.FilePickerFileType("All Files") { Patterns = new[] { "*.*" } } 
+                            } 
+                        };
+                        var files = await this.StorageProvider.OpenFilePickerAsync(options);
+                        if (files != null && files.Count > 0)
+                        {
+                            targetText.Text = new Uri(files[0].Path.LocalPath).AbsoluteUri;
                         }
                     }
                 }
@@ -2734,9 +2793,10 @@ namespace KeyPulse
                         }
                         catch (Exception ex)
                         {
+                            Program.LogDebug("Could not launch updater: " + ex);
                             updateBtn.IsEnabled = true;
                             progressStatus.Foreground = AppBrush("AppDangerBrush");
-                            progressStatus.Text = "Could not launch updater: " + ex.Message;
+                            progressStatus.Text = "Could not launch updater. Please try running the downloaded file manually or check file permissions.";
                         }
                     }
 
@@ -3081,7 +3141,7 @@ namespace KeyPulse
             }
 
             var actionCombo = this.FindControl<ComboBox>("ActionCombo");
-            if (actionCombo == null || actionCombo.SelectedIndex < 0 || actionCombo.SelectedIndex > (int)ActionType.CycleBrightness)
+            if (actionCombo == null || actionCombo.SelectedIndex < 0 || actionCombo.SelectedIndex > (int)ActionType.InsertText)
             {
                 SetFieldError("TargetText", "Choose an action");
                 Program.PlaySound("error");
@@ -3211,8 +3271,8 @@ namespace KeyPulse
                     Margin = new Thickness(0, 2, 6, 2),
                     Padding = new Thickness(8, 3, 6, 3),
                     CornerRadius = new CornerRadius(4),
-                    Background = AppBrush("AppSurfaceHoverBrush"),
-                    BorderBrush = AppBrush("AppBorderSubtleBrush"),
+                    Background = AppBrush("AppPanelRaisedBrush"),
+                    BorderBrush = AppBrush("AppBorderBrush"),
                     BorderThickness = new Thickness(1)
                 };
 
@@ -3226,6 +3286,7 @@ namespace KeyPulse
                 var text = new TextBlock
                 {
                     Text = currentCombo,
+                    Foreground = AppBrush("AppTextPrimaryBrush"),
                     VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
                     FontWeight = Avalonia.Media.FontWeight.SemiBold,
                     FontSize = 12
@@ -3243,6 +3304,7 @@ namespace KeyPulse
                     BorderThickness = new Thickness(0),
                     Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
                 };
+                Avalonia.Automation.AutomationProperties.SetName(removeBtn, $"Remove {currentCombo} shortcut");
                 ToolTip.SetTip(removeBtn, $"Remove {currentCombo}");
 
                 removeBtn.Click += (s, e) =>
@@ -3352,10 +3414,15 @@ namespace KeyPulse
             foreach (var c in _editorCombos)
             {
                 var norm = NormalizeComboKey(c);
-                if (Hotkeys.Any(h => !ReferenceEquals(h, _editingEntry) &&
-                    h.KeyCombinations.Any(existing => string.Equals(NormalizeComboKey(existing), norm, StringComparison.OrdinalIgnoreCase))))
+                var existingEntry = Hotkeys.FirstOrDefault(h => !ReferenceEquals(h, _editingEntry) &&
+                    h.KeyCombinations.Any(existing => string.Equals(NormalizeComboKey(existing), norm, StringComparison.OrdinalIgnoreCase)));
+                if (existingEntry != null)
                 {
-                    SetFieldError("KeyCombo", $"Shortcut '{c}' already exists in KeyPulse");
+                    SetFieldError("KeyCombo", $"Shortcut '{c}' already exists. Select it in the table below to edit or change its action.");
+                    if (this.FindControl<ListBox>("HotkeyList") is ListBox existingList)
+                    {
+                        existingList.ScrollIntoView(existingEntry);
+                    }
                     Program.PlaySound("error");
                     return;
                 }
@@ -3454,13 +3521,30 @@ namespace KeyPulse
         {
             if (_loadingEditorFields) return;
 
+            if (_editingEntry != null)
+            {
+                var currentTarget = this.FindControl<TextBox>("TargetText")?.Text;
+                var currentName = this.FindControl<TextBox>("ActionNameText")?.Text?.Trim() ?? string.Empty;
+                var actionCombo = this.FindControl<ComboBox>("ActionCombo");
+                var currentAction = actionCombo != null && actionCombo.SelectedIndex >= 0 ? (ActionType)actionCombo.SelectedIndex : _editingEntry.Action;
+                if (!string.Equals(_editingEntry.Target, currentTarget, StringComparison.Ordinal)
+                    || !string.Equals(_editingEntry.DisplayName, currentName, StringComparison.Ordinal)
+                    || _editingEntry.Action != currentAction)
+                {
+                    _ = CommitSelectedEditorChangeAsync();
+                }
+            }
+
             if (sender is ListBox list && list.SelectedItem is HotkeyEntry entry)
             {
                 BeginEditingEntry(entry);
             }
             else
             {
-                ResetEditor();
+                if (_editingEntry != null)
+                {
+                    ResetEditor();
+                }
             }
         }
 
@@ -3686,6 +3770,10 @@ namespace KeyPulse
                 _hotkeyScrollViewer = sv;
                 if (this.FindControl<Border>("ScrollFadeLeft") is Border left) left.Opacity = sv.Offset.X > 0 ? 1 : 0;
                 if (this.FindControl<Border>("ScrollFadeRight") is Border right) right.Opacity = sv.Offset.X < sv.Extent.Width - sv.Viewport.Width - 1 ? 1 : 0;
+                if (this.FindControl<Grid>("ShortcutHeaderGrid") is Grid headerGrid)
+                {
+                    headerGrid.Margin = new Avalonia.Thickness(-sv.Offset.X, 0, sv.Offset.X, 0);
+                }
             }
             UpdateScrollIndicators();
         }
@@ -3918,7 +4006,7 @@ namespace KeyPulse
         /// ISSUE_13: Avalonia's Key enum to a Windows virtual key. This is the only place the two
         /// vocabularies meet; everything downstream speaks virtual keys and HotkeyManager's names.
         /// </summary>
-        private static uint MapAvaloniaKeyToVirtualKey(Avalonia.Input.Key key)
+        public static uint MapAvaloniaKeyToVirtualKey(Avalonia.Input.Key key)
         {
             if (key >= Avalonia.Input.Key.A && key <= Avalonia.Input.Key.Z)
             {
@@ -4024,9 +4112,10 @@ namespace KeyPulse
                 Background = AppBrush("AppPanelRaisedBrush"),
                 BorderBrush = AppBrush("AppBorderBrush"),
                 BorderThickness = new Avalonia.Thickness(1),
-                CornerRadius = new Avalonia.CornerRadius(9),
-                Width = 18,
-                Height = 18,
+                CornerRadius = new Avalonia.CornerRadius(12),
+                Width = 24,
+                Height = 24,
+                Focusable = true,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
                 Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Help),
                 Child = new TextBlock
@@ -4040,6 +4129,7 @@ namespace KeyPulse
                 }
             };
             ToolTip.SetTip(badge, tooltipText);
+            Avalonia.Automation.AutomationProperties.SetName(badge, "Help: " + tooltipText);
             return badge;
         }
 
@@ -4248,6 +4338,7 @@ namespace KeyPulse
                     BorderThickness = new Avalonia.Thickness(1, 1, 1, 1),
                     Child = text
                 };
+                Avalonia.Automation.AutomationProperties.SetName(ear, $"{tabNames[i]} Settings Tab");
                 tabEars[i] = ear;
                 tabStrip.Children.Add(ear);
             }
@@ -5073,6 +5164,33 @@ namespace KeyPulse
             backupBtnRow.Children.Add(backupBtn);
             backupBtnRow.Children.Add(restoreBtn);
 
+            var revealExportBtn = new Button
+            {
+                Content = "Show in File Explorer",
+                Classes = { "Secondary" },
+                Margin = new Avalonia.Thickness(10, 0, 0, 6),
+                IsVisible = false,
+                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+                TabIndex = 43,
+                IsTabStop = true
+            };
+            string lastExportedFile = string.Empty;
+            revealExportBtn.Click += (_, _) =>
+            {
+                if (!string.IsNullOrEmpty(lastExportedFile) && System.IO.File.Exists(lastExportedFile))
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{lastExportedFile}\"") { UseShellExecute = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.LogDebug("Failed to open explorer for backup: " + ex.Message);
+                    }
+                }
+            };
+            backupBtnRow.Children.Add(revealExportBtn);
+
             var backupBody = new StackPanel { Spacing = 6 };
             backupBody.Children.Add(new TextBlock
             {
@@ -5325,7 +5443,7 @@ namespace KeyPulse
                     }
                 }
 
-                restoreTabDefaultsBtn.IsVisible = !isSearching;
+                restoreTabDefaultsBtn.IsVisible = !isSearching && activeTab != 7;
                 if (isSearching)
                 {
                     tabPageTitle.Text = $"Search Results for \"{query}\"";
@@ -5653,18 +5771,21 @@ namespace KeyPulse
                         return;
                     }
 
+                    lastExportedFile = destination;
+                    revealExportBtn.IsVisible = true;
                     statusTxt.Text = passphrase == null
-                        ? $"Backup exported and verified: {payload.Shortcuts.Count} shortcut(s), plus your window sizes, "
+                        ? $"Backup exported to: {destination}\nVerified {payload.Shortcuts.Count} shortcut(s), plus your window sizes, "
                           + "column widths, desktop layouts, brightness presets, and preferences. It is NOT password protected, "
                           + "so its targets are readable by anyone who opens the file — keep it somewhere you trust."
-                        : $"Backup exported, encrypted and verified: {payload.Shortcuts.Count} shortcut(s), plus your window "
+                        : $"Backup exported to: {destination}\nVerified, encrypted and saved {payload.Shortcuts.Count} shortcut(s), plus your window "
                           + "sizes, column widths, desktop layouts, brightness presets, and preferences. Without this password "
                           + "the file cannot be restored, and KeyPulse cannot recover it for you.";
                     statusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
                 }
                 catch (Exception ex)
                 {
-                    statusTxt.Text = "Export failed: " + ex.Message;
+                    Program.LogDebug("Export failed: " + ex);
+                    statusTxt.Text = "Export failed. Please check folder permissions and disk space, then try again.";
                     statusTxt.Foreground = AppBrush("AppDangerBrush");
                 }
                 finally
@@ -5818,7 +5939,8 @@ namespace KeyPulse
                 }
                 catch (Exception ex)
                 {
-                    statusTxt.Text = "Import failed: " + ex.Message;
+                    Program.LogDebug("Import failed: " + ex);
+                    statusTxt.Text = "Import failed. Please check that the selected file is a valid KeyPulse backup.";
                     statusTxt.Foreground = AppBrush("AppDangerBrush");
                 }
                 finally
@@ -6080,7 +6202,7 @@ namespace KeyPulse
 
             var explain = new TextBlock
             {
-                Text = "A backup contains the folder, program, link or text behind every shortcut - including anything you hid with the Blur box. With a password the file is encrypted and useless to anyone else. Without one, its contents are readable by anyone who opens it.",
+                Text = "A backup contains the folder, program, link or text behind every shortcut - including anything marked with 'Hide secret text'. With a password the file is encrypted and useless to anyone else. Without one, its contents are readable by anyone who opens it.",
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap,
                 Classes = { "Muted" },
                 Margin = new Avalonia.Thickness(0, 8, 0, 12)
@@ -6719,12 +6841,13 @@ namespace KeyPulse
             {
                 try
                 {
+                    var cleanReason = string.IsNullOrWhiteSpace(reason) ? "system protection unavailable" : reason.Trim();
                     ShowActionMessage("KeyPulse security notice",
                         "Windows cannot protect this target",
-                        "Windows refused to encrypt it for your account (" + reason + "), so it will be stored in "
-                        + "READABLE text in the settings file - including anything you ticked the Blur box for. "
-                        + "The list marks such rows amber. This usually happens with roaming profiles, a damaged "
-                        + "crypto store, or a machine managed by company policy.", true);
+                        "Windows was unable to encrypt this item using DPAPI account encryption (" + cleanReason + "). "
+                        + "It will be stored in readable text in your settings file - including items marked with 'Hide secret text'. "
+                        + "The shortcut list marks these rows with a '⚠️ Unencrypted' badge. "
+                        + "This can happen with temporary profiles, network home drives, or specific Windows security policies.", true);
                 }
                 catch (Exception ex)
                 {
@@ -6835,6 +6958,7 @@ namespace KeyPulse
 
             CloseTypingProgressWindow();
             HotkeyManager.DisableCaptureHook();
+            try { ScreenBrightnessService.UnregisterAllBrightnessHotkeys(); } catch { }
             HotkeyManager.Clear();
             HotkeyManager.Stop();
             base.OnClosed(e);

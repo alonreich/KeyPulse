@@ -627,6 +627,12 @@ namespace KeyPulse
             updateBtn.Click += async (s, e) =>
             {
                 if (_isBusy || _loadResult.IsReadOnly) return;
+                bool confirmed = await ConfirmActionAsync(
+                    "Update Saved Layout",
+                    $"Overwrite layout \"{profile.Name}\" with your current desktop icon positions? This replaces the {profile.IconCount} previously saved icon coordinates.",
+                    "Update Layout");
+                if (!confirmed) return;
+
                 _isBusy = true;
                 updateBtn.IsEnabled = false;
                 Program.PlaySound("click");
@@ -814,6 +820,15 @@ namespace KeyPulse
                     Foreground = AppBrush("AppTextPrimaryBrush")
                 }
             };
+        }
+
+        private void NewProfileNameBox_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+        {
+            if (e.Key == Avalonia.Input.Key.Enter)
+            {
+                e.Handled = true;
+                SaveLayout_Click(sender, e);
+            }
         }
 
         private async void SaveLayout_Click(object? sender, RoutedEventArgs e)

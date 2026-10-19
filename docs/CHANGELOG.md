@@ -8,6 +8,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Comprehensive WCAG 2.2 AA Accessibility Polish**: Standardized minimum 24×24px accessible touch and keyboard focus targets on help badges across all windows with explicit `AutomationProperties.Name`, updated Light theme contrast tokens (`AppAccentBrush` `#2563eb`, `AppSuccessBrush` `#15803d`, `AppSuccessSoftBrush` `#166534`) to exceed the 4.5:1 text and 3:1 UI threshold, implemented ordered keyboard `TabIndex` traversal (0 to 18) throughout editor and action controls, added screen-reader naming to table headers and settings tabs, enabled Enter key layout creation in Desktop Organizer, and wired Escape key dismissal to the Setup wipe confirmation modal.
+- **DDC/CI Concurrency Resilience & Twinkle Tray Coexistence**: Implemented a 3-attempt hardware write retry loop with 35ms settling sleep, a 40ms inter-command pause between brightness and contrast writes, direct DDC/CI writes eliminating redundant pre-write I2C reads, and serialized background multi-screen polling in `ReadAllScreensLiveAsync` to prevent GPU I2C multiplexer collisions when running alongside third-party monitor utilities.
+- **Multi-Monitor Differential Lock with Boundary Compression**: Added a relative display brightness differential toggle (`Lock relative display brightness differential`, enabled by default) ensuring connected monitors step up/down in tandem while preserving their relative brightness offset (e.g. Display A stays 15% brighter than Display B). When the lower display reaches 0%, further step-downs smoothly compress the differential until all displays reach 0% (and symmetrically at 100% ceiling).
+- **Linked "All Displays" Master Slider**: Added a master linked slider to both the Quick Sliders (Tray Overlay) popup and the main Screen Brightness window, featuring instant `-5%` and `+5%` stepper buttons to adjust all displays together while preserving their relative differential.
+- **Instant Screen Level Hotkeys**: Added dedicated direct hotkeys in the Screen Brightness window, enabling users to bind custom shortcuts that immediately set a specific display (or all displays) to designated brightness and contrast percentages (e.g. `Ctrl+Alt+1` -> Screen A to 70%).
+- **Top Number Row & Numpad Multi-Key Step Defaults**: Default out-of-the-box brightness step shortcuts now trigger from both the top number row and the numpad (`Ctrl+Alt+=, Ctrl+Alt+NumPadAdd` for Step Up; `Ctrl+Alt+-, Ctrl+Alt+NumPadSubtract` for Step Down).
+- **Dedicated Granular Screen Brightness Shortcuts**: Migrated brightness shortcut configuration into the "Screen Brightness & Contrast Control" window, allowing users to assign dedicated hotkeys directly to individual presets (e.g., `Ctrl+Alt+NumPadDivide`), configure global forward/backward cycle shortcuts (e.g., `Ctrl+Alt+NumPadAdd` and `Ctrl+Alt+NumPadSubtract`), and configure direct `Step Up (+5%)` / `Step Down (-5%)` brightness adjustment shortcuts.
+- **Per-Screen Independent Preset Toggles**: Presets now support individual screen checkboxes (e.g., adjust Display A to 60% while leaving Display B untouched), enabling granular multi-monitor setups without forcing uniform brightness levels across all screens.
+- **Unconditional DDC/CI Blind Write Fallback**: When external displays or GPU drivers reject MCCS/VCP read queries over HDMI/DisplayPort, KeyPulse now automatically falls back to blind writes with default 0..100 ranges using both high-level DXVA2 and low-level VCP opcodes, logging Win32 error codes for deep diagnostics.
+- **Low-Level DDC/CI Hardware Fallback**: Added low-level VCP opcode communication (`0x10` Luminance, `0x12` Contrast via Win32 `SetVCPFeature` and `GetVCPFeatureAndVCPFeatureReply`) to support monitors where high-level MCCS DXVA2 calls fail, restoring responsive screen brightness adjustments across a wider variety of external displays.
+- **Document & Folder Launching**: Expanded the "Launch Program" action to open non-executable documents (e.g. `.html`, `.pdf`, `.txt`) and folders via Windows Shell execution, and updated file browse pickers to include HTML documents.
+- **Local File Web URLs (`file:///`)**: Added support for `file:///` URLs and local `.html` file paths under the "Browse Web" action.
+- **Accessible Table Keyboard Sorting**: Made shortcut table column headers focusable via keyboard (`Tab`), supporting Space/Enter to toggle sort order and Left/Right Arrow keys to navigate between columns.
+- **Unencrypted Target Badge**: Added an explicit `⚠️ Unencrypted` badge in the shortcut list when Windows DPAPI account encryption is unavailable, ensuring security status is communicated accessibly beyond color alone.
+- **One-Click Backup Revelation in File Explorer**: Exporting a backup now displays the full destination path and provides an immediate "Show in File Explorer" button.
+- **Duplicate Shortcut Guided Resolution**: When attempting to add a shortcut that is already registered, KeyPulse now automatically navigates and scrolls directly to the existing shortcut in the list so you can edit or replace it immediately.
+- **Desktop Layout Overwrite Confirmation**: Added a confirmation prompt before overwriting existing saved desktop icon profiles in the Desktop Organizer.
+
+### Changed
+- **Streamlined Screen Brightness Controls**: Removed redundant manual "Read Hardware" and "Cycle Next Step" buttons in favor of automated safe timing background polling and dedicated global preset cycling hotkeys.
+- **Action Button Casing Standardization**: Converted all-caps labels ("RUN", "REMOVE", "DUPLICATE") to accessible Title/Sentence case ("Run", "Remove", "Duplicate").
+- **Anchored Action Name Alignment**: Anchored the Action Name input directly beneath the header label to eliminate floating layout misalignment.
+- **Context-Aware Settings Reset**: Automatically hid the non-applicable "Restore Tab Defaults" button on the Backup settings tab.
+- **Independent Per-Monitor Adjustment**: Individual screen sliders can be adjusted independently at any time, immediately establishing a new differential offset for subsequent linked adjustments and global steps.
+- **Mouse Focus Fallback in Unlocked Mode**: When the relative differential lock is unchecked, global brightness step shortcuts adjust only the display currently under the mouse cursor.
+- **Streamlined Shortcut Action Types**: Removed "Cycle screen brightness" from the main Keys tab action dropdown in favor of the dedicated hotkey controls in the Screen Brightness window.
+- **Clean Preset Creation**: Removed the redundant "Save Current Sliders as Preset" button in favor of a clean "+ Add New Preset" workflow.
+
+### Fixed
+- **Overlay Slider Text Clipping & Overlap**: Added dedicated vertical clearance margins (`Margin="0,0,0,8"` on percentage text, `Margin="0,6,0,8"` on sliders, `Margin="0,6,0,0"` on labels) in the tray Quick Sliders overlay, preventing slider thumbs and text labels from clipping into numeric readouts.
+- **Shortcut Table Header Horizontal Scroll Alignment**: Synchronized the table header margin with `ScrollViewer.Offset.X` so header columns track row columns accurately during horizontal scrolling.
+- **Unsaved Shortcut Draft Protection**: Added an explicit confirmation guard when clicking away to another shortcut row while an uncommitted new shortcut draft is in progress, preventing accidental data loss.
+- **Theme Resource Token Resolution**: Replaced undefined `AppBgBrush` resource reference with `AppSurfaceBrush` in `ScreenBrightnessWindow`.
+- **Manual Update Check Status Feedback**: Added visible "Checking for updates..." status indicators when clicking "Check for Updates" in Settings.
+- **System Tray Quick Sliders Auto-Close on Tray Dismissal**: Fixed an issue where clicking "Quick Sliders (Overlay)" from the system tray menu caused the overlay to immediately close due to Windows deactivation dispatching within 20ms of the context menu dismissing. Implemented a 600ms grace window and cursor-anchored position clamping.
+- **GPU I2C Bus Collisions Across Multiple Displays**: Added a global hardware lock (`HardwareWriteLock`) with a mandatory 30ms settling delay between DDC/CI monitor commands. This eliminates GPU I2C multiplexer collisions that previously dropped commands and caused multi-monitor brightness adjustments to only apply to a single display.
+- **Minus and Hyphen Key Parsing in Shortcut Recorders**: Added virtual key mappings for `-`, `minus`, and `oemminus` (`0xBD`) in `HotkeyManager`, resolving failures where `Ctrl+Alt+-` could not be recorded or bound.
+
+- **False DPAPI Security Alert on Startup**: Fixed an issue where non-secret shortcuts (e.g. plain URLs, script paths) were erroneously flagged as DPAPI encryption failures, triggering an alarming "KeyPulse security notice" on startup or update even though DPAPI was working properly.
+- **Screen Brightness Hotkey Recording & Conflict Resolution**: Fixed hotkey input recording in the Screen Brightness dialog by engaging the low-level keyboard hook on focus, preventing Windows from intercepting combinations like `Ctrl+Alt+NumPadSubtract` as active actions during assignment. Reassigning a combination now automatically clears conflicting duplicates across cycle and step actions.
+- **Long URL Layout Overflow**: Converted editor card layout to a constrained star column and enabled wrapping (`TextWrapping.Wrap`) across all target types, preventing long URLs and script commands from expanding past the window edge and hiding editor action buttons.
+- **Hardware Write Throttle Loop Prevention**: Fixed an issue where unsuccessful hardware writes stalled state timestamps, causing an infinite 250ms retry loop against unresponsive monitor hardware.
+- **Editor Target TextBox Stutter & Ballooning**: Standardized `TargetText` minimum height to a compact 34px across all action types, eliminating sudden 92px height jumps and visual stutter when selecting text typing or paste actions.
+- **Shortcut Table Selection Highlight Overflow**: Constrained `ListBox.ShortcutList ListBoxItem` horizontal alignment to `Left`, preventing the blue selection highlight bar from bleeding beyond the table columns into blank space.
+- **Table Grid Border Polish**: Added an explicit right-hand border to the Actions column in both the header and row templates, ensuring the shortcut table terminates cleanly without bleeding into blank space.
+- **Decoupled Contrast & Brightness Writes**: Hardware brightness adjustments no longer fail or roll back if a connected monitor does not support or rejects contrast adjustments.
+- **Active Slider Protection During Events**: Prevented background configuration sync events from resetting active slider positions while a user is dragging or adjusting brightness sliders.
+- **Unsaved Shortcut Edit Retention**: Switching between rows in the shortcut list now auto-commits in-progress field modifications instead of silently discarding unsaved edits.
+- **Dialog Escape Key Dismissal**: Enabled `Escape` key dismissal across all dynamic application dialogs.
+- **Microcopy & Security Terminology Consistency**: Standardized copy across dialogs and notifications to reference "Hide secret text" instead of legacy "Blur box" phrasing, and sanitized raw exception messages in updater and backup dialogs.
+
 ## [v2026.10.18.2011] - 2026-10-18
 
 ### Added

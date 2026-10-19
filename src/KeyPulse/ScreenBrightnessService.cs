@@ -49,6 +49,7 @@ namespace KeyPulse
         private static ScreenBrightnessConfig? _cachedConfig;
 
         private static readonly object CycleLock = new();
+        private static readonly object HardwareWriteLock = new();
         private static CancellationTokenSource? _cycleCts;
         private static bool _hasStartedCycleInSession;
 
@@ -196,8 +197,11 @@ namespace KeyPulse
         {
             var cfg = new ScreenBrightnessConfig
             {
-                GlobalLockBrightnessContrast = true,
-                LastCycleProfileId = string.Empty,
+                StepUpHotkey = "Ctrl+Alt+=, Ctrl+Alt+NumPadAdd",
+                StepDownHotkey = "Ctrl+Alt+-, Ctrl+Alt+NumPadSubtract",
+                StepDelta = 5,
+                LockMonitorDifferential = true,
+                DirectHotkeys = new List<ScreenDirectHotkey>(),
                 Screens = new List<ScreenHardwareSetting>
                 {
                     new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 65, LastContrast = 65 },
@@ -249,6 +253,22 @@ namespace KeyPulse
 
         private static void NormalizeConfig(ScreenBrightnessConfig cfg)
         {
+            if (string.IsNullOrWhiteSpace(cfg.StepUpHotkey) || string.Equals(cfg.StepUpHotkey, "Ctrl+Alt+NumPadAdd", StringComparison.OrdinalIgnoreCase))
+            {
+                cfg.StepUpHotkey = "Ctrl+Alt+=, Ctrl+Alt+NumPadAdd";
+            }
+            if (string.IsNullOrWhiteSpace(cfg.StepDownHotkey) || string.Equals(cfg.StepDownHotkey, "Ctrl+Alt+NumPadSubtract", StringComparison.OrdinalIgnoreCase))
+            {
+                cfg.StepDownHotkey = "Ctrl+Alt+-, Ctrl+Alt+NumPadSubtract";
+            }
+            cfg.DirectHotkeys ??= new List<ScreenDirectHotkey>();
+            foreach (var dh in cfg.DirectHotkeys)
+            {
+                if (string.IsNullOrWhiteSpace(dh.Id)) dh.Id = Guid.NewGuid().ToString("N");
+                dh.Brightness = Math.Clamp(dh.Brightness, 0, 100);
+                dh.Contrast = Math.Clamp(dh.Contrast, 0, 100);
+            }
+
             cfg.Screens ??= new List<ScreenHardwareSetting>();
             cfg.Profiles ??= new List<ScreenBrightnessProfile>();
 
@@ -520,17 +540,42 @@ namespace KeyPulse
             var cfg = LoadConfig();
             var bound = BindMonitorsToSlots(cfg);
 
-            var tasks = new Task<ScreenLiveState>[MaxScreens];
+            var results = new ScreenLiveState[MaxScreens];
             for (int i = 0; i < MaxScreens; i++)
             {
+                if (ct.IsCancellationRequested) break;
                 int slotIndex = i;
                 var slotCfg = cfg.Screens.First(x => x.SlotIndex == slotIndex);
                 bound.TryGetValue(slotIndex, out var mon);
 
-                tasks[slotIndex] = Task.Run(() => ReadSingleScreenHardware(slotIndex, slotCfg, mon, ct), ct);
+                results[slotIndex] = await Task.Run(() => ReadSingleScreenHardware(slotIndex, slotCfg, mon, ct), ct).ConfigureAwait(false);
+                if (i < MaxScreens - 1 && !ct.IsCancellationRequested)
+                {
+                    await Task.Delay(35, ct).ConfigureAwait(false);
+                }
             }
 
-            var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+            for (int i = 0; i < MaxScreens; i++)
+            {
+                if (results[i] == null)
+                {
+                    var slotCfg = cfg.Screens.First(x => x.SlotIndex == i);
+                    bound.TryGetValue(i, out var mon);
+                    results[i] = new ScreenLiveState
+                    {
+                        SlotIndex = i,
+                        HardwareId = slotCfg.HardwareId,
+                        Nickname = string.IsNullOrWhiteSpace(slotCfg.CustomNickname) ? DefaultSlotName(i) : slotCfg.CustomNickname,
+                        ModelName = mon != null && !string.IsNullOrWhiteSpace(mon.ModelName) ? mon.ModelName : slotCfg.ModelName,
+                        Brightness = Math.Clamp(slotCfg.LastBrightness, 0, 100),
+                        Contrast = slotCfg.LockRatio ? Math.Clamp(slotCfg.LastBrightness, 0, 100) : Math.Clamp(slotCfg.LastContrast, 0, 100),
+                        LockRatio = slotCfg.LockRatio,
+                        IsConnected = mon != null,
+                        IsPrimary = mon?.IsPrimary ?? false,
+                        Bounds = mon?.Bounds ?? default
+                    };
+                }
+            }
 
             lock (ConfigLock)
             {
@@ -662,6 +707,7 @@ namespace KeyPulse
                 slotCfg.LastContrast = contrast;
             }
 
+            Program.LogDebug($"[ScreenBrightness] RequestScreenLevelChange slot={slotIndex} b={brightness} c={contrast} updateContrastFromLock={updateContrastFromLock}");
             QueueThrottledHardwareWrite(slotIndex, brightness, contrast);
         }
 
@@ -693,6 +739,7 @@ namespace KeyPulse
                 }
             }
 
+            Program.LogDebug($"[ScreenBrightness] QueueThrottledHardwareWrite slot={slotIndex} b={brightness} c={contrast} immediate={fireImmediately} delay={delayMs}ms");
             if (fireImmediately)
             {
                 _ = Task.Run(() => ExecutePendingWriteForSlot(slotIndex, throttle));
@@ -725,6 +772,7 @@ namespace KeyPulse
 
                 if (targetB == prevB && targetC == prevC)
                 {
+                    Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} targets unchanged ({targetB}/{targetC})");
                     _ = Task.Run(() =>
                     {
                         var cfg = LoadConfig();
@@ -735,15 +783,20 @@ namespace KeyPulse
                     });
                     return;
                 }
-
-                throttle.LastWrittenBrightness = targetB;
-                throttle.LastWrittenContrast = targetC;
             }
 
             bool changeB = targetB != prevB && targetB >= 0;
             bool changeC = targetC != prevC && targetC >= 0;
 
-            WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, changeB, changeC);
+            Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} writing targetB={targetB} targetC={targetC} changeB={changeB} changeC={changeC}");
+            bool written = WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, changeB, changeC);
+            Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} write result={written}");
+
+            lock (throttle.Sync)
+            {
+                throttle.LastWrittenBrightness = targetB;
+                throttle.LastWrittenContrast = targetC;
+            }
 
             bool needsFollowUp = false;
             lock (throttle.Sync)
@@ -782,32 +835,50 @@ namespace KeyPulse
 
         private static bool WriteSingleScreenHardwareWithRetry(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast)
         {
-            try
+            lock (HardwareWriteLock)
             {
-                var cfg = LoadConfig();
-                var bound = BindMonitorsToSlots(cfg);
-                if (!bound.TryGetValue(slotIndex, out var mon)) return false;
-
-                if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, writeBrightness, writeContrast))
+                try
                 {
-                    return true;
-                }
+                    var cfg = LoadConfig();
+                    var bound = BindMonitorsToSlots(cfg);
+                    if (!bound.TryGetValue(slotIndex, out var mon))
+                    {
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} not found in bound monitors (bound count={bound.Count})");
+                        return false;
+                    }
 
-                if ((mon.IsPrimary || slotIndex == 0) && writeBrightness && TryWriteInternalLcdBrightness(brightness))
-                {
-                    return true;
-                }
+                    Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} hMon={mon.HMonitor} isPrimary={mon.IsPrimary} model={mon.ModelName}");
 
-                var refreshed = BindMonitorsToSlots(cfg);
-                if (refreshed.TryGetValue(slotIndex, out var freshMon))
-                {
-                    return TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
+                    if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, writeBrightness, writeContrast))
+                    {
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} TryWriteDdcMonitor succeeded");
+                        Thread.Sleep(30);
+                        return true;
+                    }
+
+                    if ((mon.IsPrimary || slotIndex == 0) && writeBrightness && TryWriteInternalLcdBrightness(brightness))
+                    {
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} TryWriteInternalLcdBrightness succeeded");
+                        Thread.Sleep(30);
+                        return true;
+                    }
+
+                    Thread.Sleep(50);
+                    var refreshed = BindMonitorsToSlots(cfg);
+                    if (refreshed.TryGetValue(slotIndex, out var freshMon))
+                    {
+                        bool freshOk = TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} retry freshMon hMon={freshMon.HMonitor} result={freshOk}");
+                        Thread.Sleep(30);
+                        return freshOk;
+                    }
                 }
+                catch (Exception ex)
+                {
+                    Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} exception: {ex}");
+                }
+                return false;
             }
-            catch
-            {
-            }
-            return false;
         }
 
         #endregion
@@ -930,12 +1001,12 @@ namespace KeyPulse
         }
 
         /// <summary>
-        /// Advances the brightness cycle step immediately in memory (Lowest first on initial press, then climbing up, then wrapping to lowest).
+        /// Advances the brightness cycle step immediately in memory (Lowest first on initial press, then climbing up, then wrapping to lowest, or vice versa).
         /// Accounts for 1, 2, or 3 active displays by skipping redundant multi-display steps that do not change any currently connected monitor.
         /// Cancels any in-flight hardware command when mashed rapidly in a game and sends only the final target step.
         /// Zero UI/OSD popups so fullscreen games (Fortnite, Valorant, etc.) never lose focus.
         /// </summary>
-        public static void TriggerShortcutCycleStep()
+        public static void TriggerShortcutCycleStep(bool reverse = false)
         {
             ScreenBrightnessProfile? targetProfile = null;
             CancellationToken token;
@@ -944,6 +1015,7 @@ namespace KeyPulse
             {
                 var cfg = LoadConfig();
                 var ordered = GetOrderedCycleProfiles(cfg);
+                if (ordered.Count > 10) ordered = ordered.Take(10).ToList();
                 if (ordered.Count == 0) return;
 
                 var connectedSlots = GetConnectedSlotIndices(cfg);
@@ -955,12 +1027,16 @@ namespace KeyPulse
                     if (currentIndex >= 0 && ordered.Count > 1)
                     {
                         var currentProfile = ordered[currentIndex];
-                        int candidateIndex = (currentIndex + 1) % ordered.Count;
+                        int candidateIndex = reverse
+                            ? (currentIndex - 1 + ordered.Count) % ordered.Count
+                            : (currentIndex + 1) % ordered.Count;
                         nextIndex = candidateIndex;
 
                         for (int step = 0; step < ordered.Count - 1; step++)
                         {
-                            int probeIdx = (currentIndex + 1 + step) % ordered.Count;
+                            int probeIdx = reverse
+                                ? (currentIndex - 1 - step + ordered.Count * 2) % ordered.Count
+                                : (currentIndex + 1 + step) % ordered.Count;
                             if (ProfilesDifferOnConnectedScreens(cfg, currentProfile, ordered[probeIdx], connectedSlots))
                             {
                                 nextIndex = probeIdx;
@@ -1042,13 +1118,216 @@ namespace KeyPulse
             });
         }
 
+        #region Hotkey Registration
+
+        private static readonly List<int> _registeredBrightnessHotkeyIds = new();
+
+        public static void UnregisterAllBrightnessHotkeys()
+        {
+            lock (CycleLock)
+            {
+                foreach (var id in _registeredBrightnessHotkeyIds)
+                {
+                    try { HotkeyManager.Unregister(id); } catch { }
+                }
+                _registeredBrightnessHotkeyIds.Clear();
+            }
+        }
+
+        public static void RegisterBrightnessHotkeys()
+        {
+            lock (CycleLock)
+            {
+                UnregisterAllBrightnessHotkeys();
+                var cfg = LoadConfig();
+
+                void RegisterKeyList(string hotkeys, Action action, string desc)
+                {
+                    if (string.IsNullOrWhiteSpace(hotkeys)) return;
+                    var parts = hotkeys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    foreach (var combo in parts)
+                    {
+                        if (HotkeyManager.Register(combo, action, out int id))
+                        {
+                            _registeredBrightnessHotkeyIds.Add(id);
+                            Program.LogDebug($"[ScreenBrightness] Registered {desc} hotkey: {combo} (id={id})");
+                        }
+                        else
+                        {
+                            Program.LogDebug($"[ScreenBrightness] Failed to register {desc} hotkey: {combo}");
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(cfg.CycleUpHotkey))
+                {
+                    RegisterKeyList(cfg.CycleUpHotkey, () => TriggerShortcutCycleStep(reverse: false), "CycleUp");
+                }
+
+                if (!string.IsNullOrWhiteSpace(cfg.CycleDownHotkey))
+                {
+                    RegisterKeyList(cfg.CycleDownHotkey, () => TriggerShortcutCycleStep(reverse: true), "CycleDown");
+                }
+
+                if (!string.IsNullOrWhiteSpace(cfg.StepUpHotkey))
+                {
+                    int delta = cfg.StepDelta > 0 ? cfg.StepDelta : 5;
+                    RegisterKeyList(cfg.StepUpHotkey, () => TriggerBrightnessStep(delta), "StepUp");
+                }
+
+                if (!string.IsNullOrWhiteSpace(cfg.StepDownHotkey))
+                {
+                    int delta = cfg.StepDelta > 0 ? cfg.StepDelta : 5;
+                    RegisterKeyList(cfg.StepDownHotkey, () => TriggerBrightnessStep(-delta), "StepDown");
+                }
+
+                foreach (var profile in cfg.Profiles)
+                {
+                    if (!string.IsNullOrWhiteSpace(profile.Hotkey))
+                    {
+                        var captured = profile;
+                        RegisterKeyList(profile.Hotkey, () => ApplyProfileAsync(captured), $"Profile '{profile.Name}'");
+                    }
+                }
+
+                if (cfg.DirectHotkeys != null)
+                {
+                    foreach (var dh in cfg.DirectHotkeys)
+                    {
+                        if (!string.IsNullOrWhiteSpace(dh.Hotkey))
+                        {
+                            var capturedDh = dh;
+                            RegisterKeyList(dh.Hotkey, () => TriggerDirectHotkey(capturedDh), $"Direct-{capturedDh.TargetSlotIndex}");
+                        }
+                    }
+                }
+            }
+        }
+
+        public static void TriggerBrightnessStep(int delta)
+        {
+            var cfg = LoadConfig();
+            var connectedSlots = GetConnectedSlotIndices(cfg);
+            if (connectedSlots.Count == 0) return;
+
+            if (cfg.LockMonitorDifferential || connectedSlots.Count == 1)
+            {
+                foreach (var slot in connectedSlots)
+                {
+                    var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
+                    if (screen != null)
+                    {
+                        int newB = Math.Clamp(screen.LastBrightness + delta, 0, 100);
+                        int newC = screen.LockRatio ? newB : Math.Clamp(screen.LastContrast + delta, 0, 100);
+                        RequestScreenLevelChange(slot, newB, newC, updateContrastFromLock: screen.LockRatio);
+                    }
+                }
+            }
+            else
+            {
+                int targetSlot = GetFocusedScreenSlot(cfg);
+                var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == targetSlot)
+                             ?? cfg.Screens.FirstOrDefault(s => s.SlotIndex == connectedSlots[0]);
+                if (screen != null)
+                {
+                    int newB = Math.Clamp(screen.LastBrightness + delta, 0, 100);
+                    int newC = screen.LockRatio ? newB : Math.Clamp(screen.LastContrast + delta, 0, 100);
+                    RequestScreenLevelChange(screen.SlotIndex, newB, newC, updateContrastFromLock: screen.LockRatio);
+                }
+            }
+
+            SaveConfig(cfg);
+            NotifyStateChanged();
+        }
+
+        private static int GetFocusedScreenSlot(ScreenBrightnessConfig cfg)
+        {
+            try
+            {
+                if (GetCursorPos(out POINT pt))
+                {
+                    var hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                    if (hMon != IntPtr.Zero)
+                    {
+                        var bound = BindMonitorsToSlots(cfg);
+                        foreach (var kvp in bound)
+                        {
+                            if (kvp.Value.HMonitor == hMon)
+                            {
+                                return kvp.Key;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            var fallback = GetConnectedSlotIndices(cfg);
+            return fallback.Count > 0 ? fallback[0] : 0;
+        }
+
+        public static void TriggerDirectHotkey(ScreenDirectHotkey dh)
+        {
+            var cfg = LoadConfig();
+            int b = Math.Clamp(dh.Brightness, 0, 100);
+            int c = dh.LockRatio ? b : Math.Clamp(dh.Contrast, 0, 100);
+
+            if (dh.TargetSlotIndex >= 0 && dh.TargetSlotIndex < MaxScreens)
+            {
+                var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == dh.TargetSlotIndex);
+                if (screen != null)
+                {
+                    RequestScreenLevelChange(dh.TargetSlotIndex, b, c, updateContrastFromLock: dh.LockRatio);
+                }
+            }
+            else
+            {
+                var connected = GetConnectedSlotIndices(cfg);
+                foreach (var slot in connected)
+                {
+                    var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
+                    if (screen != null)
+                    {
+                        int targetC = screen.LockRatio ? b : c;
+                        RequestScreenLevelChange(slot, b, targetC, updateContrastFromLock: screen.LockRatio);
+                    }
+                }
+            }
+
+            SaveConfig(cfg);
+            NotifyStateChanged();
+        }
+
+        public static void RequestMasterLevelChange(int deltaBrightness)
+        {
+            var cfg = LoadConfig();
+            var connectedSlots = GetConnectedSlotIndices(cfg);
+            if (connectedSlots.Count == 0 || deltaBrightness == 0) return;
+
+            foreach (var slot in connectedSlots)
+            {
+                var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
+                if (screen != null)
+                {
+                    int newB = Math.Clamp(screen.LastBrightness + deltaBrightness, 0, 100);
+                    int newC = screen.LockRatio ? newB : Math.Clamp(screen.LastContrast + deltaBrightness, 0, 100);
+                    RequestScreenLevelChange(slot, newB, newC, updateContrastFromLock: screen.LockRatio);
+                }
+            }
+
+            SaveConfig(cfg);
+            NotifyStateChanged();
+        }
+
+        #endregion
+
         private static void ApplyProfileToMemory(ScreenBrightnessConfig cfg, ScreenBrightnessProfile profile)
         {
             for (int i = 0; i < MaxScreens; i++)
             {
                 var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == i);
                 var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == i);
-                if (screen != null && target != null)
+                if (screen != null && target != null && target.Enabled)
                 {
                     int b = Math.Clamp(target.Brightness, 0, 100);
                     int c = screen.LockRatio ? b : Math.Clamp(target.Contrast, 0, 100);
@@ -1069,9 +1348,8 @@ namespace KeyPulse
             {
                 if (token.IsCancellationRequested) return;
                 var screenCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
-                var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == slotIndex)
-                          ?? profile.Targets?.FirstOrDefault(t => t.SlotIndex == 0);
-                if (screenCfg == null || target == null) continue;
+                var target = profile.Targets?.FirstOrDefault(t => t.SlotIndex == slotIndex);
+                if (screenCfg == null || target == null || !target.Enabled) continue;
 
                 int targetB = Math.Clamp(target.Brightness, 0, 100);
                 int targetC = screenCfg.LockRatio ? targetB : Math.Clamp(target.Contrast, 0, 100);
@@ -1240,11 +1518,21 @@ namespace KeyPulse
                         supportsBrightness = true;
                         normBrightness = NormalizeTo100(curB, minB, maxB);
                     }
+                    else if (GetVCPFeatureAndVCPFeatureReply(hPhys, 0x10, out _, out uint curVcpB, out uint maxVcpB) && maxVcpB > 0)
+                    {
+                        supportsBrightness = true;
+                        normBrightness = NormalizeTo100(curVcpB, 0, maxVcpB);
+                    }
 
                     if (GetMonitorContrast(hPhys, out uint minC, out uint curC, out uint maxC) && maxC > minC)
                     {
                         supportsContrast = true;
                         normContrast = NormalizeTo100(curC, minC, maxC);
+                    }
+                    else if (GetVCPFeatureAndVCPFeatureReply(hPhys, 0x12, out _, out uint curVcpC, out uint maxVcpC) && maxVcpC > 0)
+                    {
+                        supportsContrast = true;
+                        normContrast = NormalizeTo100(curVcpC, 0, maxVcpC);
                     }
 
                     if (supportsBrightness)
@@ -1273,18 +1561,20 @@ namespace KeyPulse
 
             if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
             {
+                Program.LogDebug($"[DDC] GetNumberOfPhysicalMonitorsFromHMONITOR failed or 0 for hMon={hMonitor}");
                 return false;
             }
 
             var physicalMonitors = new PHYSICAL_MONITOR[count];
             if (!GetPhysicalMonitorsFromHMONITOR(hMonitor, count, physicalMonitors))
             {
+                Program.LogDebug($"[DDC] GetPhysicalMonitorsFromHMONITOR failed for hMon={hMonitor}, count={count}");
                 return false;
             }
 
             try
             {
-                bool allOk = true;
+                bool anySucceeded = false;
 
                 for (int i = 0; i < count; i++)
                 {
@@ -1292,22 +1582,30 @@ namespace KeyPulse
                     if (hPhysical == IntPtr.Zero) continue;
 
                     bool wroteB = false;
+                    bool wroteC = false;
 
                     if (writeBrightness)
                     {
-                        if (GetMonitorBrightness(hPhysical, out uint minB, out uint curB, out uint maxB))
-                        {
-                            uint targetRawB = minB + (uint)Math.Round((maxB - minB) * (Math.Clamp(brightnessPercent, 0, 100) / 100.0));
-                            targetRawB = Math.Clamp(targetRawB, minB, maxB);
+                        uint targetRawB = (uint)Math.Clamp(brightnessPercent, 0, 100);
 
-                            if (SetMonitorBrightness(hPhysical, targetRawB))
+                        for (int attempt = 0; attempt < 3; attempt++)
+                        {
+                            if (attempt > 0)
+                            {
+                                Thread.Sleep(35);
+                            }
+
+                            if (SetMonitorBrightness(hPhysical, targetRawB) || SetVCPFeature(hPhysical, 0x10, targetRawB))
                             {
                                 wroteB = true;
+                                break;
                             }
-                            else
-                            {
-                                allOk = false;
-                            }
+                        }
+
+                        if (!wroteB)
+                        {
+                            int err = Marshal.GetLastWin32Error();
+                            Program.LogDebug($"[DDC] SetMonitorBrightness & SetVCPFeature(0x10) failed after retries on hPhysical={hPhysical}, targetRaw={targetRawB}, win32Err={err}");
                         }
                     }
 
@@ -1315,26 +1613,48 @@ namespace KeyPulse
                     {
                         if (wroteB)
                         {
-                            Thread.Sleep(50);
+                            Thread.Sleep(40);
                         }
 
-                        if (GetMonitorContrast(hPhysical, out uint minC, out uint curC, out uint maxC))
-                        {
-                            uint targetRawC = minC + (uint)Math.Round((maxC - minC) * (Math.Clamp(contrastPercent, 0, 100) / 100.0));
-                            targetRawC = Math.Clamp(targetRawC, minC, maxC);
+                        uint targetRawC = (uint)Math.Clamp(contrastPercent, 0, 100);
 
-                            if (!SetMonitorContrast(hPhysical, targetRawC))
+                        for (int attempt = 0; attempt < 3; attempt++)
+                        {
+                            if (attempt > 0)
                             {
-                                allOk = false;
+                                Thread.Sleep(35);
+                            }
+
+                            if (SetMonitorContrast(hPhysical, targetRawC) || SetVCPFeature(hPhysical, 0x12, targetRawC))
+                            {
+                                wroteC = true;
+                                break;
                             }
                         }
+
+                        if (!wroteC)
+                        {
+                            int err = Marshal.GetLastWin32Error();
+                            Program.LogDebug($"[DDC] SetMonitorContrast & SetVCPFeature(0x12) failed after retries on hPhysical={hPhysical}, targetRaw={targetRawC}, win32Err={err}");
+                        }
+                    }
+
+                    if (writeBrightness && wroteB)
+                    {
+                        anySucceeded = true;
+                    }
+                    else if (!writeBrightness && writeContrast && wroteC)
+                    {
+                        anySucceeded = true;
                     }
                 }
 
-                return allOk;
+                Program.LogDebug($"[DDC] TryWriteDdcMonitor hMon={hMonitor} count={count} writeB={writeBrightness}({brightnessPercent}%) writeC={writeContrast}({contrastPercent}%) -> anySucceeded={anySucceeded}");
+                return anySucceeded;
             }
-            catch
+            catch (Exception ex)
             {
+                Program.LogDebug($"[DDC] TryWriteDdcMonitor exception on hMon={hMonitor}: {ex}");
                 return false;
             }
             finally
@@ -1485,6 +1805,13 @@ namespace KeyPulse
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         private struct RECT
         {
             public int Left;
@@ -1536,6 +1863,14 @@ namespace KeyPulse
         [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
         [DllImport("dxva2.dll", SetLastError = true)]
         private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, out uint pdwNumberOfPhysicalMonitors);
 
@@ -1556,6 +1891,17 @@ namespace KeyPulse
 
         [DllImport("dxva2.dll", SetLastError = true)]
         private static extern bool SetMonitorContrast(IntPtr hMonitor, uint dwNewContrast);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool SetVCPFeature(IntPtr hMonitor, byte bVCPCode, uint dwNewValue);
+
+        [DllImport("dxva2.dll", SetLastError = true)]
+        private static extern bool GetVCPFeatureAndVCPFeatureReply(
+            IntPtr hMonitor,
+            byte bVCPCode,
+            out uint pvct,
+            out uint pdwCurrentValue,
+            out uint pdwMaximumValue);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateFileW(

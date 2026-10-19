@@ -39,6 +39,11 @@
                     <!-- ISSUE_13: soft elevation glow in light mode -->
                     <Color x:Key="ScrollFadeEdgeColor">#302563eb</Color>
                     <SolidColorBrush x:Key="ScrollFadeArrowBrush" Color="#C02563eb" />
+                    <!-- WCAG 2.2 AA compliant contrast overrides for Light theme (ISSUE_02) -->
+                    <SolidColorBrush x:Key="AppAccentBrush" Color="#2563eb" />
+                    <SolidColorBrush x:Key="AppAccentStrongBrush" Color="#1d4ed8" />
+                    <SolidColorBrush x:Key="AppSuccessBrush" Color="#15803d" />
+                    <SolidColorBrush x:Key="AppSuccessSoftBrush" Color="#166534" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
@@ -249,6 +254,7 @@
         </Style>
         <Style Selector="TextBox[AcceptsReturn=True]">
             <Setter Property="VerticalContentAlignment" Value="Top" />
+            <Setter Property="MinHeight" Value="{DynamicResource AppInputMinHeight}" />
         </Style>
         <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
             <Setter Property="BorderBrush" Value="{DynamicResource AppAccentBrush}" />
@@ -290,6 +296,7 @@
         </Style>
         <Style Selector="ListBox.ShortcutList ListBoxItem">
             <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
         </Style>
         <Style Selector="ListBoxItem:pointerover">
             <Setter Property="Background" Value="{DynamicResource AppHoverBrush}" />

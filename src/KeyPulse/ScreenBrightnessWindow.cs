@@ -23,6 +23,14 @@ namespace KeyPulse
         private TextBlock _statusText = null!;
         private CheckBox _globalLockCheck = null!;
         private bool _suppressGlobalLockEvent;
+        private CheckBox _lockDifferentialCheck = null!;
+        private bool _suppressDifferentialCheckEvent;
+        private Border? _masterBar;
+        private Slider? _masterSlider;
+        private TextBlock? _masterValueText;
+        private int _lastMasterValue = 50;
+        private bool _suppressMasterEvents;
+        private StackPanel? _directHotkeysStack;
         private CancellationTokenSource? _liveReadCts;
 
         public ScreenBrightnessWindow()
@@ -31,7 +39,7 @@ namespace KeyPulse
             MinWidth = 780;
             MinHeight = 640;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
-            Background = ScreenBrightnessOverlayWindow.AppBrush("AppBgBrush", "#0B0F19");
+            Background = ScreenBrightnessOverlayWindow.AppBrush("AppSurfaceBrush", "#0B0F19");
             Focusable = true;
 
             ApplySavedWindowGeometry();
@@ -136,15 +144,16 @@ namespace KeyPulse
                 Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
                 BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(9),
-                Width = 17,
-                Height = 17,
+                CornerRadius = new CornerRadius(12),
+                Width = 24,
+                Height = 24,
+                Focusable = true,
                 VerticalAlignment = VerticalAlignment.Center,
                 Cursor = new Cursor(StandardCursorType.Help),
                 Child = new TextBlock
                 {
                     Text = "?",
-                    FontSize = 10.5,
+                    FontSize = 11,
                     FontWeight = FontWeight.Bold,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center,
@@ -152,6 +161,7 @@ namespace KeyPulse
                 }
             };
             ToolTip.SetTip(badge, tooltipText);
+            Avalonia.Automation.AutomationProperties.SetName(badge, "Help: " + tooltipText);
             return badge;
         }
 
@@ -246,40 +256,6 @@ namespace KeyPulse
             };
             topButtons.Children.Add(identifyBtn);
 
-            var refreshBtn = new Button
-            {
-                Content = "Read Hardware",
-                Classes = { "Secondary" },
-                Padding = new Thickness(10, 6),
-                FontSize = 12,
-                TabIndex = 2
-            };
-            ToolTip.SetTip(refreshBtn, "Query all connected monitors right now to read their current physical brightness and contrast levels.");
-            refreshBtn.Click += async (_, _) =>
-            {
-                Program.PlaySound("click");
-                for (int i = 0; i < _containers.Length; i++) _containers[i].UserTouched = false;
-                await RefreshHardwareAsync();
-            };
-            topButtons.Children.Add(refreshBtn);
-
-            var testCycleBtn = new Button
-            {
-                Content = "Cycle Next Step",
-                Classes = { "Primary" },
-                Padding = new Thickness(10, 6),
-                FontSize = 12,
-                TabIndex = 3
-            };
-            ToolTip.SetTip(testCycleBtn, "Test cycling to the next brightness preset (starts at lowest brightness, climbs up, then wraps back to lowest).");
-            testCycleBtn.Click += (_, _) =>
-            {
-                Program.PlaySound("click");
-                ScreenBrightnessService.TriggerShortcutCycleStep();
-                SetStatus("Cycled to next brightness step (Lowest-First order).", true);
-            };
-            topButtons.Children.Add(testCycleBtn);
-
             Grid.SetColumn(topButtons, 1);
             headerGrid.Children.Add(topButtons);
             Grid.SetRow(headerGrid, 0);
@@ -313,13 +289,13 @@ namespace KeyPulse
             var globalLockRow = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                Spacing = 8,
+                Spacing = 16,
                 VerticalAlignment = VerticalAlignment.Center
             };
 
             _globalLockCheck = new CheckBox
             {
-                Content = "Sync brightness and contrast across all screens",
+                Content = "Sync Brightness & Contrast (1:1 ratio)",
                 IsChecked = cfg.GlobalLockBrightnessContrast,
                 FontWeight = FontWeight.SemiBold,
                 FontSize = 12.5,
@@ -328,7 +304,28 @@ namespace KeyPulse
             ToolTip.SetTip(_globalLockCheck, "When enabled, moving a Brightness slider automatically sets Contrast to the same percentage on all displays. Uncheck to adjust Contrast independently.");
             _globalLockCheck.IsCheckedChanged += OnGlobalLockChanged;
             globalLockRow.Children.Add(_globalLockCheck);
-            globalLockRow.Children.Add(CreateHelpBadge("Keeps Brightness and Contrast locked at a 1:1 ratio across every connected screen. Turn this off if you want separate Brightness and Contrast sliders for your displays or presets."));
+
+            _lockDifferentialCheck = new CheckBox
+            {
+                Content = "Lock relative brightness differential",
+                IsChecked = cfg.LockMonitorDifferential,
+                FontWeight = FontWeight.SemiBold,
+                FontSize = 12.5,
+                TabIndex = 5
+            };
+            ToolTip.SetTip(_lockDifferentialCheck, "When enabled, stepping or moving the All Displays slider adjusts all monitors together while preserving their relative difference (e.g. Screen A stays 15% brighter than Screen B).");
+            _lockDifferentialCheck.IsCheckedChanged += (s, e) =>
+            {
+                if (_suppressDifferentialCheckEvent) return;
+                var currentCfg = ScreenBrightnessService.LoadConfig();
+                currentCfg.LockMonitorDifferential = _lockDifferentialCheck.IsChecked == true;
+                ScreenBrightnessService.SaveConfig(currentCfg);
+                SetStatus(currentCfg.LockMonitorDifferential
+                    ? "Locked relative monitor brightness differential."
+                    : "Unlocked relative monitor brightness differential (step hotkeys adjust mouse-focused display only).", true);
+            };
+            globalLockRow.Children.Add(_lockDifferentialCheck);
+            globalLockRow.Children.Add(CreateHelpBadge("Lock relative differential: preserves the offset between monitors when stepping or moving all displays together (compressing naturally at 0% or 100%).\nSync Brightness & Contrast: keeps Contrast matched to Brightness at 1:1."));
 
             Grid.SetColumn(globalLockRow, 0);
             globalBarGrid.Children.Add(globalLockRow);
@@ -374,6 +371,110 @@ namespace KeyPulse
             globalBar.Child = globalBarGrid;
             contentStack.Children.Add(globalBar);
 
+            _masterBar = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(14, 10),
+                Margin = new Thickness(0, 0, 0, 2),
+                IsVisible = false
+            };
+
+            var masterGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto,Auto"),
+                ColumnSpacing = 10
+            };
+
+            var masterLabel = new TextBlock
+            {
+                Text = "All Displays (Linked Master):",
+                FontSize = 12.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(masterLabel, 0);
+            masterGrid.Children.Add(masterLabel);
+
+            var masterMinusBtn = new Button
+            {
+                Content = "-5%",
+                Classes = { "Secondary" },
+                Padding = new Thickness(10, 4),
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(masterMinusBtn, "Step all displays down by 5% (preserves differential, clamps at 0%)");
+            masterMinusBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                ScreenBrightnessService.TriggerBrightnessStep(-5);
+            };
+            Grid.SetColumn(masterMinusBtn, 1);
+            masterGrid.Children.Add(masterMinusBtn);
+
+            _masterSlider = new Slider
+            {
+                Orientation = Orientation.Horizontal,
+                Minimum = 0,
+                Maximum = 100,
+                Value = 50,
+                TickFrequency = 1,
+                IsSnapToTickEnabled = true,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(_masterSlider, "Drag to adjust all displays together while maintaining their relative brightness differential.");
+            _masterSlider.PropertyChanged += (_, pe) =>
+            {
+                if (pe.Property != RangeBase.ValueProperty || _suppressMasterEvents) return;
+                int currentVal = (int)Math.Round(_masterSlider.Value);
+                int delta = currentVal - _lastMasterValue;
+                if (delta != 0)
+                {
+                    _lastMasterValue = currentVal;
+                    if (_masterValueText != null) _masterValueText.Text = currentVal.ToString();
+                    ScreenBrightnessService.RequestMasterLevelChange(delta);
+                }
+            };
+            Grid.SetColumn(_masterSlider, 2);
+            masterGrid.Children.Add(_masterSlider);
+
+            var masterPlusBtn = new Button
+            {
+                Content = "+5%",
+                Classes = { "Secondary" },
+                Padding = new Thickness(10, 4),
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(masterPlusBtn, "Step all displays up by 5% (preserves differential, clamps at 100%)");
+            masterPlusBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                ScreenBrightnessService.TriggerBrightnessStep(5);
+            };
+            Grid.SetColumn(masterPlusBtn, 3);
+            masterGrid.Children.Add(masterPlusBtn);
+
+            _masterValueText = new TextBlock
+            {
+                Text = "50",
+                FontSize = 12.5,
+                FontWeight = FontWeight.Bold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                VerticalAlignment = VerticalAlignment.Center,
+                MinWidth = 28,
+                TextAlignment = TextAlignment.Right
+            };
+            Grid.SetColumn(_masterValueText, 4);
+            masterGrid.Children.Add(_masterValueText);
+
+            _masterBar.Child = masterGrid;
+            contentStack.Children.Add(_masterBar);
+
             _containersGrid = new Grid
             {
                 ColumnDefinitions = new ColumnDefinitions("*"),
@@ -397,6 +498,9 @@ namespace KeyPulse
 
             UpdateVisibleScreenContainers(initialStates);
             contentStack.Children.Add(_containersGrid);
+
+            var directHotkeysBorder = CreateDirectHotkeysPanel(cfg);
+            contentStack.Children.Add(directHotkeysBorder);
 
             var presetsPanelBorder = new Border
             {
@@ -439,21 +543,24 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            var addFromCurrentBtn = new Button
+            var addPresetBtn = new Button
             {
-                Content = "+ Save Current Sliders as Preset",
+                Content = "+ Add New Preset",
                 Classes = { "Primary" },
                 Padding = new Thickness(12, 6),
                 FontSize = 12,
                 TabIndex = 7
             };
-            ToolTip.SetTip(addFromCurrentBtn, "Create a new brightness preset using the current Screen A, B, and C slider percentages.");
-            addFromCurrentBtn.Click += OnSaveCurrentSlidersAsPreset;
-            addPresetButtons.Children.Add(addFromCurrentBtn);
+            ToolTip.SetTip(addPresetBtn, "Create a new brightness preset with custom display levels and optional shortcut key.");
+            addPresetBtn.Click += OnAddNewPreset;
+            addPresetButtons.Children.Add(addPresetBtn);
 
             Grid.SetColumn(addPresetButtons, 1);
             presetsHeader.Children.Add(addPresetButtons);
             presetsStack.Children.Add(presetsHeader);
+
+            var cycleHotkeysBorder = CreateCycleHotkeysPanel(cfg);
+            presetsStack.Children.Add(cycleHotkeysBorder);
 
             _profilesStack = new StackPanel { Spacing = 8 };
             presetsStack.Children.Add(_profilesStack);
@@ -498,6 +605,7 @@ namespace KeyPulse
 
             Content = rootGrid;
             RenderProfilesList();
+            RenderDirectHotkeysList();
         }
 
         private async Task<bool> ConfirmActionAsync(string title, string message, string confirmButtonText)
@@ -511,7 +619,7 @@ namespace KeyPulse
                 CanResize = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Icon = Icon,
-                Background = ScreenBrightnessOverlayWindow.AppBrush("AppBgBrush", "#0B0F19")
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppSurfaceBrush", "#101827")
             };
 
             var root = new StackPanel { Margin = new Thickness(20), Spacing = 14 };
@@ -620,7 +728,12 @@ namespace KeyPulse
                 }
             }
 
+            _suppressDifferentialCheckEvent = true;
+            _lockDifferentialCheck.IsChecked = cfg.LockMonitorDifferential;
+            _suppressDifferentialCheckEvent = false;
+
             RenderProfilesList();
+            RenderDirectHotkeysList();
             Program.PlaySound("click");
             SetStatus("✓ Restored default Screen Brightness settings and presets.", true);
         }
@@ -667,7 +780,744 @@ namespace KeyPulse
                 : "Unlocked independent Brightness & Contrast sliders.", true);
         }
 
-        private void OnSaveCurrentSlidersAsPreset(object? sender, RoutedEventArgs e)
+        private Border CreateCycleHotkeysPanel(ScreenBrightnessConfig cfg)
+        {
+            var border = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(14, 10),
+                Margin = new Thickness(0, 4, 0, 8)
+            };
+
+            var root = new StackPanel { Spacing = 6 };
+
+            var header = new TextBlock
+            {
+                Text = "Brightness Shortcut Keys",
+                FontWeight = FontWeight.Bold,
+                FontSize = 12.5,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC")
+            };
+            root.Children.Add(header);
+
+            var controlsRow = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 4, 0, 0)
+            };
+
+            var upStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 6)
+            };
+            upStack.Children.Add(new TextBlock
+            {
+                Text = "Cycle Forward:",
+                FontSize = 11.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            var upBox = new TextBox
+            {
+                Text = cfg.CycleUpHotkey,
+                PlaceholderText = "e.g. Ctrl+Alt+Add",
+                Width = 170,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var downBox = new TextBox
+            {
+                Text = cfg.CycleDownHotkey,
+                PlaceholderText = "e.g. Ctrl+Alt+Subtract",
+                Width = 170,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var stepUpBox = new TextBox
+            {
+                Text = cfg.StepUpHotkey,
+                PlaceholderText = "e.g. Ctrl+Alt+Up",
+                Width = 150,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var stepDownBox = new TextBox
+            {
+                Text = cfg.StepDownHotkey,
+                PlaceholderText = "e.g. Ctrl+Alt+Down",
+                Width = 150,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            void ClearConflicting(string hotkey, TextBox caller)
+            {
+                if (string.IsNullOrWhiteSpace(hotkey)) return;
+                if (caller != upBox && string.Equals(cfg.CycleUpHotkey, hotkey, StringComparison.OrdinalIgnoreCase))
+                {
+                    cfg.CycleUpHotkey = string.Empty;
+                    upBox.Text = string.Empty;
+                }
+                if (caller != downBox && string.Equals(cfg.CycleDownHotkey, hotkey, StringComparison.OrdinalIgnoreCase))
+                {
+                    cfg.CycleDownHotkey = string.Empty;
+                    downBox.Text = string.Empty;
+                }
+                if (caller != stepUpBox && string.Equals(cfg.StepUpHotkey, hotkey, StringComparison.OrdinalIgnoreCase))
+                {
+                    cfg.StepUpHotkey = string.Empty;
+                    stepUpBox.Text = string.Empty;
+                }
+                if (caller != stepDownBox && string.Equals(cfg.StepDownHotkey, hotkey, StringComparison.OrdinalIgnoreCase))
+                {
+                    cfg.StepDownHotkey = string.Empty;
+                    stepDownBox.Text = string.Empty;
+                }
+            }
+
+            AttachHotkeyRecorder(upBox, combo =>
+            {
+                ClearConflicting(combo, upBox);
+                cfg.CycleUpHotkey = combo;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus(string.IsNullOrWhiteSpace(combo) ? "Cleared Cycle Forward hotkey." : $"Set Cycle Forward hotkey to {combo}.", true);
+            });
+            var upClearBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                Padding = new Thickness(6, 4),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(upClearBtn, "Clear Cycle Forward hotkey");
+            upClearBtn.Click += (_, _) =>
+            {
+                upBox.Text = string.Empty;
+                cfg.CycleUpHotkey = string.Empty;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus("Cleared Cycle Forward hotkey.", true);
+            };
+            upStack.Children.Add(upBox);
+            upStack.Children.Add(upClearBtn);
+            controlsRow.Children.Add(upStack);
+
+            var downStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 6)
+            };
+            downStack.Children.Add(new TextBlock
+            {
+                Text = "Cycle Backward:",
+                FontSize = 11.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            AttachHotkeyRecorder(downBox, combo =>
+            {
+                ClearConflicting(combo, downBox);
+                cfg.CycleDownHotkey = combo;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus(string.IsNullOrWhiteSpace(combo) ? "Cleared Cycle Backward hotkey." : $"Set Cycle Backward hotkey to {combo}.", true);
+            });
+            var downClearBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                Padding = new Thickness(6, 4),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(downClearBtn, "Clear Cycle Backward hotkey");
+            downClearBtn.Click += (_, _) =>
+            {
+                downBox.Text = string.Empty;
+                cfg.CycleDownHotkey = string.Empty;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus("Cleared Cycle Backward hotkey.", true);
+            };
+            downStack.Children.Add(downBox);
+            downStack.Children.Add(downClearBtn);
+            controlsRow.Children.Add(downStack);
+
+            var stepUpStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 6)
+            };
+            stepUpStack.Children.Add(new TextBlock
+            {
+                Text = "Step Up (+5%):",
+                FontSize = 11.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            AttachHotkeyRecorder(stepUpBox, combo =>
+            {
+                ClearConflicting(combo, stepUpBox);
+                cfg.StepUpHotkey = combo;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus(string.IsNullOrWhiteSpace(combo) ? "Cleared Step Up hotkey." : $"Set Step Up hotkey to {combo}.", true);
+            });
+            var stepUpClearBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                Padding = new Thickness(6, 4),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(stepUpClearBtn, "Clear Step Up hotkey");
+            stepUpClearBtn.Click += (_, _) =>
+            {
+                stepUpBox.Text = string.Empty;
+                cfg.StepUpHotkey = string.Empty;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus("Cleared Step Up hotkey.", true);
+            };
+            stepUpStack.Children.Add(stepUpBox);
+            stepUpStack.Children.Add(stepUpClearBtn);
+            controlsRow.Children.Add(stepUpStack);
+
+            var stepDownStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 6)
+            };
+            stepDownStack.Children.Add(new TextBlock
+            {
+                Text = "Step Down (-5%):",
+                FontSize = 11.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            AttachHotkeyRecorder(stepDownBox, combo =>
+            {
+                ClearConflicting(combo, stepDownBox);
+                cfg.StepDownHotkey = combo;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus(string.IsNullOrWhiteSpace(combo) ? "Cleared Step Down hotkey." : $"Set Step Down hotkey to {combo}.", true);
+            });
+            var stepDownClearBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                Padding = new Thickness(6, 4),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(stepDownClearBtn, "Clear Step Down hotkey");
+            stepDownClearBtn.Click += (_, _) =>
+            {
+                stepDownBox.Text = string.Empty;
+                cfg.StepDownHotkey = string.Empty;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus("Cleared Step Down hotkey.", true);
+            };
+            stepDownStack.Children.Add(stepDownBox);
+            stepDownStack.Children.Add(stepDownClearBtn);
+            controlsRow.Children.Add(stepDownStack);
+
+            root.Children.Add(controlsRow);
+
+            var hint = new TextBlock
+            {
+                Text = "Cycle hotkeys step through presets (up to 10 presets) in lowest-first order. Step hotkeys bump brightness by ±5%. Individual presets can also have their own dedicated shortcut below.",
+                FontSize = 11,
+                Classes = { "Muted" },
+                TextWrapping = TextWrapping.Wrap
+            };
+            root.Children.Add(hint);
+
+            border.Child = root;
+            return border;
+        }
+
+        private Border CreateDirectHotkeysPanel(ScreenBrightnessConfig cfg)
+        {
+            var border = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelBrush", "#111827"),
+                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#1F2937"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(16, 14),
+                Margin = new Thickness(0, 4, 0, 0)
+            };
+
+            var stack = new StackPanel { Spacing = 10 };
+
+            var headerGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto")
+            };
+
+            var titleStack = new StackPanel { Spacing = 2 };
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = "Instant Screen Level Hotkeys",
+                FontSize = 15,
+                FontWeight = FontWeight.Bold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC")
+            });
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = "Assign direct shortcuts to set a specific display (or all displays) directly to preset brightness & contrast values (e.g. Ctrl+Alt+1 -> Screen A to 70%).",
+                FontSize = 11.5,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                TextWrapping = TextWrapping.Wrap
+            });
+            Grid.SetColumn(titleStack, 0);
+            headerGrid.Children.Add(titleStack);
+
+            var addBtn = new Button
+            {
+                Content = "+ Add Instant Hotkey",
+                Classes = { "Primary" },
+                Padding = new Thickness(12, 6),
+                FontSize = 12
+            };
+            ToolTip.SetTip(addBtn, "Add a new direct shortcut key for a specific display or all displays.");
+            addBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                var currentCfg = ScreenBrightnessService.LoadConfig();
+                currentCfg.DirectHotkeys.Add(new ScreenDirectHotkey
+                {
+                    Name = $"Instant {currentCfg.DirectHotkeys.Count + 1}",
+                    TargetSlotIndex = -1,
+                    Brightness = 65,
+                    Contrast = 65,
+                    LockRatio = true,
+                    Hotkey = string.Empty
+                });
+                ScreenBrightnessService.SaveConfig(currentCfg);
+                RenderDirectHotkeysList();
+                SetStatus("Added new instant screen level hotkey. Press keys in the Shortcut box to record your combo.", true);
+            };
+            Grid.SetColumn(addBtn, 1);
+            headerGrid.Children.Add(addBtn);
+            stack.Children.Add(headerGrid);
+
+            _directHotkeysStack = new StackPanel { Spacing = 8 };
+            stack.Children.Add(_directHotkeysStack);
+
+            border.Child = stack;
+            return border;
+        }
+
+        private void RenderDirectHotkeysList()
+        {
+            if (_directHotkeysStack == null) return;
+            _directHotkeysStack.Children.Clear();
+
+            var cfg = ScreenBrightnessService.LoadConfig();
+            if (cfg.DirectHotkeys == null || cfg.DirectHotkeys.Count == 0)
+            {
+                var emptyBlock = new TextBlock
+                {
+                    Text = "No instant hotkeys configured. Click '+ Add Instant Hotkey' to create dedicated shortcuts for individual displays.",
+                    FontSize = 11.5,
+                    Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#64748B"),
+                    Margin = new Thickness(4, 4, 0, 4)
+                };
+                _directHotkeysStack.Children.Add(emptyBlock);
+                return;
+            }
+
+            for (int idx = 0; idx < cfg.DirectHotkeys.Count; idx++)
+            {
+                var dh = cfg.DirectHotkeys[idx];
+                _directHotkeysStack.Children.Add(CreateDirectHotkeyRow(dh, cfg, idx));
+            }
+        }
+
+        private Border CreateDirectHotkeyRow(ScreenDirectHotkey dh, ScreenBrightnessConfig cfg, int index)
+        {
+            var card = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 10)
+            };
+
+            var grid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,*,Auto,Auto"),
+                ColumnSpacing = 14,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var targetStack = new StackPanel
+            {
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            targetStack.Children.Add(new TextBlock
+            {
+                Text = "Target Screen:",
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+            });
+
+            var screenNames = new List<string> { "All Displays" };
+            for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
+            {
+                var sCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == i);
+                string slotTitle = ScreenBrightnessService.DefaultSlotName(i);
+                if (sCfg != null && !string.IsNullOrWhiteSpace(sCfg.CustomNickname) &&
+                    !string.Equals(sCfg.CustomNickname, slotTitle, StringComparison.OrdinalIgnoreCase))
+                {
+                    slotTitle = $"{slotTitle} ({sCfg.CustomNickname})";
+                }
+                screenNames.Add(slotTitle);
+            }
+
+            var targetCombo = new ComboBox
+            {
+                ItemsSource = screenNames.ToArray(),
+                SelectedIndex = dh.TargetSlotIndex < 0 ? 0 : Math.Clamp(dh.TargetSlotIndex + 1, 0, screenNames.Count - 1),
+                Width = 140,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(targetCombo, "Select which display this hotkey controls (or All Displays).");
+            targetCombo.SelectionChanged += (_, _) =>
+            {
+                dh.TargetSlotIndex = targetCombo.SelectedIndex == 0 ? -1 : targetCombo.SelectedIndex - 1;
+                ScreenBrightnessService.SaveConfig(cfg);
+            };
+            targetStack.Children.Add(targetCombo);
+            Grid.SetColumn(targetStack, 0);
+            grid.Children.Add(targetStack);
+
+            var bStack = new StackPanel
+            {
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            bStack.Children.Add(new TextBlock
+            {
+                Text = "Brightness:",
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+            });
+
+            var bRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var bSlider = new Slider
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = dh.Brightness,
+                Width = 100,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var bVal = new TextBlock
+            {
+                Text = $"{dh.Brightness}%",
+                FontSize = 11.5,
+                FontWeight = FontWeight.Bold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                MinWidth = 36,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            bRow.Children.Add(bSlider);
+            bRow.Children.Add(bVal);
+            bStack.Children.Add(bRow);
+            Grid.SetColumn(bStack, 1);
+            grid.Children.Add(bStack);
+
+            var cStack = new StackPanel
+            {
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var lockChk = new CheckBox
+            {
+                Content = "Sync Contrast",
+                IsChecked = dh.LockRatio,
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var cRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var cSlider = new Slider
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = dh.Contrast,
+                Width = 80,
+                IsEnabled = !dh.LockRatio,
+                Opacity = dh.LockRatio ? 0.35 : 1.0,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var cVal = new TextBlock
+            {
+                Text = $"{dh.Contrast}%",
+                FontSize = 11.5,
+                FontWeight = FontWeight.Bold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                MinWidth = 36,
+                Opacity = dh.LockRatio ? 0.35 : 1.0,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            bSlider.PropertyChanged += (_, pe) =>
+            {
+                if (pe.Property != RangeBase.ValueProperty) return;
+                int val = (int)Math.Round(bSlider.Value);
+                dh.Brightness = val;
+                bVal.Text = $"{val}%";
+                if (dh.LockRatio)
+                {
+                    dh.Contrast = val;
+                    cSlider.Value = val;
+                    cVal.Text = $"{val}%";
+                }
+                ScreenBrightnessService.SaveConfig(cfg);
+            };
+            cSlider.PropertyChanged += (_, pe) =>
+            {
+                if (pe.Property != RangeBase.ValueProperty || dh.LockRatio) return;
+                int val = (int)Math.Round(cSlider.Value);
+                dh.Contrast = val;
+                cVal.Text = $"{val}%";
+                ScreenBrightnessService.SaveConfig(cfg);
+            };
+            lockChk.IsCheckedChanged += (_, _) =>
+            {
+                dh.LockRatio = lockChk.IsChecked == true;
+                cSlider.IsEnabled = !dh.LockRatio;
+                cSlider.Opacity = dh.LockRatio ? 0.35 : 1.0;
+                cVal.Opacity = dh.LockRatio ? 0.35 : 1.0;
+                if (dh.LockRatio)
+                {
+                    dh.Contrast = dh.Brightness;
+                    cSlider.Value = dh.Brightness;
+                    cVal.Text = $"{dh.Brightness}%";
+                }
+                ScreenBrightnessService.SaveConfig(cfg);
+            };
+            cStack.Children.Add(lockChk);
+            cRow.Children.Add(cSlider);
+            cRow.Children.Add(cVal);
+            cStack.Children.Add(cRow);
+            Grid.SetColumn(cStack, 2);
+            grid.Children.Add(cStack);
+
+            var hkStack = new StackPanel
+            {
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            hkStack.Children.Add(new TextBlock
+            {
+                Text = "Shortcut Key:",
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+            });
+            var hkRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 4,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var hkBox = new TextBox
+            {
+                Text = dh.Hotkey,
+                PlaceholderText = "e.g. Ctrl+Alt+1",
+                Width = 140,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            AttachHotkeyRecorder(hkBox, combo =>
+            {
+                dh.Hotkey = combo;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus(string.IsNullOrWhiteSpace(combo)
+                    ? "Cleared shortcut for instant preset."
+                    : $"Assigned {combo} to instant preset.", true);
+            });
+            var hkClearBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                Padding = new Thickness(6, 4),
+                FontSize = 10,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(hkClearBtn, "Clear shortcut key");
+            hkClearBtn.Click += (_, _) =>
+            {
+                hkBox.Text = string.Empty;
+                dh.Hotkey = string.Empty;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus("Cleared instant shortcut.", true);
+            };
+            hkRow.Children.Add(hkBox);
+            hkRow.Children.Add(hkClearBtn);
+            hkStack.Children.Add(hkRow);
+            Grid.SetColumn(hkStack, 3);
+            grid.Children.Add(hkStack);
+
+            var applyBtn = new Button
+            {
+                Content = "Apply",
+                Classes = { "Secondary" },
+                Padding = new Thickness(10, 5),
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(applyBtn, "Apply these brightness & contrast levels right now.");
+            applyBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                ScreenBrightnessService.TriggerDirectHotkey(dh);
+                SetStatus($"Applied instant preset ({dh.Brightness}%).", true);
+            };
+            Grid.SetColumn(applyBtn, 4);
+            grid.Children.Add(applyBtn);
+
+            var delBtn = new Button
+            {
+                Content = "🗑",
+                Classes = { "Danger" },
+                Padding = new Thickness(8, 5),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(delBtn, "Delete this instant hotkey.");
+            delBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                cfg.DirectHotkeys.Remove(dh);
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                RenderDirectHotkeysList();
+                SetStatus("Deleted instant hotkey.", true);
+            };
+            Grid.SetColumn(delBtn, 5);
+            grid.Children.Add(delBtn);
+
+            card.Child = grid;
+            return card;
+        }
+
+        public static void AttachHotkeyRecorder(TextBox box, Action<string> onUpdated)
+        {
+            Action<int, bool, bool, bool, bool> rawHandler = (vk, ctrl, alt, shift, win) =>
+            {
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    if (!box.IsFocused) return;
+                    if (vk == 0x1B || vk == 0x08 || vk == 0x2E)
+                    {
+                        box.Text = string.Empty;
+                        onUpdated(string.Empty);
+                        return;
+                    }
+                    if (vk == 0x09) return;
+
+                    var parts = new List<string>();
+                    if (ctrl) parts.Add("Ctrl");
+                    if (alt) parts.Add("Alt");
+                    if (shift) parts.Add("Shift");
+                    if (win) parts.Add("Win");
+
+                    bool isModifierOnly = (vk == 0x10 || vk == 0x11 || vk == 0x12 || vk == 0x5B || vk == 0x5C ||
+                                           vk == 0xA0 || vk == 0xA1 || vk == 0xA2 || vk == 0xA3 || vk == 0xA4 || vk == 0xA5);
+
+                    if (!isModifierOnly)
+                    {
+                        string keyName = HotkeyManager.VirtualKeyToName((uint)vk);
+                        if (!string.IsNullOrWhiteSpace(keyName))
+                        {
+                            parts.Add(keyName);
+                            string combo = string.Join("+", parts);
+                            box.Text = combo;
+                            onUpdated(combo);
+                        }
+                    }
+                    else if (parts.Count > 0)
+                    {
+                        box.Text = string.Join("+", parts) + "+";
+                    }
+                });
+            };
+
+            box.GotFocus += (_, _) =>
+            {
+                HotkeyManager.OnRawKey += rawHandler;
+                HotkeyManager.EnableCaptureHook();
+            };
+
+            box.LostFocus += (_, _) =>
+            {
+                HotkeyManager.OnRawKey -= rawHandler;
+                HotkeyManager.DisableCaptureHook();
+            };
+
+            box.KeyDown += (s, e) =>
+            {
+                if (e.Key == Key.Tab)
+                {
+                    e.Handled = false;
+                    return;
+                }
+
+                if (e.Key == Key.Escape || e.Key == Key.Delete || e.Key == Key.Back)
+                {
+                    box.Text = string.Empty;
+                    onUpdated(string.Empty);
+                    e.Handled = true;
+                    return;
+                }
+
+                e.Handled = true;
+            };
+        }
+
+        private void OnAddNewPreset(object? sender, RoutedEventArgs e)
         {
             Program.PlaySound("click");
             var cfg = ScreenBrightnessService.LoadConfig();
@@ -676,23 +1526,22 @@ namespace KeyPulse
             var targets = new List<ScreenCycleEntry>();
             for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
             {
-                int b = (int)Math.Round(_containers[i].BrightnessSlider.Value);
-                int c = (int)Math.Round(_containers[i].ContrastSlider.Value);
                 targets.Add(new ScreenCycleEntry
                 {
                     SlotIndex = i,
-                    Brightness = b,
-                    Contrast = c
+                    Brightness = 50,
+                    Contrast = 50,
+                    Enabled = true
                 });
             }
 
-            int b0 = targets[0].Brightness;
-            string baseName = $"Custom {b0}%";
+            int count = cfg.Profiles.Count + 1;
+            string baseName = $"Preset {count}";
             string candidate = baseName;
             int suffix = 2;
             while (cfg.Profiles.Any(p => string.Equals(p.Name, candidate, StringComparison.OrdinalIgnoreCase)))
             {
-                candidate = $"{baseName} ({suffix++})";
+                candidate = $"Preset {count} ({suffix++})";
             }
 
             var newProfile = new ScreenBrightnessProfile
@@ -705,6 +1554,7 @@ namespace KeyPulse
 
             cfg.Profiles.Add(newProfile);
             ScreenBrightnessService.SaveConfig(cfg);
+            ScreenBrightnessService.RegisterBrightnessHotkeys();
             ScreenBrightnessService.NotifyStateChanged();
             RenderProfilesList();
             SetStatus($"Added preset \"{newProfile.Name}\".", true);
@@ -889,7 +1739,12 @@ namespace KeyPulse
                 Program.PlaySound("click");
                 for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
                 {
-                    var t = profile.Targets.First(x => x.SlotIndex == i);
+                    var t = profile.Targets.FirstOrDefault(x => x.SlotIndex == i);
+                    if (t == null)
+                    {
+                        t = new ScreenCycleEntry { SlotIndex = i, Enabled = true };
+                        profile.Targets.Add(t);
+                    }
                     t.Brightness = (int)Math.Round(_containers[i].BrightnessSlider.Value);
                     t.Contrast = (int)Math.Round(_containers[i].ContrastSlider.Value);
                 }
@@ -1001,6 +1856,57 @@ namespace KeyPulse
             trayGroup.Children.Add(CreateHelpBadge("Pins this preset as a one-click button inside the System Tray icon menu and Quick Sliders popup (maximum 3 pinned presets)."));
             togglesRow.Children.Add(trayGroup);
 
+            var hotkeyGroup = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 4,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 0)
+            };
+            hotkeyGroup.Children.Add(new TextBlock
+            {
+                Text = "Shortcut:",
+                FontSize = 11.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            var hotkeyBox = new TextBox
+            {
+                Text = profile.Hotkey,
+                PlaceholderText = "e.g. Ctrl+Alt+Divide",
+                Width = 150,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            AttachHotkeyRecorder(hotkeyBox, combo =>
+            {
+                profile.Hotkey = combo;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus(string.IsNullOrWhiteSpace(combo) ? $"Cleared shortcut for \"{profile.Name}\"." : $"Assigned {combo} to \"{profile.Name}\".", true);
+            });
+            var hotkeyClearBtn = new Button
+            {
+                Content = "✕",
+                Classes = { "Secondary" },
+                Padding = new Thickness(5, 3),
+                FontSize = 10,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(hotkeyClearBtn, "Clear shortcut for this preset");
+            hotkeyClearBtn.Click += (_, _) =>
+            {
+                hotkeyBox.Text = string.Empty;
+                profile.Hotkey = string.Empty;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                SetStatus($"Cleared shortcut for \"{profile.Name}\".", true);
+            };
+            hotkeyGroup.Children.Add(hotkeyBox);
+            hotkeyGroup.Children.Add(hotkeyClearBtn);
+            togglesRow.Children.Add(hotkeyGroup);
+
             rowStack.Children.Add(togglesRow);
 
             var connectedSlots = ScreenBrightnessService.GetConnectedSlotIndices(cfg);
@@ -1016,7 +1922,12 @@ namespace KeyPulse
             {
                 int slotIdx = connectedSlots[colIdx];
                 var screenCfg = cfg.Screens.First(s => s.SlotIndex == slotIdx);
-                var target = profile.Targets.First(t => t.SlotIndex == slotIdx);
+                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == slotIdx);
+                if (target == null)
+                {
+                    target = new ScreenCycleEntry { SlotIndex = slotIdx, Brightness = 50, Contrast = 50, Enabled = true };
+                    profile.Targets.Add(target);
+                }
                 string slotTitle = ScreenBrightnessService.DefaultSlotName(slotIdx);
                 if (!string.IsNullOrWhiteSpace(screenCfg.CustomNickname) &&
                     !string.Equals(screenCfg.CustomNickname, slotTitle, StringComparison.OrdinalIgnoreCase))
@@ -1037,14 +1948,15 @@ namespace KeyPulse
                     VerticalAlignment = VerticalAlignment.Center
                 };
 
-                bRow.Children.Add(new TextBlock
+                var enableChk = new CheckBox
                 {
-                    Text = screenCfg.LockRatio ? $"{slotTitle}:" : $"{slotTitle} (Bri):",
+                    Content = screenCfg.LockRatio ? $"{slotTitle}:" : $"{slotTitle} (Bri):",
+                    IsChecked = target.Enabled,
                     FontSize = 11.5,
                     FontWeight = FontWeight.SemiBold,
-                    Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
                     VerticalAlignment = VerticalAlignment.Center
-                });
+                };
+                ToolTip.SetTip(enableChk, $"Check to adjust {slotTitle} with this preset. Uncheck to leave {slotTitle} completely untouched when activating this preset.");
 
                 var bSlider = new Slider
                 {
@@ -1052,6 +1964,8 @@ namespace KeyPulse
                     Maximum = 100,
                     Value = target.Brightness,
                     Width = 105,
+                    IsEnabled = target.Enabled,
+                    Opacity = target.Enabled ? 1.0 : 0.35,
                     VerticalAlignment = VerticalAlignment.Center
                 };
                 ToolTip.SetTip(bSlider, screenCfg.LockRatio
@@ -1060,12 +1974,34 @@ namespace KeyPulse
 
                 var bValText = new TextBlock
                 {
-                    Text = $"{target.Brightness}%",
+                    Text = target.Enabled ? $"{target.Brightness}%" : "Untouched",
                     FontSize = 11.5,
                     FontWeight = FontWeight.Bold,
                     MinWidth = 36,
+                    Opacity = target.Enabled ? 1.0 : 0.35,
                     Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
                     VerticalAlignment = VerticalAlignment.Center
+                };
+
+                Slider? cSlider = null;
+                TextBlock? cValText = null;
+
+                enableChk.IsCheckedChanged += (_, _) =>
+                {
+                    target.Enabled = enableChk.IsChecked == true;
+                    bSlider.IsEnabled = target.Enabled;
+                    bSlider.Opacity = target.Enabled ? 1.0 : 0.35;
+                    bValText.Opacity = target.Enabled ? 1.0 : 0.35;
+                    bValText.Text = target.Enabled ? $"{target.Brightness}%" : "Untouched";
+                    if (cSlider != null && cValText != null)
+                    {
+                        cSlider.IsEnabled = target.Enabled;
+                        cSlider.Opacity = target.Enabled ? 1.0 : 0.35;
+                        cValText.Opacity = target.Enabled ? 1.0 : 0.35;
+                        cValText.Text = target.Enabled ? $"{target.Contrast}%" : "Untouched";
+                    }
+                    ScreenBrightnessService.SaveConfig(cfg);
+                    ScreenBrightnessService.NotifyStateChanged();
                 };
 
                 bSlider.PropertyChanged += (_, pe) =>
@@ -1081,6 +2017,7 @@ namespace KeyPulse
                     ScreenBrightnessService.SaveConfig(cfg);
                 };
 
+                bRow.Children.Add(enableChk);
                 bRow.Children.Add(bSlider);
                 bRow.Children.Add(bValText);
                 slotStack.Children.Add(bRow);
@@ -1103,22 +2040,25 @@ namespace KeyPulse
                         VerticalAlignment = VerticalAlignment.Center
                     });
 
-                    var cSlider = new Slider
+                    cSlider = new Slider
                     {
                         Minimum = 0,
                         Maximum = 100,
                         Value = target.Contrast,
                         Width = 105,
+                        IsEnabled = target.Enabled,
+                        Opacity = target.Enabled ? 1.0 : 0.35,
                         VerticalAlignment = VerticalAlignment.Center
                     };
                     ToolTip.SetTip(cSlider, $"Target Contrast for {slotTitle} when this preset is applied (independent because Sync ratio is off).");
 
-                    var cValText = new TextBlock
+                    cValText = new TextBlock
                     {
-                        Text = $"{target.Contrast}%",
+                        Text = target.Enabled ? $"{target.Contrast}%" : "Untouched",
                         FontSize = 11.5,
                         FontWeight = FontWeight.Bold,
                         MinWidth = 36,
+                        Opacity = target.Enabled ? 1.0 : 0.35,
                         Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
                         VerticalAlignment = VerticalAlignment.Center
                     };
@@ -1168,6 +2108,20 @@ namespace KeyPulse
                 Grid.SetColumn(view.RootCard, col);
                 _containersGrid.Children.Add(view.RootCard);
             }
+
+            if (_masterBar != null)
+            {
+                _masterBar.IsVisible = activeCount > 1;
+                if (activeCount > 1 && _masterSlider != null)
+                {
+                    var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+                    _suppressMasterEvents = true;
+                    _masterSlider.Value = baseScreen.Brightness;
+                    _lastMasterValue = baseScreen.Brightness;
+                    if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+                    _suppressMasterEvents = false;
+                }
+            }
         }
 
         private async void OnWindowOpened(object? sender, EventArgs e)
@@ -1198,6 +2152,7 @@ namespace KeyPulse
                         ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
                     }
                     RenderProfilesList();
+                    RenderDirectHotkeysList();
                     SetStatus($"Live hardware read complete ({connected} display{(connected == 1 ? "" : "s")} connected).", true);
                 });
             }
@@ -1218,6 +2173,13 @@ namespace KeyPulse
                     _suppressGlobalLockEvent = false;
                 }
 
+                if (_lockDifferentialCheck != null && _lockDifferentialCheck.IsChecked != cfg.LockMonitorDifferential)
+                {
+                    _suppressDifferentialCheckEvent = true;
+                    _lockDifferentialCheck.IsChecked = cfg.LockMonitorDifferential;
+                    _suppressDifferentialCheckEvent = false;
+                }
+
                 var states = ScreenBrightnessService.GetImmediateCachedStates();
                 UpdateVisibleScreenContainers(states);
                 foreach (var st in states)
@@ -1229,6 +2191,7 @@ namespace KeyPulse
                 }
 
                 RenderProfilesList();
+                RenderDirectHotkeysList();
             });
         }
 

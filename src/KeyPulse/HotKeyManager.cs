@@ -553,6 +553,7 @@ namespace KeyPulse
             ("menu", 0x5D), ("contextmenu", 0x5D), ("capital", 0x14), ("snapshot", 0x2C),
 
             ("plus", 0xBB), ("+", 0xBB), ("equals", 0xBB), ("oemquotes", 0xDE),
+            ("minus", 0xBD), ("-", 0xBD), ("oemminus", 0xBD),
             ("oem3", 0xC0), ("oem1", 0xBA), ("oem2", 0xBF), ("oem4", 0xDB), ("oem5", 0xDC),
             ("oem6", 0xDD), ("oem7", 0xDE), ("oem102", 0xE2),
 

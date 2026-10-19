@@ -20,7 +20,7 @@
                 Classes="Panel"
                 Margin="0,0,0,12">
             <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                  ColumnDefinitions="Auto,Auto,Auto,Auto">
+                  ColumnDefinitions="Auto,Auto,*,Auto">
                 <TextBlock Grid.Row="0"
                            Grid.Column="0"
                            Text="Shortcuts (Alternative Keys)"
@@ -50,12 +50,13 @@
                              IsReadOnly="True"
                              KeyDown="KeyCombo_KeyDown"
                              TextChanged="KeyCombo_TextChanged"
-                             TabIndex="0"
-                             Margin="0,0,6,0" />
+                              TabIndex="0"
+                              Margin="0,0,6,0" />
                     <Button Grid.Column="1"
                             Name="AddKeyButton"
                             Content="+ Add Key"
                             Classes="Secondary"
+                            TabIndex="1"
                             Click="AddKey_Click"
                             ToolTip.Tip="Add this keyboard combination as an alternative trigger" />
                 </Grid>
@@ -66,22 +67,22 @@
                           MinWidth="200"
                           MaxWidth="300"
                           HorizontalAlignment="Stretch"
-                          TabIndex="1"
+                          TabIndex="2"
                           Margin="0,0,8,0">
                     <ComboBoxItem>Open a folder</ComboBoxItem>
                     <ComboBoxItem>Launch a program</ComboBoxItem>
                     <ComboBoxItem>Open a web link</ComboBoxItem>
                     <ComboBoxItem>Type text (one key at a time)</ComboBoxItem>
                     <ComboBoxItem>Paste text (instant)</ComboBoxItem>
-                    <ComboBoxItem>Cycle screen brightness</ComboBoxItem>
                 </ComboBox>
                 <TextBox Grid.Row="1"
                          Grid.Column="2"
                          Name="ActionNameText"
                          PlaceholderText="Optional label (e.g. 'My Work Signature', 'Dev Dashboard')"
-                         MinWidth="500"
+                         MinWidth="180"
                          MaxWidth="600"
-                         HorizontalAlignment="Stretch"
+                         HorizontalAlignment="Left"
+                         TabIndex="3"
                          MaxHeight="32"
                          Margin="0,0,8,0" />
                 <StackPanel Grid.Row="1"
@@ -93,14 +94,14 @@
                             Classes="Primary"
                             Click="Add_Click"
                             Margin="0,0,8,0"
-                            TabIndex="7"
+                            TabIndex="9"
                             MinWidth="90" />
                     <Button Name="CancelEditButton"
                             Content="Cancel"
                             Classes="Secondary"
                             Click="CancelEdit_Click"
                             IsVisible="False"
-                            TabIndex="8"
+                            TabIndex="10"
                             MinWidth="80" />
                 </StackPanel>
 
@@ -135,18 +136,19 @@
 
                 <Grid Grid.Row="5"
                       Grid.ColumnSpan="4"
-                      ColumnDefinitions="Auto,Auto,Auto,Auto,Auto">
+                      ColumnDefinitions="*,Auto,Auto,Auto,Auto">
                     <TextBox Grid.Column="0"
                              Name="TargetText"
                              PlaceholderText="Select a folder, app, URL, or text"
-                             Width="800"
+                             MinWidth="180"
+                             HorizontalAlignment="Stretch"
                              AcceptsReturn="True"
                              TextWrapping="Wrap"
                              MinHeight="34"
                              MaxHeight="76"
                              VerticalContentAlignment="Top"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
-                             TabIndex="2"
+                             TabIndex="4"
                              Margin="0,0,8,0" />
                     <CheckBox Grid.Column="1"
                               Name="ObfuscateCheck"
@@ -154,21 +156,21 @@
                               ToolTip.Tip="Blur and encrypt the target text in the shortcut list so passwords or private snippets stay hidden from view"
                               Margin="0,0,8,0"
                               VerticalAlignment="Center"
-                              TabIndex="3" />
+                              TabIndex="5" />
                     <CheckBox Grid.Column="2"
                               Name="QuickActionCheck"
                               Content="Add to Quick Action Menu"
                               ToolTip.Tip="Show this shortcut in the right-click system tray menu for one-click execution without using the keyboard"
                               Margin="0,0,8,0"
                               VerticalAlignment="Center"
-                              TabIndex="4" />
+                              TabIndex="6" />
                     <Button Grid.Column="3"
                             Name="ExpandTargetBtn"
                             Content="Expand"
                             Classes="Secondary"
                             Click="ExpandTarget_Click"
                             IsVisible="False"
-                            TabIndex="5"
+                            TabIndex="7"
                             MinWidth="88"
                             Margin="0,0,8,0"
                             ToolTip.Tip="Open this text in a larger, resizable editor" />
@@ -177,7 +179,7 @@
                             Content="Browse"
                             Classes="Secondary"
                             Click="Browse_Click"
-                            TabIndex="6"
+                            TabIndex="8"
                             MinWidth="92"
                             ToolTip.Tip="Choose a file or folder" />
                 </Grid>
@@ -220,11 +222,12 @@
                      PlaceholderText="Search shortcuts..."
                      TextChanged="SearchBox_TextChanged"
                      KeyDown="SearchBox_KeyDown"
-                     TabIndex="9"
+                     TabIndex="11"
                      ToolTip.Tip="Filter by shortcut keys, action, target or status">
                 <TextBox.InnerRightContent>
                     <Button Name="ClearSearchBtn"
                             Content="✕"
+                            AutomationProperties.Name="Clear search filter"
                             Background="Transparent"
                             BorderThickness="0"
                             Click="ClearSearch_Click"
@@ -278,8 +281,12 @@
                             Name="ShortcutStatusHeader"
                             Tag="Status"
                             Cursor="Hand"
+                            Focusable="True"
+                            TabIndex="12"
+                            AutomationProperties.Name="Sort by status"
                             PointerPressed="ShortcutHeader_Pressed"
-                            ToolTip.Tip="Click to sort by status">
+                            KeyDown="ShortcutHeader_KeyDown"
+                            ToolTip.Tip="Click or press Enter to sort by status">
                         <TextBlock Name="ShortcutStatusHeaderText" Text="Status" Classes="ListHeader" />
                     </Border>
                     <Grid Grid.Column="1">
@@ -298,8 +305,12 @@
                             Name="ShortcutKeyHeader"
                             Tag="Shortcut"
                             Cursor="Hand"
+                            Focusable="True"
+                            TabIndex="13"
+                            AutomationProperties.Name="Sort by shortcut"
                             PointerPressed="ShortcutHeader_Pressed"
-                            ToolTip.Tip="Click to sort by shortcut">
+                            KeyDown="ShortcutHeader_KeyDown"
+                            ToolTip.Tip="Click or press Enter to sort by shortcut">
                         <TextBlock Name="ShortcutKeyHeaderText" Text="Shortcut" Classes="ListHeader" />
                     </Border>
                     <Grid Grid.Column="3">
@@ -317,8 +328,12 @@
                             Name="ShortcutActionHeader"
                             Tag="Action"
                             Cursor="Hand"
+                            Focusable="True"
+                            TabIndex="14"
+                            AutomationProperties.Name="Sort by action"
                             PointerPressed="ShortcutHeader_Pressed"
-                            ToolTip.Tip="Click to sort by action">
+                            KeyDown="ShortcutHeader_KeyDown"
+                            ToolTip.Tip="Click or press Enter to sort by action">
                         <TextBlock Name="ShortcutActionHeaderText" Text="Action" Classes="ListHeader" />
                     </Border>
                     <Grid Grid.Column="5">
@@ -336,8 +351,12 @@
                             Name="ShortcutTargetHeader"
                             Tag="Target"
                             Cursor="Hand"
+                            Focusable="True"
+                            TabIndex="15"
+                            AutomationProperties.Name="Sort by target"
                             PointerPressed="ShortcutHeader_Pressed"
-                            ToolTip.Tip="Click to sort by target">
+                            KeyDown="ShortcutHeader_KeyDown"
+                            ToolTip.Tip="Click or press Enter to sort by target">
                         <TextBlock Name="ShortcutTargetHeaderText" Text="Target" Classes="ListHeader" />
                     </Border>
                     <Grid Grid.Column="7">
@@ -351,7 +370,7 @@
                                 VerticalAlignment="Stretch" />
                     </Grid>
 
-                    <Border Grid.Column="8" Classes="ShortcutGridHeaderCell">
+                    <Border Grid.Column="8" Classes="ShortcutGridHeaderCell" BorderThickness="0,0,1,1">
                         <TextBlock Text="Actions" Classes="ListHeader" />
                     </Border>
                 </Grid>
@@ -458,20 +477,28 @@
                                                         <BlurEffect Radius="{Binding TargetBlurRadius}" />
                                                     </TextBlock.Effect>
                                                 </TextBlock>
-                                                <TextBlock Grid.Column="1"
-                                                           Text="..."
-                                                           Classes="Muted"
-                                                           IsVisible="{Binding HasLongTarget}"
-                                                           VerticalAlignment="Center"
-                                                           Margin="4,0,0,0"
-                                                           ToolTip.Tip="{Binding TargetOverflowHint}" />
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <TextBlock Text="..."
+                                                               Classes="Muted"
+                                                               IsVisible="{Binding HasLongTarget}"
+                                                               VerticalAlignment="Center"
+                                                               Margin="4,0,0,0"
+                                                               ToolTip.Tip="{Binding TargetOverflowHint}" />
+                                                    <TextBlock Text="{Binding TargetUnencryptedBadge}"
+                                                               Classes="WarningText"
+                                                               FontSize="11"
+                                                               FontWeight="Bold"
+                                                               VerticalAlignment="Center"
+                                                               Margin="4,0,0,0"
+                                                               ToolTip.Tip="Stored unencrypted because Windows could not protect it for this account." />
+                                                </StackPanel>
                                             </Grid>
                                         </Border>
                                         <Grid Grid.Column="7">
                                             <Border Classes="ShortcutGridSeparatorCell" />
                                             <Border Classes="ShortcutGridSeparatorLine" />
                                         </Grid>
-                                        <Border Grid.Column="8" Classes="ShortcutGridCell">
+                                        <Border Grid.Column="8" Classes="ShortcutGridCell" BorderThickness="0,0,1,1">
                                             <StackPanel Orientation="Horizontal"
                                                         HorizontalAlignment="Center"
                                                         VerticalAlignment="Center"
@@ -491,7 +518,7 @@
                                                         FontSize="11"
                                                         TabIndex="0"
                                                         ToolTip.Tip="{Binding ToggleTooltip}" />
-                                                <Button Content="RUN"
+                                                <Button Content="Run"
                                                         Classes="Secondary"
                                                         Click="Run_Click"
                                                         Width="46"
@@ -507,7 +534,7 @@
                                                 <!-- ISSUE_15: 8.5pt text is roughly two-thirds the
                                                      size of the smallest text anywhere else here,
                                                      and REMOVE is a destructive action. -->
-                                                <Button Content="REMOVE"
+                                                <Button Content="Remove"
                                                         Classes="Danger"
                                                         Click="Remove_Click"
                                                         Width="76"
@@ -522,6 +549,7 @@
                                                         ToolTip.Tip="Delete this shortcut" />
                                                 <Button Classes="Secondary"
                                                         Click="Duplicate_Click"
+                                                        AutomationProperties.Name="Duplicate this shortcut"
                                                         Width="100"
                                                         MinWidth="100"
                                                         Height="24"
@@ -539,7 +567,7 @@
                                                         <TextBlock Text="&#x29C9;"
                                                                    FontSize="11"
                                                                    VerticalAlignment="Center" />
-                                                        <TextBlock Text="DUPLICATE"
+                                                        <TextBlock Text="Duplicate"
                                                                    VerticalAlignment="Center" />
                                                     </StackPanel>
                                                 </Button>
@@ -576,8 +604,8 @@
                             Margin="0,0,0,12"
                             Padding="16,6"
                             CornerRadius="20"
-                            Background="#F0182235"
-                            BorderBrush="#60a5fa"
+                            Background="{DynamicResource AppPanelRaisedBrush}"
+                            BorderBrush="{DynamicResource AppAccentBrush}"
                             BorderThickness="1.5"
                             Cursor="Hand"
                             IsVisible="False"
@@ -585,17 +613,17 @@
                             Click="ScrollMoreDownPill_Click">
                         <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                             <TextBlock Text="▼"
-                                       Foreground="#60a5fa"
+                                       Foreground="{DynamicResource AppAccentBrush}"
                                        FontSize="11"
                                        VerticalAlignment="Center"/>
                             <TextBlock Name="ScrollMoreDownText"
                                        Text="More shortcuts below"
-                                       Foreground="#f8fafc"
+                                       Foreground="{DynamicResource AppTextPrimaryBrush}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
                                        VerticalAlignment="Center"/>
                             <TextBlock Text="▼"
-                                       Foreground="#60a5fa"
+                                       Foreground="{DynamicResource AppAccentBrush}"
                                        FontSize="11"
                                        VerticalAlignment="Center"/>
                         </StackPanel>
@@ -608,8 +636,8 @@
                             Margin="0,12,0,0"
                             Padding="16,6"
                             CornerRadius="20"
-                            Background="#F0182235"
-                            BorderBrush="#60a5fa"
+                            Background="{DynamicResource AppPanelRaisedBrush}"
+                            BorderBrush="{DynamicResource AppAccentBrush}"
                             BorderThickness="1.5"
                             Cursor="Hand"
                             IsVisible="False"
@@ -617,11 +645,11 @@
                             Click="ScrollMoreUpPill_Click">
                         <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                             <TextBlock Text="▲"
-                                       Foreground="#60a5fa"
+                                       Foreground="{DynamicResource AppAccentBrush}"
                                        FontSize="11"
                                        VerticalAlignment="Center"/>
                             <TextBlock Text="Back to top"
-                                       Foreground="#f8fafc"
+                                       Foreground="{DynamicResource AppTextPrimaryBrush}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
                                        VerticalAlignment="Center"/>
@@ -705,19 +733,19 @@
                 <Button Content="Screen Brightness"
                         Classes="Secondary"
                         Click="ScreenBrightness_Click"
-                        TabIndex="7"
+                        TabIndex="16"
                         MinWidth="136"
                         ToolTip.Tip="Control physical screen brightness and contrast across up to 3 displays and configure shortcut cycle steps." />
                 <Button Content="Desktop Organizer"
                         Classes="Secondary"
                         Click="DesktopOrganizer_Click"
-                        TabIndex="8"
+                        TabIndex="17"
                         MinWidth="136"
                         ToolTip.Tip="Save, restore, and manage desktop icon arrangements across your displays." />
                 <Button Content="Settings"
                         Classes="Secondary"
                         Click="Settings_Click"
-                        TabIndex="9"
+                        TabIndex="18"
                         MinWidth="98" />
             </StackPanel>
         </Grid>

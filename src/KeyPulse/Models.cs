@@ -243,7 +243,7 @@ namespace KeyPulse
                 {
                     TargetUnreadable = false;
                     UnreadableTargetCipher = string.Empty;
-                    TargetProtectionFailed = value.Length > 0 && !CryptoHelper.IsProtectedValue(value);
+                    TargetProtectionFailed = CryptoHelper.ProtectionUnavailable && IsTargetObfuscated;
                     Target = plain;
                 }
                 else
@@ -372,6 +372,11 @@ namespace KeyPulse
         /// <summary>ISSUE_2: strong enough that no glyph shape survives it.</summary>
         [JsonIgnore]
         public double TargetBlurRadius => IsTargetHidden ? 12.0 : 0.0;
+
+        [JsonIgnore]
+        public string TargetUnencryptedBadge => TargetProtectionFailed && IsTargetObfuscated
+            ? " ⚠️ Unencrypted"
+            : string.Empty;
 
         [JsonIgnore]
         public IBrush TargetDisplayBrush => TargetProtectionFailed && IsTargetObfuscated
@@ -781,6 +786,7 @@ namespace KeyPulse
         public string HardwareId { get; set; } = string.Empty;
         public int Brightness { get; set; } = 50;
         public int Contrast { get; set; } = 50;
+        public bool Enabled { get; set; } = true;
     }
 
     public class ScreenBrightnessProfile
@@ -789,6 +795,7 @@ namespace KeyPulse
         public string Name { get; set; } = "Preset";
         public bool ShowInTrayQuickActions { get; set; } = true;
         public bool IncludeInCycle { get; set; } = true;
+        public string Hotkey { get; set; } = string.Empty;
         public List<ScreenCycleEntry> Targets { get; set; } = new();
     }
 
@@ -797,8 +804,29 @@ namespace KeyPulse
         public int SchemaVersion { get; set; } = 1;
         public bool GlobalLockBrightnessContrast { get; set; } = true;
         public string LastCycleProfileId { get; set; } = string.Empty;
+        public string CycleUpHotkey { get; set; } = string.Empty;
+        public string CycleDownHotkey { get; set; } = string.Empty;
+        public string StepUpHotkey { get; set; } = string.Empty;
+        public string StepDownHotkey { get; set; } = string.Empty;
+        public int StepDelta { get; set; } = 5;
+        public bool LockMonitorDifferential { get; set; } = true;
         public List<ScreenHardwareSetting> Screens { get; set; } = new();
         public List<ScreenBrightnessProfile> Profiles { get; set; } = new();
+        public List<ScreenDirectHotkey> DirectHotkeys { get; set; } = new();
+    }
+
+    public class ScreenDirectHotkey
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string Name { get; set; } = string.Empty;
+        public string Hotkey { get; set; } = string.Empty;
+        /// <summary>
+        /// 0 = Screen A, 1 = Screen B, 2 = Screen C, -1 = All Screens.
+        /// </summary>
+        public int TargetSlotIndex { get; set; } = 0;
+        public int Brightness { get; set; } = 65;
+        public int Contrast { get; set; } = 65;
+        public bool LockRatio { get; set; } = true;
     }
 
     [JsonSourceGenerationOptions(NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals)]
@@ -821,9 +849,11 @@ namespace KeyPulse
     [JsonSerializable(typeof(ScreenBrightnessProfile))]
     [JsonSerializable(typeof(ScreenCycleEntry))]
     [JsonSerializable(typeof(ScreenHardwareSetting))]
+    [JsonSerializable(typeof(ScreenDirectHotkey))]
     [JsonSerializable(typeof(List<ScreenBrightnessProfile>))]
     [JsonSerializable(typeof(List<ScreenCycleEntry>))]
     [JsonSerializable(typeof(List<ScreenHardwareSetting>))]
+    [JsonSerializable(typeof(List<ScreenDirectHotkey>))]
     [JsonSerializable(typeof(List<string>))]
     [JsonSerializable(typeof(List<HotkeyEntry>))]
     [JsonSerializable(typeof(List<BackupShortcut>))]

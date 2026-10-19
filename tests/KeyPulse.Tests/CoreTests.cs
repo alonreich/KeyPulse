@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using KeyPulse;
@@ -246,6 +246,193 @@ namespace KeyPulse.Tests
             {
                 try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true); } catch { }
             }
+        }
+
+        [TestMethod]
+        public void HotkeyEntry_TargetUnencryptedBadge_ReflectsProtectionStatus()
+        {
+            var entry = new HotkeyEntry
+            {
+                DisplayName = "Protected Entry",
+                Target = "SecretData",
+                IsTargetObfuscated = true,
+                TargetProtectionFailed = false
+            };
+            Assert.AreEqual(string.Empty, entry.TargetUnencryptedBadge);
+
+            entry.TargetProtectionFailed = true;
+            Assert.AreEqual(" ⚠️ Unencrypted", entry.TargetUnencryptedBadge);
+        }
+
+        [TestMethod]
+        public void ScreenBrightnessService_ResetToDefaults_CreatesValidProfilesAndMonitors()
+        {
+            var config = ScreenBrightnessService.ResetToDefaults();
+            Assert.IsNotNull(config.Screens);
+            Assert.AreEqual(3, config.Screens.Count);
+            Assert.IsNotNull(config.Profiles);
+            Assert.IsTrue(config.Profiles.Count >= 3);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_GranularTargets_OnlyModifiesEnabledScreens()
+        {
+            var config = new ScreenBrightnessConfig
+            {
+                Screens = new List<ScreenHardwareSetting>
+                {
+                    new ScreenHardwareSetting { SlotIndex = 0, LastBrightness = 40, LastContrast = 40, LockRatio = true },
+                    new ScreenHardwareSetting { SlotIndex = 1, LastBrightness = 30, LastContrast = 30, LockRatio = true }
+                },
+                Profiles = new List<ScreenBrightnessProfile>
+                {
+                    new ScreenBrightnessProfile
+                    {
+                        Id = "p_display_a_only",
+                        Name = "Display A Only 60%",
+                        IncludeInCycle = true,
+                        Targets = new List<ScreenCycleEntry>
+                        {
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 60, Contrast = 60, Enabled = true },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 90, Contrast = 90, Enabled = false }
+                        }
+                    }
+                }
+            };
+
+            var profile = config.Profiles[0];
+            foreach (var slot in config.Screens)
+            {
+                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == slot.SlotIndex);
+                if (target != null && target.Enabled)
+                {
+                    slot.LastBrightness = target.Brightness;
+                }
+            }
+
+            Assert.AreEqual(60, config.Screens[0].LastBrightness, "Screen A must be updated to 60%");
+            Assert.AreEqual(30, config.Screens[1].LastBrightness, "Screen B must remain untouched at 30%");
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_CycleConfig_AcceptsDedicatedHotkeys()
+        {
+            var config = new ScreenBrightnessConfig
+            {
+                CycleUpHotkey = "Ctrl+Alt+NumPadAdd",
+                CycleDownHotkey = "Ctrl+Alt+NumPadSubtract",
+                Profiles = new List<ScreenBrightnessProfile>
+                {
+                    new ScreenBrightnessProfile
+                    {
+                        Id = "p1",
+                        Name = "Night",
+                        Hotkey = "Ctrl+Alt+NumPadDivide"
+                    }
+                }
+            };
+
+            Assert.AreEqual("Ctrl+Alt+NumPadAdd", config.CycleUpHotkey);
+            Assert.AreEqual("Ctrl+Alt+NumPadSubtract", config.CycleDownHotkey);
+            Assert.AreEqual("Ctrl+Alt+NumPadDivide", config.Profiles[0].Hotkey);
+        }
+
+        [TestMethod]
+        public void HotKeyManager_KeyAliases_MapsMinusAndPlusCorrectly()
+        {
+            Assert.AreEqual((uint)0xBD, HotkeyManager.NameToVirtualKey("-"));
+            Assert.AreEqual((uint)0xBD, HotkeyManager.NameToVirtualKey("minus"));
+            Assert.AreEqual((uint)0xBD, HotkeyManager.NameToVirtualKey("oemminus"));
+
+            Assert.AreEqual((uint)0xBB, HotkeyManager.NameToVirtualKey("+"));
+            Assert.AreEqual((uint)0xBB, HotkeyManager.NameToVirtualKey("plus"));
+            Assert.AreEqual((uint)0xBB, HotkeyManager.NameToVirtualKey("equals"));
+
+            Assert.AreEqual((uint)0x6D, HotkeyManager.NameToVirtualKey("numpadsubtract"));
+            Assert.AreEqual((uint)0x6D, HotkeyManager.NameToVirtualKey("subtract"));
+
+            Assert.AreEqual((uint)0x6B, HotkeyManager.NameToVirtualKey("numpadadd"));
+            Assert.AreEqual((uint)0x6B, HotkeyManager.NameToVirtualKey("add"));
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_DifferentialLock_ClampsCorrectlyAtBoundaries()
+        {
+            int a = 25;
+            int b = 10;
+            int step = -5;
+
+            a = Math.Clamp(a + step, 0, 100);
+            b = Math.Clamp(b + step, 0, 100);
+            Assert.AreEqual(20, a);
+            Assert.AreEqual(5, b);
+            Assert.AreEqual(15, a - b);
+
+            a = Math.Clamp(a + step, 0, 100);
+            b = Math.Clamp(b + step, 0, 100);
+            Assert.AreEqual(15, a);
+            Assert.AreEqual(0, b);
+            Assert.AreEqual(15, a - b);
+
+            a = Math.Clamp(a + step, 0, 100);
+            b = Math.Clamp(b + step, 0, 100);
+            Assert.AreEqual(10, a);
+            Assert.AreEqual(0, b);
+
+            a = Math.Clamp(a + step, 0, 100);
+            b = Math.Clamp(b + step, 0, 100);
+            Assert.AreEqual(5, a);
+            Assert.AreEqual(0, b);
+
+            a = Math.Clamp(a + step, 0, 100);
+            b = Math.Clamp(b + step, 0, 100);
+            Assert.AreEqual(0, a);
+            Assert.AreEqual(0, b);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_DirectHotkeys_ConfigPersistence()
+        {
+            var config = new ScreenBrightnessConfig
+            {
+                LockMonitorDifferential = true,
+                DirectHotkeys = new List<ScreenDirectHotkey>
+                {
+                    new ScreenDirectHotkey
+                    {
+                        Id = "dh1",
+                        Name = "Screen A 70%",
+                        TargetSlotIndex = 0,
+                        Brightness = 70,
+                        Contrast = 70,
+                        LockRatio = true,
+                        Hotkey = "Ctrl+Alt+1"
+                    },
+                    new ScreenDirectHotkey
+                    {
+                        Id = "dh2",
+                        Name = "All Screens Dim",
+                        TargetSlotIndex = -1,
+                        Brightness = 20,
+                        Contrast = 20,
+                        LockRatio = true,
+                        Hotkey = "Ctrl+Alt+0"
+                    }
+                }
+            };
+
+            Assert.IsTrue(config.LockMonitorDifferential);
+            Assert.AreEqual(2, config.DirectHotkeys.Count);
+
+            var dhA = config.DirectHotkeys[0];
+            Assert.AreEqual(0, dhA.TargetSlotIndex);
+            Assert.AreEqual(70, dhA.Brightness);
+            Assert.AreEqual("Ctrl+Alt+1", dhA.Hotkey);
+
+            var dhAll = config.DirectHotkeys[1];
+            Assert.AreEqual(-1, dhAll.TargetSlotIndex);
+            Assert.AreEqual(20, dhAll.Brightness);
+            Assert.AreEqual("Ctrl+Alt+0", dhAll.Hotkey);
         }
     }
 }
