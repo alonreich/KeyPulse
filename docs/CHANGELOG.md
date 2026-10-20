@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.20.1705] - 2026-10-20
+
 ### Fixed
 - **Master Slider Ceiling Differential Gap Preservation**: Fixed an issue where dragging the master horizontal slider to 100% (ceiling breakthrough) caused all monitors to collapse to identical brightness forever. Relative differential offsets are now preserved in virtual space, smoothly restoring each monitor's individual relative offset when dragging back down from 100%.
 - **Eliminated Preset Target Slider Disk Thrashing**: Fixed synchronous disk writes inside preset target brightness/contrast sliders. Adjustments now update in-memory at 60 FPS during drag and flush to disk only on pointer release.
@@ -213,6 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-Flight Download Cancellation & Indeterminate Progress**: Users can cancel long-running updates mid-download, with smooth indeterminate progress feedback for unmetered streams.
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
+
+## [v2026.10.20.1705] - 2026-10-20
 
 ### Fixed
 - **Master Slider Ceiling Differential Gap Preservation**: Fixed an issue where dragging the master horizontal slider to 100% (ceiling breakthrough) caused all monitors to collapse to identical brightness forever. Relative differential offsets are now preserved in virtual space, smoothly restoring each monitor's individual relative offset when dragging back down from 100%.
