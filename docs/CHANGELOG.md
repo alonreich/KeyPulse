@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.20.1259] - 2026-10-20
+
 ### Added
 - **Master Slider Brick Wall Clamping & Second-Pull Edge Breakthrough**: When adjusting the master horizontal slider across displays with differing brightness levels, the slider stops firmly at a "hard brick wall" once any display reaches 0% or 100%, preserving relative differential gaps. Pushing or dragging a second time past this brick wall allows dragging all the way to 0% or 100%, smoothly collapsing the remaining gap so all displays reach 0% or 100% in perfect sync without stuttering or 3-tick snapbacks.
 - **Inter-Display Sync Averaging & 1:1 Live Tracking**: Clicking the `⇄ SYNC` toggle between displays now immediately equalizes both displays to their in-between average (for both brightness and contrast). Moving either vertical slider on linked displays moves companion displays in instantaneous 1:1 lockstep.
@@ -204,16 +206,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
 
-## [v2026.10.20.1219] - 2026-10-20
+## [v2026.10.20.1259] - 2026-10-20
 
 ### Added
-- **Inter-Display Link/Sync (⇄ SYNC) Connectors**: Positioned high-contrast interactive ⇄ SYNC toggle buttons between adjacent display cards across both the tray overlay and main Screen Brightness windows. Clicking links adjacent displays together, allowing users to selectively synchronize brightness and contrast adjustments across specific displays (e.g., syncing Display 1 and 2 while leaving Display 3 independent, or chaining all displays). Moving either vertical slider on any linked display moves the corresponding slider on all other linked displays in real time.
-
-### Fixed
-- **Eliminated Master Slider Disk Thrashing & Edge Stutter**: Removed synchronous SSD file writes on every drag delta tick in RequestMasterLevelChange. Disk writes are now deferred exclusively to the background trailing-edge throttle once slider movement settles, eliminating micro-stutters and hitching when dragging or reaching slider boundaries.
-- **Live Vertical Sliders Visual Tracking with Master Slider**: Fixed specific vertical sliders not moving when adjusting the horizontal master slider. Removed the permanent lock caused by iew.UserTouched inside SyncFromConfigState, scoped touch guards strictly to initial hardware queries, tracked active dragging per-slider, and resolved the stale configuration snapshot bug that reverted in-memory levels.
-- **Preserved Boundary Differential Memory at 0% and 100%**: Fixed RequestScreenLevelChange wiping out VirtualBrightness and VirtualContrast during master adjustments, preserving relative differential gaps without clipping or hitching when reversing direction from boundary edges.
-- **Prevented Visual Tree Destruction on Slider Ticks**: Replaced unconditional _containersGrid.Children.Clear() rebuilds on every slider tick with cached configuration diffing, ensuring display cards and sliders remain stable in the visual tree during real-time dragging.
+- **Master Slider Brick Wall Clamping & Second-Pull Edge Breakthrough**: When adjusting the master horizontal slider across displays with differing brightness levels, the slider stops firmly at a "hard brick wall" once any display reaches 0% or 100%, preserving relative differential gaps. Pushing or dragging a second time past this brick wall allows dragging all the way to 0% or 100%, smoothly collapsing the remaining gap so all displays reach 0% or 100% in perfect sync without stuttering or 3-tick snapbacks.
+- **Inter-Display Sync Averaging & 1:1 Live Tracking**: Clicking the `⇄ SYNC` toggle between displays now immediately equalizes both displays to their in-between average (for both brightness and contrast). Moving either vertical slider on linked displays moves companion displays in instantaneous 1:1 lockstep.
+- **Updated Out-of-the-Box Preset Defaults**:
+  - Night / Low: 25% (across all monitors)
+  - Balanced: 50%
+  - Daylight / Competitive: 75%
+  - Factory default monitor baseline: 50%
 
 ## [v2026.10.20.0939] - 2026-10-20
 
