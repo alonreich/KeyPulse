@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Master Slider Brick Wall Clamping & Second-Pull Edge Breakthrough**: When adjusting the master horizontal slider across displays with differing brightness levels, the slider stops firmly at a "hard brick wall" once any display reaches 0% or 100%, preserving relative differential gaps. Pushing or dragging a second time past this brick wall allows dragging all the way to 0% or 100%, smoothly collapsing the remaining gap so all displays reach 0% or 100% in perfect sync without stuttering or 3-tick snapbacks.
+- **Inter-Display Sync Averaging & 1:1 Live Tracking**: Clicking the `⇄ SYNC` toggle between displays now immediately equalizes both displays to their in-between average (for both brightness and contrast). Moving either vertical slider on linked displays moves companion displays in instantaneous 1:1 lockstep.
+- **Updated Out-of-the-Box Preset Defaults**:
+  - Night / Low: 25% (across all monitors)
+  - Balanced: 50%
+  - Daylight / Competitive: 75%
+  - Factory default monitor baseline: 50%
+
 ## [v2026.10.20.1219] - 2026-10-20
 
 ### Added

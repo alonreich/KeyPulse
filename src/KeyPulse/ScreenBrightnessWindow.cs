@@ -33,6 +33,15 @@ namespace KeyPulse
         private int _lastMasterValue = 50;
         private bool _suppressMasterEvents;
         private bool _isUserDraggingMaster;
+        private List<(int SlotIndex, int Brightness, int Contrast, bool LockRatio)> _masterDragBaselines = new();
+        private double _masterDragStartValue;
+        private int _brickWallUp;
+        private int _brickWallDown;
+        private bool _hasHitBrickWallUp;
+        private bool _hasHitBrickWallDown;
+        private bool _breakthroughUp;
+        private bool _breakthroughDown;
+        private int _lastPushedMasterValue = -1;
         private string _lastRenderedScreenConfig = string.Empty;
         private StackPanel? _directHotkeysStack;
         private CancellationTokenSource? _liveReadCts;
@@ -477,20 +486,142 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center
             };
             ToolTip.SetTip(_masterSlider, "Drag to adjust all displays together while maintaining their relative brightness differential.");
-            _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { _isUserDraggingMaster = true; }, RoutingStrategies.Tunnel);
-            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
-            _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) =>
+            {
+                _isUserDraggingMaster = true;
+                var states = ScreenBrightnessService.GetImmediateCachedStates();
+                var activeScreens = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
+                if (activeScreens.Count == 0 && states.Count > 0)
+                {
+                    activeScreens.Add(states[0]);
+                }
+                _masterDragBaselines = activeScreens.Select(s => (s.SlotIndex, s.Brightness, s.Contrast, s.LockRatio)).ToList();
+                _masterDragStartValue = _masterSlider.Value;
+                _lastPushedMasterValue = (int)Math.Round(_masterDragStartValue);
+
+                int maxUp = _masterDragBaselines.Count > 0 ? _masterDragBaselines.Min(s => 100 - s.Brightness) : 0;
+                int maxDown = _masterDragBaselines.Count > 0 ? _masterDragBaselines.Min(s => s.Brightness) : 0;
+
+                _brickWallUp = (int)Math.Round(_masterDragStartValue + maxUp);
+                _brickWallDown = (int)Math.Round(_masterDragStartValue - maxDown);
+
+                _hasHitBrickWallUp = (maxUp == 0);
+                _breakthroughUp = (maxUp == 0);
+                _hasHitBrickWallDown = (maxDown == 0);
+                _breakthroughDown = (maxDown == 0);
+            }, RoutingStrategies.Tunnel);
+
+            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) =>
+            {
+                _isUserDraggingMaster = false;
+                ScreenBrightnessService.ReanchorAllScreens();
+                ScreenBrightnessService.FlushConfig();
+                UpdateMasterBaselineFromScreens();
+            }, RoutingStrategies.Tunnel);
+
+            _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) =>
+            {
+                // Retain drag session through pointer capture transitions
+            }, RoutingStrategies.Tunnel);
+
             _masterSlider.PropertyChanged += (_, pe) =>
             {
-                if (pe.Property != RangeBase.ValueProperty || _suppressMasterEvents) return;
-                int currentVal = (int)Math.Round(_masterSlider.Value);
-                int delta = currentVal - _lastMasterValue;
-                if (delta != 0)
+                if (pe.Property != RangeBase.ValueProperty || _suppressMasterEvents || !_isUserDraggingMaster) return;
+                int targetVal = (int)Math.Round(_masterSlider.Value);
+                if (targetVal == _lastPushedMasterValue) return;
+
+                if (targetVal >= _brickWallUp && _brickWallUp < 100)
                 {
-                    _lastMasterValue = currentVal;
-                    if (_masterValueText != null) _masterValueText.Text = currentVal.ToString();
-                    ScreenBrightnessService.RequestMasterLevelChange(delta);
+                    if (!_breakthroughUp)
+                    {
+                        if (!_hasHitBrickWallUp)
+                        {
+                            _hasHitBrickWallUp = true;
+                            targetVal = _brickWallUp;
+                            _suppressMasterEvents = true;
+                            _masterSlider.Value = _brickWallUp;
+                            _suppressMasterEvents = false;
+                        }
+                        else
+                        {
+                            _breakthroughUp = true;
+                        }
+                    }
                 }
+                else if (targetVal <= _brickWallDown && _brickWallDown > 0)
+                {
+                    if (!_breakthroughDown)
+                    {
+                        if (!_hasHitBrickWallDown)
+                        {
+                            _hasHitBrickWallDown = true;
+                            targetVal = _brickWallDown;
+                            _suppressMasterEvents = true;
+                            _masterSlider.Value = _brickWallDown;
+                            _suppressMasterEvents = false;
+                        }
+                        else
+                        {
+                            _breakthroughDown = true;
+                        }
+                    }
+                }
+
+                if (targetVal < _brickWallUp)
+                {
+                    _hasHitBrickWallUp = false;
+                    _breakthroughUp = false;
+                }
+                if (targetVal > _brickWallDown)
+                {
+                    _hasHitBrickWallDown = false;
+                    _breakthroughDown = false;
+                }
+
+                _lastPushedMasterValue = targetVal;
+                _lastMasterValue = targetVal;
+                if (_masterValueText != null) _masterValueText.Text = targetVal.ToString();
+
+                var batch = new List<(int SlotIndex, int Brightness, int Contrast)>(_masterDragBaselines.Count);
+
+                if (targetVal >= _brickWallUp && _breakthroughUp)
+                {
+                    double t = (_brickWallUp == 100) ? 1.0 : (targetVal - _brickWallUp) / (100.0 - _brickWallUp);
+                    t = Math.Clamp(t, 0.0, 1.0);
+                    foreach (var s in _masterDragBaselines)
+                    {
+                        int wallB = s.Brightness + (int)Math.Round(_brickWallUp - _masterDragStartValue);
+                        int b = (int)Math.Round(wallB + t * (100 - wallB));
+                        b = Math.Clamp(b, 0, 100);
+                        int c = s.LockRatio ? b : Math.Clamp(s.Contrast + (b - s.Brightness), 0, 100);
+                        batch.Add((s.SlotIndex, b, c));
+                    }
+                }
+                else if (targetVal <= _brickWallDown && _breakthroughDown)
+                {
+                    double t = (_brickWallDown == 0) ? 0.0 : targetVal / (double)_brickWallDown;
+                    t = Math.Clamp(t, 0.0, 1.0);
+                    foreach (var s in _masterDragBaselines)
+                    {
+                        int wallB = s.Brightness + (int)Math.Round(_brickWallDown - _masterDragStartValue);
+                        int b = (int)Math.Round(wallB * t);
+                        b = Math.Clamp(b, 0, 100);
+                        int c = s.LockRatio ? b : Math.Clamp(s.Contrast + (b - s.Brightness), 0, 100);
+                        batch.Add((s.SlotIndex, b, c));
+                    }
+                }
+                else
+                {
+                    int delta = (int)Math.Round(targetVal - _masterDragStartValue);
+                    foreach (var s in _masterDragBaselines)
+                    {
+                        int b = Math.Clamp(s.Brightness + delta, 0, 100);
+                        int c = s.LockRatio ? b : Math.Clamp(s.Contrast + delta, 0, 100);
+                        batch.Add((s.SlotIndex, b, c));
+                    }
+                }
+
+                ScreenBrightnessService.SetScreenLevelsBatch(batch);
             };
             Grid.SetColumn(_masterSlider, 3);
             masterGrid.Children.Add(_masterSlider);
@@ -772,7 +903,7 @@ namespace KeyPulse
             Program.PlaySound("click");
             bool confirmed = await ConfirmActionAsync(
                 "Restore Default Brightness Settings",
-                "Reset all screen nicknames, brightness/contrast sync toggles, and shortcut presets back to their original factory defaults?\n\n• Sync Brightness & Contrast: On\n• Default levels: 65% across Screen A, B, C\n• Default presets: Night / Low (15%), Balanced (55%), Daylight / Competitive (90%)",
+                "Reset all screen nicknames, brightness/contrast sync toggles, and shortcut presets back to their original factory defaults?\n\n• Sync Brightness & Contrast: On\n• Default levels: 50% across Screen A, B, C\n• Default presets: Night / Low (25%), Balanced (50%), Daylight / Competitive (75%)",
                 "Restore Defaults");
             if (!confirmed) return;
 
@@ -2411,7 +2542,7 @@ namespace KeyPulse
 
         private void OnServiceStateChanged()
         {
-            Dispatcher.UIThread.Post(() =>
+            void Update()
             {
                 var cfg = ScreenBrightnessService.LoadConfig();
                 if (_globalLockCheck != null && _globalLockCheck.IsChecked != cfg.GlobalLockBrightnessContrast)
@@ -2444,7 +2575,16 @@ namespace KeyPulse
                 }
                 RenderProfilesList();
                 RenderDirectHotkeysList();
-            });
+            }
+
+            if (Dispatcher.UIThread.CheckAccess())
+            {
+                Update();
+            }
+            else
+            {
+                Dispatcher.UIThread.Post(Update);
+            }
         }
 
         private void SetStatus(string msg, bool ok)

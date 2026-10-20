@@ -8,6 +8,35 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Master Slider Drag Boundary Physics & Breakthrough Interpolation (`ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`, `ScreenBrightnessService.cs`)
+- **Two-Stage Drag Boundary Physics**:
+  - Implemented `_brickWallUp` and `_brickWallDown` calculations based on drag baseline screens.
+  - Phase 1 stops master slider motion firmly at the brick wall once the highest screen reaches 100% or lowest reaches 0%, preserving relative differentials.
+  - Phase 2 (`_breakthroughUp` / `_breakthroughDown`) activates on the second pull/gesture past the wall, interpolating remaining displays from their brick-wall value to 100% (or 0%) smoothly.
+  - Fixed premature drag session cancellation in `PointerCaptureLostEvent`.
+  - Added `SetScreenLevelsBatch` in `ScreenBrightnessService` for atomic multi-screen level updates during master drag.
+
+### Inter-Display Sync Averaging & 1:1 Lockstep Tracking (`ScreenBrightnessService.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)
+- **Immediate Averaging on Link (`ScreenBrightnessService.SetScreenLinkedToNext`)**:
+  - When `isLinked` becomes true, calculates average brightness and contrast across all screens in the linked group and assigns both immediately.
+  - Queues throttled hardware writes and notifies UI state immediately.
+- **1:1 Live Lockstep (`ScreenBrightnessService.RequestIndividualOrLinkedChange`)**:
+  - When dragging an individual slider in a linked pair, sets linked companion displays directly to match the dragged level 1:1.
+- **Preserved `IsLinkedToNext` across Hardware Reads**:
+  - Added missing `IsLinkedToNext = slotCfg.IsLinkedToNext` assignment in `ReadSingleScreenHardware` and fallback `results[i]`, preventing async hardware reads from clearing linked state.
+- **Win32 Monitor Enumeration Caching**:
+  - Added 250ms debounce cache to `GetConnectedSlotIndices`, eliminating high-frequency `EnumDisplayMonitors` calls during slider drag ticks.
+- **Synchronous UI Dispatch on Current Thread**:
+  - In `OnServiceStateChanged`, executes update synchronously if `Dispatcher.UIThread.CheckAccess()` is true, ensuring zero-latency lockstep slider animation.
+
+### Default Preset Values Update (`ScreenBrightnessService.cs`, `Models.cs`, `ScreenBrightnessWindow.cs`)
+- Updated factory shipping defaults:
+  - Screen default levels: 50% across Screen A, B, C.
+  - Night / Low preset: 25% brightness & contrast.
+  - Balanced preset: 50% brightness & contrast.
+  - Daylight / Competitive preset: 75% brightness & contrast.
+  - Updated restore defaults dialog text to reflect 25%, 50%, 75%.
+
 ### Inter-Display Link/Sync Connectors & Real-Time Slider Propagation (Models.cs, ScreenBrightnessService.cs, ScreenBrightnessOverlayWindow.cs, ScreenBrightnessWindow.cs)
 - **Pairwise Display Sync Data Model (Models.cs, ScreenBrightnessService.cs)**:
   - Added IsLinkedToNext (bool, default alse) to ScreenHardwareSetting and ScreenLiveState.

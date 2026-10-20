@@ -783,10 +783,10 @@ namespace KeyPulse
         public string ModelName { get; set; } = string.Empty;
         public string CustomNickname { get; set; } = string.Empty;
         public bool LockRatio { get; set; } = true;
-        public int LastBrightness { get; set; } = 65;
-        public int LastContrast { get; set; } = 65;
-        public int VirtualBrightness { get; set; } = 65;
-        public int VirtualContrast { get; set; } = 65;
+        public int LastBrightness { get; set; } = 50;
+        public int LastContrast { get; set; } = 50;
+        public int VirtualBrightness { get; set; } = 50;
+        public int VirtualContrast { get; set; } = 50;
         public bool IsLinkedToNext { get; set; } = false;
     }
 

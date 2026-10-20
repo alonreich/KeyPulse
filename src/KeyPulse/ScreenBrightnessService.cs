@@ -22,8 +22,8 @@ namespace KeyPulse
         public string DefaultSlotLabel => SlotIndex switch { 0 => "Screen A", 1 => "Screen B", _ => "Screen C" };
         public string Nickname { get; set; } = string.Empty;
         public string ModelName { get; set; } = string.Empty;
-        public int Brightness { get; set; } = 65;
-        public int Contrast { get; set; } = 65;
+        public int Brightness { get; set; } = 50;
+        public int Contrast { get; set; } = 50;
         public bool LockRatio { get; set; } = true;
         public bool IsLinkedToNext { get; set; }
         public bool IsConnected { get; set; }
@@ -194,7 +194,7 @@ namespace KeyPulse
             }
         }
 
-        private static ScreenBrightnessConfig CreateDefaultConfig()
+        internal static ScreenBrightnessConfig CreateDefaultConfig()
         {
             var cfg = new ScreenBrightnessConfig
             {
@@ -205,9 +205,9 @@ namespace KeyPulse
                 DirectHotkeys = new List<ScreenDirectHotkey>(),
                 Screens = new List<ScreenHardwareSetting>
                 {
-                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 65, LastContrast = 65, VirtualBrightness = 65, VirtualContrast = 65 },
-                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = true, LastBrightness = 65, LastContrast = 65, VirtualBrightness = 65, VirtualContrast = 65 },
-                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = true, LastBrightness = 65, LastContrast = 65, VirtualBrightness = 65, VirtualContrast = 65 }
+                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 },
+                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = true, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 },
+                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = true, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 }
                 },
                 Profiles = new List<ScreenBrightnessProfile>
                 {
@@ -218,9 +218,9 @@ namespace KeyPulse
                         IncludeInCycle = true,
                         Targets = new List<ScreenCycleEntry>
                         {
-                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 15, Contrast = 15 },
-                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 15, Contrast = 15 },
-                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 15, Contrast = 15 }
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 25, Contrast = 25 },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 25, Contrast = 25 },
+                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 25, Contrast = 25 }
                         }
                     },
                     new ScreenBrightnessProfile
@@ -230,9 +230,9 @@ namespace KeyPulse
                         IncludeInCycle = true,
                         Targets = new List<ScreenCycleEntry>
                         {
-                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 55, Contrast = 55 },
-                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 55, Contrast = 55 },
-                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 55, Contrast = 55 }
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 50, Contrast = 50 },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 50, Contrast = 50 },
+                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 50, Contrast = 50 }
                         }
                     },
                     new ScreenBrightnessProfile
@@ -242,9 +242,9 @@ namespace KeyPulse
                         IncludeInCycle = true,
                         Targets = new List<ScreenCycleEntry>
                         {
-                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 90, Contrast = 90 },
-                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 90, Contrast = 90 },
-                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 90, Contrast = 90 }
+                            new ScreenCycleEntry { SlotIndex = 0, Brightness = 75, Contrast = 75 },
+                            new ScreenCycleEntry { SlotIndex = 1, Brightness = 75, Contrast = 75 },
+                            new ScreenCycleEntry { SlotIndex = 2, Brightness = 75, Contrast = 75 }
                         }
                     }
                 }
@@ -283,8 +283,8 @@ namespace KeyPulse
                         SlotIndex = i,
                         CustomNickname = DefaultSlotName(i),
                         LockRatio = cfg.GlobalLockBrightnessContrast,
-                        LastBrightness = 65,
-                        LastContrast = 65
+                        LastBrightness = 50,
+                        LastContrast = 50
                     });
                 }
                 else
@@ -490,11 +490,24 @@ namespace KeyPulse
         /// <summary>
         /// Returns the sorted list of SlotIndex values (0..2) that are physically connected right now.
         /// </summary>
+        private static List<int>? _cachedConnectedSlots;
+        private static DateTime _lastConnectedSlotsCheck = DateTime.MinValue;
+
         public static List<int> GetConnectedSlotIndices(ScreenBrightnessConfig? cfg = null)
         {
             cfg ??= LoadConfig();
-            var bound = BindMonitorsToSlots(cfg);
-            return bound.Keys.OrderBy(k => k).ToList();
+            lock (ConfigLock)
+            {
+                if (_cachedConnectedSlots != null && (DateTime.UtcNow - _lastConnectedSlotsCheck).TotalMilliseconds < 300)
+                {
+                    return new List<int>(_cachedConnectedSlots);
+                }
+                var bound = BindMonitorsToSlots(cfg);
+                var list = bound.Keys.OrderBy(k => k).ToList();
+                _cachedConnectedSlots = list;
+                _lastConnectedSlotsCheck = DateTime.UtcNow;
+                return new List<int>(list);
+            }
         }
 
         /// <summary>
@@ -574,6 +587,7 @@ namespace KeyPulse
                         Brightness = Math.Clamp(slotCfg.LastBrightness, 0, 100),
                         Contrast = slotCfg.LockRatio ? Math.Clamp(slotCfg.LastBrightness, 0, 100) : Math.Clamp(slotCfg.LastContrast, 0, 100),
                         LockRatio = slotCfg.LockRatio,
+                        IsLinkedToNext = slotCfg.IsLinkedToNext,
                         IsConnected = mon != null,
                         IsPrimary = mon?.IsPrimary ?? false,
                         Bounds = mon?.Bounds ?? default
@@ -635,6 +649,7 @@ namespace KeyPulse
                 Brightness = Math.Clamp(slotCfg.LastBrightness, 0, 100),
                 Contrast = slotCfg.LockRatio ? Math.Clamp(slotCfg.LastBrightness, 0, 100) : Math.Clamp(slotCfg.LastContrast, 0, 100),
                 LockRatio = slotCfg.LockRatio,
+                IsLinkedToNext = slotCfg.IsLinkedToNext,
                 IsConnected = mon != null,
                 IsPrimary = mon?.IsPrimary ?? false,
                 Bounds = mon?.Bounds ?? default
@@ -1416,19 +1431,18 @@ namespace KeyPulse
                         int targetB = targetSlotCfg.LastBrightness;
                         int targetC = targetSlotCfg.LastContrast;
 
-                        if (isBrightnessChanged && deltaB != 0)
+                        if (isBrightnessChanged)
                         {
-                            targetB = Math.Clamp(targetB + deltaB, 0, 100);
+                            targetB = brightness;
                         }
 
-                        if (isContrastChanged && deltaC != 0)
-                        {
-                            targetC = Math.Clamp(targetC + deltaC, 0, 100);
-                        }
-
-                        if (targetSlotCfg.LockRatio && isBrightnessChanged)
+                        if (targetSlotCfg.LockRatio)
                         {
                             targetC = targetB;
+                        }
+                        else if (isContrastChanged)
+                        {
+                            targetC = contrast;
                         }
 
                         targetSlotCfg.LastBrightness = targetB;
@@ -1447,6 +1461,10 @@ namespace KeyPulse
         public static List<int> GetLinkedSlotGroup(ScreenBrightnessConfig cfg, int slotIndex)
         {
             var connected = GetConnectedSlotIndices(cfg);
+            if (!connected.Contains(slotIndex))
+            {
+                connected = cfg.Screens.Select(s => s.SlotIndex).OrderBy(k => k).ToList();
+            }
             if (!connected.Contains(slotIndex)) return new List<int> { slotIndex };
 
             int idx = connected.IndexOf(slotIndex);
@@ -1497,10 +1515,51 @@ namespace KeyPulse
                 if (s != null)
                 {
                     s.IsLinkedToNext = isLinked;
+                    if (isLinked)
+                    {
+                        var group = GetLinkedSlotGroup(cfg, slotIndex);
+                        if (group.Count > 1)
+                        {
+                            var screensInGroup = cfg.Screens.Where(sc => group.Contains(sc.SlotIndex)).ToList();
+                            int avgB = (int)Math.Round(screensInGroup.Average(sc => sc.LastBrightness));
+                            int avgC = (int)Math.Round(screensInGroup.Average(sc => sc.LastContrast));
+
+                            foreach (var sc in screensInGroup)
+                            {
+                                sc.LastBrightness = avgB;
+                                sc.LastContrast = sc.LockRatio ? avgB : avgC;
+                                sc.VirtualBrightness = sc.LastBrightness;
+                                sc.VirtualContrast = sc.LastContrast;
+                                QueueThrottledHardwareWrite(sc.SlotIndex, sc.LastBrightness, sc.LastContrast);
+                            }
+                        }
+                    }
                     SaveConfigInternal(cfg);
                 }
             }
             ReanchorAllScreens();
+            NotifyStateChanged();
+        }
+
+        public static void SetScreenLevelsBatch(IReadOnlyList<(int SlotIndex, int Brightness, int Contrast)> levels)
+        {
+            if (levels == null || levels.Count == 0) return;
+            var cfg = LoadConfig();
+            lock (ConfigLock)
+            {
+                foreach (var (slotIndex, b, c) in levels)
+                {
+                    var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
+                    if (screen != null)
+                    {
+                        screen.LastBrightness = Math.Clamp(b, 0, 100);
+                        screen.LastContrast = Math.Clamp(c, 0, 100);
+                        screen.VirtualBrightness = screen.LastBrightness;
+                        screen.VirtualContrast = screen.LastContrast;
+                        QueueThrottledHardwareWrite(slotIndex, screen.LastBrightness, screen.LastContrast);
+                    }
+                }
+            }
             NotifyStateChanged();
         }
 

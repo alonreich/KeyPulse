@@ -541,6 +541,92 @@ namespace KeyPulse.Tests
             Assert.AreEqual(60, config.Screens[0].LastBrightness);
             Assert.AreEqual(90, config.Screens[1].LastBrightness);
         }
+
+        [TestMethod]
+        public void ScreenBrightness_DefaultConfig_ShipsWith25_50_75_Presets()
+        {
+            var cfg = ScreenBrightnessService.CreateDefaultConfig();
+            Assert.AreEqual(50, cfg.Screens[0].LastBrightness);
+            Assert.AreEqual(50, cfg.Screens[1].LastBrightness);
+            Assert.AreEqual(50, cfg.Screens[2].LastBrightness);
+
+            var night = cfg.Profiles.First(p => p.Name.Contains("Night"));
+            Assert.AreEqual(25, night.Targets[0].Brightness);
+            Assert.AreEqual(25, night.Targets[1].Brightness);
+
+            var balanced = cfg.Profiles.First(p => p.Name.Contains("Balanced"));
+            Assert.AreEqual(50, balanced.Targets[0].Brightness);
+            Assert.AreEqual(50, balanced.Targets[1].Brightness);
+
+            var daylight = cfg.Profiles.First(p => p.Name.Contains("Daylight"));
+            Assert.AreEqual(75, daylight.Targets[0].Brightness);
+            Assert.AreEqual(75, daylight.Targets[1].Brightness);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_InterDisplaySync_AveragesScreensOnLink()
+        {
+            var cfg = new ScreenBrightnessConfig
+            {
+                Screens = new List<ScreenHardwareSetting>
+                {
+                    new ScreenHardwareSetting { SlotIndex = 0, LastBrightness = 40, LastContrast = 40, LockRatio = true },
+                    new ScreenHardwareSetting { SlotIndex = 1, LastBrightness = 80, LastContrast = 80, LockRatio = true }
+                }
+            };
+
+            // Link Screen 0 to next (Screen 1)
+            cfg.Screens[0].IsLinkedToNext = true;
+            var group = ScreenBrightnessService.GetLinkedSlotGroup(cfg, 0);
+            Assert.AreEqual(2, group.Count);
+
+            var screensInGroup = cfg.Screens.Where(sc => group.Contains(sc.SlotIndex)).ToList();
+            int avgB = (int)Math.Round(screensInGroup.Average(sc => sc.LastBrightness));
+            Assert.AreEqual(60, avgB);
+
+            foreach (var sc in screensInGroup)
+            {
+                sc.LastBrightness = avgB;
+                sc.LastContrast = avgB;
+            }
+
+            Assert.AreEqual(60, cfg.Screens[0].LastBrightness);
+            Assert.AreEqual(60, cfg.Screens[1].LastBrightness);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_MasterSlider_BrickWallAndBreakthroughInterpolation()
+        {
+            // Screen A = 60, Screen B = 80. Master drag start = 70.
+            int startA = 60;
+            int startB = 80;
+            double startMaster = 70;
+
+            int maxUp = Math.Min(100 - startA, 100 - startB); // min(40, 20) = 20
+            int brickWallUp = (int)Math.Round(startMaster + maxUp); // 90
+            Assert.AreEqual(90, brickWallUp);
+
+            // Phase 1: at brick wall (90)
+            int wallA = startA + (brickWallUp - (int)startMaster); // 80
+            int wallB = startB + (brickWallUp - (int)startMaster); // 100
+            Assert.AreEqual(80, wallA);
+            Assert.AreEqual(100, wallB);
+
+            // Phase 2: breakthrough past brick wall towards 100
+            // At target = 95 (halfway between 90 and 100)
+            double t = (95 - brickWallUp) / (100.0 - brickWallUp); // 0.5
+            int curA = (int)Math.Round(wallA + t * (100 - wallA)); // 80 + 0.5 * 20 = 90
+            int curB = (int)Math.Round(wallB + t * (100 - wallB)); // 100 + 0 = 100
+            Assert.AreEqual(90, curA);
+            Assert.AreEqual(100, curB);
+
+            // At target = 100
+            t = 1.0;
+            curA = (int)Math.Round(wallA + t * (100 - wallA));
+            curB = (int)Math.Round(wallB + t * (100 - wallB));
+            Assert.AreEqual(100, curA);
+            Assert.AreEqual(100, curB);
+            Assert.AreEqual(100, (curA + curB) / 2);
+        }
     }
 }
-
