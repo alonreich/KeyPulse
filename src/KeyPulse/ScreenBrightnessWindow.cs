@@ -33,6 +33,7 @@ namespace KeyPulse
         private int _lastMasterValue = 50;
         private bool _suppressMasterEvents;
         private bool _isUserDraggingMaster;
+        private string _lastRenderedScreenConfig = string.Empty;
         private StackPanel? _directHotkeysStack;
         private CancellationTokenSource? _liveReadCts;
 
@@ -477,7 +478,7 @@ namespace KeyPulse
             };
             ToolTip.SetTip(_masterSlider, "Drag to adjust all displays together while maintaining their relative brightness differential.");
             _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { _isUserDraggingMaster = true; }, RoutingStrategies.Tunnel);
-            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
             _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
             _masterSlider.PropertyChanged += (_, pe) =>
             {
@@ -2216,16 +2217,54 @@ namespace KeyPulse
             }
 
             int activeCount = Math.Max(1, activeStates.Count);
-            _containersGrid.Children.Clear();
-            _containersGrid.ColumnDefinitions = new ColumnDefinitions(string.Join(",", Enumerable.Repeat("*", activeCount)));
+            string configKey = string.Join(",", activeStates.Select(s => $"{s.SlotIndex}:{s.IsConnected}:{s.IsLinkedToNext}"));
 
-            for (int col = 0; col < activeStates.Count; col++)
+            if (configKey != _lastRenderedScreenConfig)
             {
-                int slotIdx = activeStates[col].SlotIndex;
-                var view = _containers[slotIdx];
-                view.RootCard.IsVisible = true;
-                Grid.SetColumn(view.RootCard, col);
-                _containersGrid.Children.Add(view.RootCard);
+                _lastRenderedScreenConfig = configKey;
+                _containersGrid.Children.Clear();
+
+                if (activeCount == 1)
+                {
+                    _containersGrid.ColumnDefinitions = new ColumnDefinitions("*");
+                    int slotIdx = activeStates[0].SlotIndex;
+                    var view = _containers[slotIdx];
+                    view.RootCard.IsVisible = true;
+                    Grid.SetColumn(view.RootCard, 0);
+                    _containersGrid.Children.Add(view.RootCard);
+                }
+                else
+                {
+                    var colDefs = new List<string>();
+                    for (int i = 0; i < activeCount; i++)
+                    {
+                        colDefs.Add("*");
+                        if (i < activeCount - 1)
+                        {
+                            colDefs.Add("Auto");
+                        }
+                    }
+                    _containersGrid.ColumnDefinitions = new ColumnDefinitions(string.Join(",", colDefs));
+
+                    int gridCol = 0;
+                    for (int i = 0; i < activeCount; i++)
+                    {
+                        var curState = activeStates[i];
+                        int slotIdx = curState.SlotIndex;
+                        var view = _containers[slotIdx];
+                        view.RootCard.IsVisible = true;
+                        Grid.SetColumn(view.RootCard, gridCol++);
+                        _containersGrid.Children.Add(view.RootCard);
+
+                        if (i < activeCount - 1)
+                        {
+                            var nextState = activeStates[i + 1];
+                            var linkConnector = CreateInterDisplayLinkConnector(curState, nextState);
+                            Grid.SetColumn(linkConnector, gridCol++);
+                            _containersGrid.Children.Add(linkConnector);
+                        }
+                    }
+                }
             }
 
             if (_masterBar != null)
@@ -2241,6 +2280,81 @@ namespace KeyPulse
                     _suppressMasterEvents = false;
                 }
             }
+        }
+
+        private Control CreateInterDisplayLinkConnector(ScreenLiveState leftState, ScreenLiveState rightState)
+        {
+            int leftSlot = leftState.SlotIndex;
+            bool isLinked = leftState.IsLinkedToNext;
+
+            var container = new Border
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(2, 0),
+                ZIndex = 10
+            };
+
+            var syncBtn = new Button
+            {
+                Padding = new Thickness(7, 5),
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(isLinked ? 1.5 : 1),
+                Background = isLinked
+                    ? new SolidColorBrush(Color.Parse("#0369A1"))
+                    : ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = isLinked
+                    ? new SolidColorBrush(Color.Parse("#38BDF8"))
+                    : ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#475569"),
+                Cursor = new Cursor(StandardCursorType.Hand),
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            var stack = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 2,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var arrowText = new TextBlock
+            {
+                Text = "⇄",
+                FontSize = 14,
+                FontWeight = FontWeight.ExtraBold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Foreground = isLinked ? Brushes.White : ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+            };
+
+            var syncLabel = new TextBlock
+            {
+                Text = "SYNC",
+                FontSize = 8.5,
+                FontWeight = FontWeight.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Foreground = isLinked ? Brushes.White : ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
+            };
+
+            stack.Children.Add(arrowText);
+            stack.Children.Add(syncLabel);
+            syncBtn.Content = stack;
+
+            string tip = isLinked
+                ? $"Displays are synced ({leftState.Nickname} ⇄ {rightState.Nickname})! Adjusting either screen moves both together. Click to unlink."
+                : $"Click to sync {leftState.Nickname} and {rightState.Nickname} together.";
+            ToolTip.SetTip(syncBtn, tip);
+
+            syncBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                bool newLinked = !leftState.IsLinkedToNext;
+                ScreenBrightnessService.SetScreenLinkedToNext(leftSlot, newLinked);
+            };
+
+            container.Child = syncBtn;
+            return container;
         }
 
         private void UpdateMasterBaselineFromScreens()

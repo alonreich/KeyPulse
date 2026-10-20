@@ -34,6 +34,8 @@ namespace KeyPulse
         public bool SupportsContrast { get; set; } = true;
         public bool IsInternalLcd { get; set; }
         public bool UserTouched { get; set; }
+        public bool IsDraggingBrightness { get; set; }
+        public bool IsDraggingContrast { get; set; }
         public bool SuppressSliderEvents { get; set; }
         public Action? CommitPendingRename { get; set; }
     }
@@ -43,6 +45,7 @@ namespace KeyPulse
         private static ScreenBrightnessOverlayWindow? _instance;
         private readonly ScreenContainerView[] _containers = new ScreenContainerView[ScreenBrightnessService.MaxScreens];
         private bool _isUserDraggingMaster;
+        private string _lastRenderedScreenConfig = string.Empty;
         private Grid _containersGrid = null!;
         private Button? _identifyBtn;
         private CancellationTokenSource? _liveReadCts;
@@ -358,7 +361,7 @@ namespace KeyPulse
             };
             ToolTip.SetTip(_masterSlider, "Drag to adjust all displays together while maintaining their relative brightness differential.");
             _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { _isUserDraggingMaster = true; }, RoutingStrategies.Tunnel);
-            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
             _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
             _masterSlider.PropertyChanged += (_, pe) =>
             {
@@ -495,16 +498,54 @@ namespace KeyPulse
             }
 
             int activeCount = Math.Max(1, activeStates.Count);
-            _containersGrid.Children.Clear();
-            _containersGrid.ColumnDefinitions = new ColumnDefinitions(string.Join(",", Enumerable.Repeat("*", activeCount)));
+            string configKey = string.Join(",", activeStates.Select(s => $"{s.SlotIndex}:{s.IsConnected}:{s.IsLinkedToNext}"));
 
-            for (int col = 0; col < activeStates.Count; col++)
+            if (configKey != _lastRenderedScreenConfig)
             {
-                int slotIdx = activeStates[col].SlotIndex;
-                var view = _containers[slotIdx];
-                view.RootCard.IsVisible = true;
-                Grid.SetColumn(view.RootCard, col);
-                _containersGrid.Children.Add(view.RootCard);
+                _lastRenderedScreenConfig = configKey;
+                _containersGrid.Children.Clear();
+
+                if (activeCount == 1)
+                {
+                    _containersGrid.ColumnDefinitions = new ColumnDefinitions("*");
+                    int slotIdx = activeStates[0].SlotIndex;
+                    var view = _containers[slotIdx];
+                    view.RootCard.IsVisible = true;
+                    Grid.SetColumn(view.RootCard, 0);
+                    _containersGrid.Children.Add(view.RootCard);
+                }
+                else
+                {
+                    var colDefs = new List<string>();
+                    for (int i = 0; i < activeCount; i++)
+                    {
+                        colDefs.Add("*");
+                        if (i < activeCount - 1)
+                        {
+                            colDefs.Add("Auto");
+                        }
+                    }
+                    _containersGrid.ColumnDefinitions = new ColumnDefinitions(string.Join(",", colDefs));
+
+                    int gridCol = 0;
+                    for (int i = 0; i < activeCount; i++)
+                    {
+                        var curState = activeStates[i];
+                        int slotIdx = curState.SlotIndex;
+                        var view = _containers[slotIdx];
+                        view.RootCard.IsVisible = true;
+                        Grid.SetColumn(view.RootCard, gridCol++);
+                        _containersGrid.Children.Add(view.RootCard);
+
+                        if (i < activeCount - 1)
+                        {
+                            var nextState = activeStates[i + 1];
+                            var linkConnector = CreateInterDisplayLinkConnector(curState, nextState);
+                            Grid.SetColumn(linkConnector, gridCol++);
+                            _containersGrid.Children.Add(linkConnector);
+                        }
+                    }
+                }
             }
 
             if (_identifyBtn != null)
@@ -532,8 +573,8 @@ namespace KeyPulse
                 double targetWidth = activeCount switch
                 {
                     1 => 440,
-                    2 => 580,
-                    _ => 700
+                    2 => 620,
+                    _ => 840
                 };
 
                 if (Math.Abs(Width - targetWidth) > 1)
@@ -541,6 +582,81 @@ namespace KeyPulse
                     Width = targetWidth;
                 }
             }
+        }
+
+        private Control CreateInterDisplayLinkConnector(ScreenLiveState leftState, ScreenLiveState rightState)
+        {
+            int leftSlot = leftState.SlotIndex;
+            bool isLinked = leftState.IsLinkedToNext;
+
+            var container = new Border
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(2, 0),
+                ZIndex = 10
+            };
+
+            var syncBtn = new Button
+            {
+                Padding = new Thickness(7, 5),
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(isLinked ? 1.5 : 1),
+                Background = isLinked
+                    ? new SolidColorBrush(Color.Parse("#0369A1"))
+                    : AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = isLinked
+                    ? new SolidColorBrush(Color.Parse("#38BDF8"))
+                    : AppBrush("AppBorderBrush", "#475569"),
+                Cursor = new Cursor(StandardCursorType.Hand),
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            var stack = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 2,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var arrowText = new TextBlock
+            {
+                Text = "⇄",
+                FontSize = 14,
+                FontWeight = FontWeight.ExtraBold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Foreground = isLinked ? Brushes.White : AppBrush("AppTextMutedBrush", "#94A3B8")
+            };
+
+            var syncLabel = new TextBlock
+            {
+                Text = "SYNC",
+                FontSize = 8.5,
+                FontWeight = FontWeight.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Foreground = isLinked ? Brushes.White : AppBrush("AppTextMutedBrush", "#94A3B8")
+            };
+
+            stack.Children.Add(arrowText);
+            stack.Children.Add(syncLabel);
+            syncBtn.Content = stack;
+
+            string tip = isLinked
+                ? $"Displays are synced ({leftState.Nickname} ⇄ {rightState.Nickname})! Adjusting either screen moves both together. Click to unlink."
+                : $"Click to sync {leftState.Nickname} and {rightState.Nickname} together.";
+            ToolTip.SetTip(syncBtn, tip);
+
+            syncBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                bool newLinked = !leftState.IsLinkedToNext;
+                ScreenBrightnessService.SetScreenLinkedToNext(leftSlot, newLinked);
+            };
+
+            container.Child = syncBtn;
+            return container;
         }
 
         private void UpdateMasterBaselineFromScreens()
@@ -810,7 +926,7 @@ namespace KeyPulse
                 BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(12, 10),
+                Padding = new Thickness(10, 8),
                 Focusable = true,
                 ClipToBounds = true
             };
@@ -1257,8 +1373,13 @@ namespace KeyPulse
 
             UpdateContrastInteractivity(view);
 
-            brightnessSlider.PointerPressed += (_, _) => view.UserTouched = true;
-            contrastSlider.PointerPressed += (_, _) => view.UserTouched = true;
+            brightnessSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { view.UserTouched = true; view.IsDraggingBrightness = true; }, RoutingStrategies.Tunnel);
+            brightnessSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { view.IsDraggingBrightness = false; ScreenBrightnessService.ReanchorAllScreens(); }, RoutingStrategies.Tunnel);
+            brightnessSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { view.IsDraggingBrightness = false; }, RoutingStrategies.Tunnel);
+
+            contrastSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { view.UserTouched = true; view.IsDraggingContrast = true; }, RoutingStrategies.Tunnel);
+            contrastSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { view.IsDraggingContrast = false; ScreenBrightnessService.ReanchorAllScreens(); }, RoutingStrategies.Tunnel);
+            contrastSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { view.IsDraggingContrast = false; }, RoutingStrategies.Tunnel);
 
             brightnessSlider.PropertyChanged += (_, e) =>
             {
@@ -1277,7 +1398,7 @@ namespace KeyPulse
                 }
 
                 int c = locked ? b : (int)Math.Round(contrastSlider.Value);
-                ScreenBrightnessService.RequestScreenLevelChange(slotIndex, b, c, updateContrastFromLock: locked);
+                ScreenBrightnessService.RequestIndividualOrLinkedChange(slotIndex, b, c, isBrightnessChanged: true, isContrastChanged: locked);
                 onBrightnessChanged?.Invoke(slotIndex, b);
             };
 
@@ -1298,7 +1419,7 @@ namespace KeyPulse
                 }
 
                 int b = locked ? c : (int)Math.Round(brightnessSlider.Value);
-                ScreenBrightnessService.RequestScreenLevelChange(slotIndex, b, c, updateContrastFromLock: false);
+                ScreenBrightnessService.RequestIndividualOrLinkedChange(slotIndex, b, c, isBrightnessChanged: locked, isContrastChanged: true);
             };
 
             void AttachWheelHandler(Control target, Slider sliderToAdjust)
@@ -1419,7 +1540,6 @@ namespace KeyPulse
 
         public static void SyncFromConfigState(ScreenContainerView view, ScreenLiveState state)
         {
-            if (view.UserTouched) return;
             view.SuppressSliderEvents = true;
             try
             {
@@ -1431,11 +1551,17 @@ namespace KeyPulse
                     view.TitleText.Text = hasCustom ? state.Nickname : state.DefaultSlotLabel;
                 }
                 view.LockRatioCheckBox.IsChecked = state.LockRatio;
-                view.BrightnessSlider.Value = state.Brightness;
-                view.BrightnessValueText.Text = state.Brightness.ToString();
-                int c = state.LockRatio ? state.Brightness : state.Contrast;
-                view.ContrastSlider.Value = c;
-                view.ContrastValueText.Text = c.ToString();
+                if (!view.IsDraggingBrightness)
+                {
+                    view.BrightnessSlider.Value = state.Brightness;
+                    view.BrightnessValueText.Text = state.Brightness.ToString();
+                }
+                if (!view.IsDraggingContrast)
+                {
+                    int c = state.LockRatio ? state.Brightness : state.Contrast;
+                    view.ContrastSlider.Value = c;
+                    view.ContrastValueText.Text = c.ToString();
+                }
                 UpdateContrastInteractivity(view);
             }
             finally

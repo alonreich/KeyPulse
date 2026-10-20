@@ -25,6 +25,7 @@ namespace KeyPulse
         public int Brightness { get; set; } = 65;
         public int Contrast { get; set; } = 65;
         public bool LockRatio { get; set; } = true;
+        public bool IsLinkedToNext { get; set; }
         public bool IsConnected { get; set; }
         public bool IsPrimary { get; set; }
         public bool IsInternalLcd { get; set; }
@@ -521,6 +522,7 @@ namespace KeyPulse
                     Brightness = b,
                     Contrast = c,
                     LockRatio = s.LockRatio,
+                    IsLinkedToNext = s.IsLinkedToNext,
                     IsConnected = isConn,
                     IsPrimary = isConn && mon!.IsPrimary,
                     SupportsBrightness = isConn,
@@ -692,6 +694,11 @@ namespace KeyPulse
         /// </summary>
         public static void RequestScreenLevelChange(int slotIndex, int brightness, int contrast, bool updateContrastFromLock = true)
         {
+            RequestScreenLevelChangeInternal(slotIndex, brightness, contrast, updateContrastFromLock, preserveVirtual: false);
+        }
+
+        private static void RequestScreenLevelChangeInternal(int slotIndex, int brightness, int contrast, bool updateContrastFromLock, bool preserveVirtual)
+        {
             if (slotIndex < 0 || slotIndex >= MaxScreens) return;
 
             brightness = Math.Clamp(brightness, 0, 100);
@@ -707,8 +714,13 @@ namespace KeyPulse
                 }
                 slotCfg.LastBrightness = brightness;
                 slotCfg.LastContrast = contrast;
-                slotCfg.VirtualBrightness = brightness;
-                slotCfg.VirtualContrast = contrast;
+                if (!preserveVirtual)
+                {
+                    slotCfg.VirtualBrightness = brightness;
+                    slotCfg.VirtualContrast = contrast;
+    
+                }
+
             }
 
             Program.LogDebug($"[ScreenBrightness] RequestScreenLevelChange slot={slotIndex} b={brightness} c={contrast} updateContrastFromLock={updateContrastFromLock}");
@@ -1314,26 +1326,181 @@ namespace KeyPulse
             var connectedSlots = GetConnectedSlotIndices(cfg);
             if (connectedSlots.Count == 0 || deltaBrightness == 0) return;
 
-            foreach (var slot in connectedSlots)
+            lock (ConfigLock)
             {
-                var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
-                if (screen != null)
+                foreach (var slot in connectedSlots)
                 {
-                    if (screen.VirtualBrightness == 0 && screen.LastBrightness > 0)
+                    var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
+                    if (screen != null)
                     {
-                        screen.VirtualBrightness = screen.LastBrightness;
+                        if (screen.VirtualBrightness == 0 && screen.LastBrightness > 0)
+                        {
+                            screen.VirtualBrightness = screen.LastBrightness;
+                        }
+                        if (screen.VirtualContrast == 0 && screen.LastContrast > 0)
+                        {
+                            screen.VirtualContrast = screen.LastContrast;
+                        }
+
+                        int newVirtualB = Math.Clamp(screen.VirtualBrightness + deltaBrightness, -100, 200);
+                        screen.VirtualBrightness = newVirtualB;
+
+                        int newPhysicalB = Math.Clamp(newVirtualB, 0, 100);
+                        screen.LastBrightness = newPhysicalB;
+
+                        int newPhysicalC;
+                        if (screen.LockRatio)
+                        {
+                            screen.VirtualContrast = newVirtualB;
+                            newPhysicalC = newPhysicalB;
+                            screen.LastContrast = newPhysicalC;
+                        }
+                        else
+                        {
+                            int newVirtualC = Math.Clamp(screen.VirtualContrast + deltaBrightness, -100, 200);
+                            screen.VirtualContrast = newVirtualC;
+                            newPhysicalC = Math.Clamp(newVirtualC, 0, 100);
+                            screen.LastContrast = newPhysicalC;
+                        }
+
+                        RequestScreenLevelChangeInternal(slot, newPhysicalB, newPhysicalC, updateContrastFromLock: screen.LockRatio, preserveVirtual: true);
                     }
-
-                    int newVirtualB = Math.Clamp(screen.VirtualBrightness + deltaBrightness, -100, 200);
-                    screen.VirtualBrightness = newVirtualB;
-
-                    int newPhysicalB = Math.Clamp(newVirtualB, 0, 100);
-                    int newPhysicalC = screen.LockRatio ? newPhysicalB : Math.Clamp(screen.LastContrast + deltaBrightness, 0, 100);
-                    RequestScreenLevelChange(slot, newPhysicalB, newPhysicalC, updateContrastFromLock: screen.LockRatio);
                 }
             }
 
-            SaveConfig(cfg);
+            NotifyStateChanged();
+        }
+
+        public static void RequestIndividualOrLinkedChange(int slotIndex, int brightness, int contrast, bool isBrightnessChanged, bool isContrastChanged)
+        {
+            if (slotIndex < 0 || slotIndex >= MaxScreens) return;
+
+            brightness = Math.Clamp(brightness, 0, 100);
+            contrast = Math.Clamp(contrast, 0, 100);
+
+            var cfg = LoadConfig();
+
+            lock (ConfigLock)
+            {
+                var sourceSlotCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
+                if (sourceSlotCfg == null) return;
+
+                int deltaB = brightness - sourceSlotCfg.LastBrightness;
+                int deltaC = contrast - sourceSlotCfg.LastContrast;
+
+                if (sourceSlotCfg.LockRatio && isBrightnessChanged)
+                {
+                    contrast = brightness;
+                }
+                else if (sourceSlotCfg.LockRatio && isContrastChanged)
+                {
+                    brightness = contrast;
+                }
+
+                sourceSlotCfg.LastBrightness = brightness;
+                sourceSlotCfg.LastContrast = contrast;
+                sourceSlotCfg.VirtualBrightness = brightness;
+                sourceSlotCfg.VirtualContrast = contrast;
+
+                QueueThrottledHardwareWrite(slotIndex, brightness, contrast);
+
+                var syncGroup = GetLinkedSlotGroup(cfg, slotIndex);
+                if (syncGroup.Count > 1)
+                {
+                    foreach (var targetSlot in syncGroup)
+                    {
+                        if (targetSlot == slotIndex) continue;
+                        var targetSlotCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == targetSlot);
+                        if (targetSlotCfg == null) continue;
+
+                        int targetB = targetSlotCfg.LastBrightness;
+                        int targetC = targetSlotCfg.LastContrast;
+
+                        if (isBrightnessChanged && deltaB != 0)
+                        {
+                            targetB = Math.Clamp(targetB + deltaB, 0, 100);
+                        }
+
+                        if (isContrastChanged && deltaC != 0)
+                        {
+                            targetC = Math.Clamp(targetC + deltaC, 0, 100);
+                        }
+
+                        if (targetSlotCfg.LockRatio && isBrightnessChanged)
+                        {
+                            targetC = targetB;
+                        }
+
+                        targetSlotCfg.LastBrightness = targetB;
+                        targetSlotCfg.LastContrast = targetC;
+                        targetSlotCfg.VirtualBrightness = targetB;
+                        targetSlotCfg.VirtualContrast = targetC;
+
+                        QueueThrottledHardwareWrite(targetSlot, targetB, targetC);
+                    }
+                }
+            }
+
+            NotifyStateChanged();
+        }
+
+        public static List<int> GetLinkedSlotGroup(ScreenBrightnessConfig cfg, int slotIndex)
+        {
+            var connected = GetConnectedSlotIndices(cfg);
+            if (!connected.Contains(slotIndex)) return new List<int> { slotIndex };
+
+            int idx = connected.IndexOf(slotIndex);
+            int left = idx;
+            while (left > 0)
+            {
+                var prevSlot = connected[left - 1];
+                var prevScreen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == prevSlot);
+                if (prevScreen != null && prevScreen.IsLinkedToNext)
+                {
+                    left--;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            int right = idx;
+            while (right < connected.Count - 1)
+            {
+                var curSlot = connected[right];
+                var curScreen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == curSlot);
+                if (curScreen != null && curScreen.IsLinkedToNext)
+                {
+                    right++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            var group = new List<int>();
+            for (int k = left; k <= right; k++)
+            {
+                group.Add(connected[k]);
+            }
+            return group;
+        }
+
+        public static void SetScreenLinkedToNext(int slotIndex, bool isLinked)
+        {
+            var cfg = LoadConfig();
+            lock (ConfigLock)
+            {
+                var s = cfg.Screens.FirstOrDefault(x => x.SlotIndex == slotIndex);
+                if (s != null)
+                {
+                    s.IsLinkedToNext = isLinked;
+                    SaveConfigInternal(cfg);
+                }
+            }
+            ReanchorAllScreens();
             NotifyStateChanged();
         }
 

@@ -787,6 +787,7 @@ namespace KeyPulse
         public int LastContrast { get; set; } = 65;
         public int VirtualBrightness { get; set; } = 65;
         public int VirtualContrast { get; set; } = 65;
+        public bool IsLinkedToNext { get; set; } = false;
     }
 
     public class ScreenCycleEntry

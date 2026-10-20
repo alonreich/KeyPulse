@@ -8,6 +8,24 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Inter-Display Link/Sync Connectors & Real-Time Slider Propagation (Models.cs, ScreenBrightnessService.cs, ScreenBrightnessOverlayWindow.cs, ScreenBrightnessWindow.cs)
+- **Pairwise Display Sync Data Model (Models.cs, ScreenBrightnessService.cs)**:
+  - Added IsLinkedToNext (bool, default alse) to ScreenHardwareSetting and ScreenLiveState.
+  - Added GetLinkedSlotGroup(ScreenBrightnessConfig cfg, int slotIndex) resolving transitive connected display groups across adjacent slots.
+  - Added SetScreenLinkedToNext(int slotIndex, bool isLinked) persisting pairwise links and re-anchoring baseline offsets.
+  - Implemented RequestIndividualOrLinkedChange(slotIndex, brightness, contrast, isBrightnessChanged, isContrastChanged): when a slider on an individual screen changes, propagates delta movements symmetrically across all linked displays in its sync group while respecting individual monitor LockRatio configurations.
+- **Inter-Display Link Connector UI (ScreenBrightnessOverlayWindow.cs, ScreenBrightnessWindow.cs)**:
+  - Inserted high-contrast ⇄ SYNC toggle buttons between adjacent display cards within _containersGrid (columns *, Auto, *, Auto, *).
+  - Active linked state features deep sky blue #0369A1 background, electric cyan #38BDF8 border, bold white glyphs, and descriptive tooltips. Unlinked state features subtle #1E293B background and #94A3B8 foreground.
+  - Narrowed display container card padding from 12, 10 to 10, 8 for sleek multi-monitor layout balance.
+- **Master Slider Disk Thrashing & Boundary Stutter Elimination**:
+  - Removed synchronous SaveConfig(cfg) on every drag tick in RequestMasterLevelChange, enforcing strictly in-memory updates. Disk writes are deferred to the existing background trailing-edge throttle in ExecutePendingWriteForSlot.
+  - Added preserveVirtual: true in RequestScreenLevelChangeInternal so boundary clamp writes do not destroy VirtualBrightness or VirtualContrast offset memory.
+  - Cached container grid configuration (_lastRenderedScreenConfig) to prevent destructive visual tree tearing (_containersGrid.Children.Clear()) on every slider tick.
+- **Live Vertical Sliders Visual Tracking Fix**:
+  - Removed unconditional if (view.UserTouched) return; block in ScreenContainerBuilder.SyncFromConfigState.
+  - Added IsDraggingBrightness and IsDraggingContrast tracking to ScreenContainerView, ensuring vertical companion sliders glide live with master or companion slider adjustments without fighting local cursor drags.
+
 ## [v2026.10.20.0939] - 2026-10-20
 
 ### Multi-Monitor Virtual Clamping Memory & Drag Session State (`Models.cs`, `ScreenBrightnessService.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)

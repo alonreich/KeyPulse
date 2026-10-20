@@ -216,8 +216,14 @@ is, proved it is undamaged, and been read end to end.** Nothing is touched befor
 
 ### Screen Brightness & Contrast Control (`ScreenBrightnessService.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)
 - **Movable, Resizable & Geometry-Remembering Brightness/Contrast Slider**: The tray overlay window (`ScreenBrightnessOverlayWindow`), titled **Brightness/Contrast Slider**, is fully resizable (`CanResize = true`) and movable by dragging the title bar (`BeginMoveDrag`). Its screen position and dimensions (`OverlayWindowX`, `OverlayWindowY`, `OverlayWindowWidth`, `OverlayWindowHeight`) are automatically remembered in `ScreenBrightnessConfig`. Disconnected monitors are dynamically hidden and the window scales responsively without numeric clipping or slider collisions.
+- **Inter-Display Link/Sync Connectors (`⇄ SYNC`) & Clustered Pairwise Synchronization**:
+  - High-contrast interactive `⇄ SYNC` toggle buttons are positioned between adjacent display cards across both the tray overlay and main Screen Brightness windows (grid columns `*, Auto, *, Auto, *`).
+  - Allows granular pairwise or chained synchronization (e.g. sync Screen A ⇄ Screen B while Screen C remains independent, or link all 3 displays).
+  - Adjusting Brightness or Contrast on any monitor in a sync group propagates identical deltas symmetrically across all linked displays in real time (`RequestIndividualOrLinkedChange`).
+  - Respects each display's independent `LockRatio` configuration (e.g. if Screen A has independent contrast and Screen B has locked ratio, Brightness moves together, while Screen B's contrast mirrors its brightness).
 - **Master Stepper Action Buttons (`−` and `+`)**: Replaced confusing `−5%` and `+5%` text with clean, bold, high-contrast `−` and `+` square buttons (32x30 footprint, bold 16pt font, hand cursor, pressed indentation) for immediate one-click stepping across all displays.
 - **Linked "All Displays (Synced)" Master Slider with Boundary Clamping Memory (Fixed Gap)**:
+  - Live vertical slider tracking and zero disk thrashing: moving the master slider updates display levels strictly in memory without blocking SSD disk writes, deferring persistence to the background trailing-edge flush. Vertical companion sliders track the master slider live at 60 FPS, while visual tree layout diffing (`_lastRenderedScreenConfig`) prevents tearing or layout destruction.**:
   - Features prominent gradient styling (`#162032` to `#1e1b4b`), vibrant border (`#38BDF8` to `#818CF8`), and `SYNCED MASTER` badge.
   - Implements virtual boundary tracking (`VirtualBrightness` and `VirtualContrast`, clamp range `[-100, 200]`).
   - Preserves custom differential gap offsets across 2, 3, or more displays. When dragged down to 0% or up to 100%, physical monitors clamp safely at hardware boundaries without controller damage. When moving back in reverse direction, monitors unclamp in exact reverse order, restoring original custom gaps.
