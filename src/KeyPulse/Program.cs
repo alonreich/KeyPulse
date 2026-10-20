@@ -1174,6 +1174,43 @@ class Program
     public static bool CreateOrUpdateAdminTask(bool enable, out string error, string? forUser = null)
     {
         error = string.Empty;
+
+        // Fast-path: Check if the task already exists with the correct executable path and RunLevel
+        bool taskMatchesExe = false;
+        bool taskIsElevated = false;
+        bool taskIsEnabled = false;
+
+        if (TryGetAdminTaskViaCom(out var existingXml, out var comEnabled, out var comNotFound) && !comNotFound && !string.IsNullOrWhiteSpace(existingXml))
+        {
+            taskMatchesExe = existingXml.IndexOf(ExePath, StringComparison.OrdinalIgnoreCase) >= 0;
+            taskIsElevated = existingXml.IndexOf("<RunLevel>HighestAvailable</RunLevel>", StringComparison.OrdinalIgnoreCase) >= 0;
+            taskIsEnabled = comEnabled;
+        }
+        else if (RunSchtasks($"/Query /TN \"{AdminTaskName}\" /XML", out _, out var schtasksXml) && !string.IsNullOrWhiteSpace(schtasksXml))
+        {
+            taskMatchesExe = schtasksXml.IndexOf(ExePath, StringComparison.OrdinalIgnoreCase) >= 0;
+            taskIsElevated = schtasksXml.IndexOf("<RunLevel>HighestAvailable</RunLevel>", StringComparison.OrdinalIgnoreCase) >= 0;
+            taskIsEnabled = !schtasksXml.Contains("<Enabled>false</Enabled>", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (taskMatchesExe && taskIsElevated)
+        {
+            if (enable == taskIsEnabled)
+            {
+                EnsureAdminTaskBatterySettings();
+                InvalidateAdminTaskState();
+                return true;
+            }
+
+            var verb = enable ? "/ENABLE" : "/DISABLE";
+            if (RunSchtasks($"/Change /TN \"{AdminTaskName}\" {verb}", out _, out _))
+            {
+                EnsureAdminTaskBatterySettings();
+                InvalidateAdminTaskState();
+                return true;
+            }
+        }
+
         var user = forUser ?? System.Security.Principal.WindowsIdentity.GetCurrent().Name;
 
         var xmlTemplate = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
@@ -1259,6 +1296,32 @@ class Program
                 {
                     RunSchtasks($"/Change /TN \"{AdminTaskName}\" /DISABLE", out _, out _);
                 }
+            }
+        }
+
+        if (!created && !IsElevated && File.Exists(ExePath))
+        {
+            try
+            {
+                using var elevatedHelper = Process.Start(new ProcessStartInfo
+                {
+                    FileName = ExePath,
+                    Arguments = $"--setup-admin-task --for-user \"{user}\"",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+                if (elevatedHelper != null && elevatedHelper.WaitForExit(10000))
+                {
+                    InvalidateAdminTaskState();
+                    if (GetAdminTaskState() == AdminTaskState.Enabled)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogDebug("Elevated task setup helper failed: " + ex.Message);
             }
         }
 

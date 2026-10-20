@@ -1328,7 +1328,7 @@ namespace KeyPulse
                     {
                         if (Program.CreateOrUpdateAdminTask(enable: true, out var taskError))
                         {
-                            Log("  -> Preserved Administrator privileges (logon task created with battery restrictions disabled).");
+                            Log("  -> Preserved Administrator privileges (logon task configured with battery restrictions disabled).");
                             try
                             {
                                 using var runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);

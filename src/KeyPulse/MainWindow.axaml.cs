@@ -2916,12 +2916,15 @@ namespace KeyPulse
                         try
                         {
                             var parentArg = $"--parent-pid {Environment.ProcessId}";
-                            var adminArg = Program.IsElevated ? " --was-elevated" : "";
+                            bool shouldElevate = Program.IsElevated
+                                || Program.IsAdminTaskInstalled()
+                                || Program.GetAdminTaskState() == Program.AdminTaskState.Enabled;
+                            var adminArg = shouldElevate ? " --was-elevated" : "";
                             var psi = new ProcessStartInfo(targetInstallerExe)
                             {
                                 UseShellExecute = true,
                                 Arguments = $"--update-worker {parentArg}{adminArg}",
-                                Verb = Program.IsElevated ? "runas" : ""
+                                Verb = shouldElevate ? "runas" : ""
                             };
                             Process.Start(psi);
                             updateWin.Close();

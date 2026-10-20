@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **In-App Update "Access is Denied" Scheduled Task Warning**: Eliminated update installer Step 6 throwing an `ERROR: Access is denied` warning banner during application upgrades when preserving Administrator mode. Implemented a non-elevated fast-path in `CreateOrUpdateAdminTask` that verifies existing task XML integrity and path matching, updates task enablement via `schtasks /Change` without requiring administrative rights, launches update workers with `Verb = "runas"` and `--was-elevated` when Administrator mode is active, and falls back to an elevated task setup helper to guarantee zero-warning upgrades.
+
 ## [v2026.10.20.0603] - 2026-10-20
 
 ### Added

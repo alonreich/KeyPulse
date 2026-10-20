@@ -434,5 +434,16 @@ namespace KeyPulse.Tests
             Assert.AreEqual(20, dhAll.Brightness);
             Assert.AreEqual("Ctrl+Alt+0", dhAll.Hotkey);
         }
+
+        [TestMethod]
+        public void CreateOrUpdateAdminTask_WhenTaskAlreadyPresent_SucceedsWithoutElevationError()
+        {
+            if (Program.IsAdminTaskInstalled())
+            {
+                var ok = Program.CreateOrUpdateAdminTask(true, out var error);
+                Assert.IsTrue(ok, "Expected CreateOrUpdateAdminTask to succeed via fast-path: " + error);
+                Assert.IsTrue(string.IsNullOrEmpty(error), "Expected no error string: " + error);
+            }
+        }
     }
 }

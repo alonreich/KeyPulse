@@ -8,6 +8,17 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Update Installer Elevation & Admin Task Preservation Resilience
+- **Scheduled Task Fast-Path & Non-Elevated Protection (`Program.cs`)**:
+  - In `Program.CreateOrUpdateAdminTask`, added a non-destructive fast-path querying `TryGetAdminTaskViaCom` and `RunSchtasks /Query /XML`. If `KeyPulse_AdminTask` is already registered, targets `Program.ExePath`, and possesses `<RunLevel>HighestAvailable</RunLevel>`, it verifies XML integrity without invoking destructive `RegisterTask` or `schtasks /Create /XML /F` commands that fail with `ERROR: Access is denied` under unelevated tokens.
+  - Enabled non-elevated task state transitions using `schtasks /Change /TN KeyPulse_AdminTask /ENABLE` and `/DISABLE`.
+  - Added elevated fallback helper invoking `ExePath --setup-admin-task --for-user "{user}"` with `Verb = "runas"` if an unelevated installer must create a fresh task.
+- **Update Worker Elevation Trigger (`MainWindow.axaml.cs`)**:
+  - In `ExecuteRestart()`, evaluated `shouldElevate = Program.IsElevated || Program.IsAdminTaskInstalled() || Program.GetAdminTaskState() == Program.AdminTaskState.Enabled`.
+  - Configured updater child process `ProcessStartInfo` to launch with `Verb = "runas"` and append `--was-elevated` whenever administrative privileges or startup tasks are active.
+- **Setup Window Progress Feedback (`SetupWindow.cs`)**:
+  - Refined Step 6 logging to "Preserved Administrator privileges (logon task configured with battery restrictions disabled)."
+
 ### Settings & Preferences Information Architecture & Wiring (Audit Issues #1–#17)
 - **Settings Architecture & Tab Sprawl Consolidation (#9)**: Consolidated settings from 8 tabs into 4 top-tier application categories: General (category 0: Startup, Sound, Typing delay, Web Browser, Admin mode), Appearance (category 1: Light/Dark/System theme), Displays & Icons (category 2: Screen Brightness & Desktop Organizer), and Backup & Updates (category 3: Updates, Backup/Import, Danger Zone).
 - **Desktop Organizer Automation Settings (#10)**: Surfaced AutoRestoreOnDisplayChange and AutoPeriodicSnapshotEnabled checkboxes directly on the Displays & Icons preferences card in MainWindow.axaml.cs, synchronized with DesktopOrganizerService.
