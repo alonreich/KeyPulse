@@ -670,7 +670,7 @@ namespace KeyPulse
             }
         }
 
-        private async Task<List<string>> CreateShortcutsAsync(string startMenuShortcut, string? desktopShortcut)
+        private async Task<List<string>> CreateShortcutsAsync(string startMenuShortcut, string? desktopShortcut, bool desktopShortcutRequested = true)
         {
             var warnings = new List<string>();
             Directory.CreateDirectory(Path.GetDirectoryName(startMenuShortcut)!);
@@ -690,7 +690,7 @@ namespace KeyPulse
                         warnings.Add($"Desktop shortcut creation failed: {errDesk ?? "Shortcut was not created."}");
                     }
                 }
-                else
+                else if (desktopShortcutRequested)
                 {
                     warnings.Add("Desktop shortcut skipped because no writable Desktop folder could be resolved.");
                 }
@@ -1306,7 +1306,21 @@ namespace KeyPulse
                     Log("  -> Desktop probe: " + desktopProbeSummary);
                 }
                 var desktop = desktopDir == null ? null : Path.Combine(desktopDir, "KeyPulse.lnk");
-                var shortcutWarnings = await CreateShortcutsAsync(startMenu, desktop);
+                bool shouldCreateDesktop = true;
+                if ((_isUpdate || isUpgrade) && desktop != null)
+                {
+                    if (File.Exists(desktop))
+                    {
+                        Log("  -> Existing desktop shortcut detected; updating target path and properties.");
+                    }
+                    else
+                    {
+                        Log("  -> Upgrade/Update detected and desktop shortcut does not exist. Skipping creation to preserve clean desktop.");
+                        shouldCreateDesktop = false;
+                        desktop = null;
+                    }
+                }
+                var shortcutWarnings = await CreateShortcutsAsync(startMenu, desktop, desktopShortcutRequested: shouldCreateDesktop);
                 if (shortcutWarnings.Count == 0)
                 {
                     Log("  -> Success.");

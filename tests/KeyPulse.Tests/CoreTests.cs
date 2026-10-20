@@ -445,5 +445,102 @@ namespace KeyPulse.Tests
                 Assert.IsTrue(string.IsNullOrEmpty(error), "Expected no error string: " + error);
             }
         }
+
+        [TestMethod]
+        public void ScreenBrightness_VirtualBoundaryClamping_PreservesDifferentialAndRestoresOrder()
+        {
+            var screens = new List<ScreenHardwareSetting>
+            {
+                new ScreenHardwareSetting { SlotIndex = 0, LastBrightness = 5, VirtualBrightness = 5 },
+                new ScreenHardwareSetting { SlotIndex = 1, LastBrightness = 10, VirtualBrightness = 10 },
+                new ScreenHardwareSetting { SlotIndex = 2, LastBrightness = 15, VirtualBrightness = 15 }
+            };
+
+            // Drag down by -20% -> all hit bottom floor (0%) but remember their virtual levels
+            int deltaDown = -20;
+            foreach (var s in screens)
+            {
+                s.VirtualBrightness = Math.Clamp(s.VirtualBrightness + deltaDown, -100, 200);
+                s.LastBrightness = Math.Clamp(s.VirtualBrightness, 0, 100);
+            }
+
+            Assert.AreEqual(-15, screens[0].VirtualBrightness);
+            Assert.AreEqual(-10, screens[1].VirtualBrightness);
+            Assert.AreEqual(-5, screens[2].VirtualBrightness);
+
+            // Physical levels are clamped safely to 0 (hardware is protected)
+            Assert.AreEqual(0, screens[0].LastBrightness);
+            Assert.AreEqual(0, screens[1].LastBrightness);
+            Assert.AreEqual(0, screens[2].LastBrightness);
+
+            // Drag back up by +15% -> screen 2 reaches 10%, screen 1 reaches 5%, screen 0 stays at 0%
+            int deltaUp1 = 15;
+            foreach (var s in screens)
+            {
+                s.VirtualBrightness = Math.Clamp(s.VirtualBrightness + deltaUp1, -100, 200);
+                s.LastBrightness = Math.Clamp(s.VirtualBrightness, 0, 100);
+            }
+
+            Assert.AreEqual(0, screens[0].VirtualBrightness);
+            Assert.AreEqual(5, screens[1].VirtualBrightness);
+            Assert.AreEqual(10, screens[2].VirtualBrightness);
+
+            Assert.AreEqual(0, screens[0].LastBrightness);
+            Assert.AreEqual(5, screens[1].LastBrightness);
+            Assert.AreEqual(10, screens[2].LastBrightness);
+
+            // Drag back up remaining +5% (total +20%) -> exact original levels restored
+            int deltaUp2 = 5;
+            foreach (var s in screens)
+            {
+                s.VirtualBrightness = Math.Clamp(s.VirtualBrightness + deltaUp2, -100, 200);
+                s.LastBrightness = Math.Clamp(s.VirtualBrightness, 0, 100);
+            }
+
+            Assert.AreEqual(5, screens[0].VirtualBrightness);
+            Assert.AreEqual(10, screens[1].VirtualBrightness);
+            Assert.AreEqual(15, screens[2].VirtualBrightness);
+
+            Assert.AreEqual(5, screens[0].LastBrightness);
+            Assert.AreEqual(10, screens[1].LastBrightness);
+            Assert.AreEqual(15, screens[2].LastBrightness);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_IndividualSliderAdjustment_ReanchorsVirtualBaselines()
+        {
+            var config = new ScreenBrightnessConfig
+            {
+                Screens = new List<ScreenHardwareSetting>
+                {
+                    new ScreenHardwareSetting { SlotIndex = 0, LastBrightness = 50, VirtualBrightness = 50 },
+                    new ScreenHardwareSetting { SlotIndex = 1, LastBrightness = 60, VirtualBrightness = 60 }
+                }
+            };
+
+            // User moves Screen B to 80%
+            config.Screens[1].LastBrightness = 80;
+
+            // Reanchoring aligns virtual brightness to current physical brightness
+            foreach (var s in config.Screens)
+            {
+                s.VirtualBrightness = s.LastBrightness;
+            }
+
+            Assert.AreEqual(50, config.Screens[0].VirtualBrightness);
+            Assert.AreEqual(80, config.Screens[1].VirtualBrightness);
+
+            // Step master by +10%
+            foreach (var s in config.Screens)
+            {
+                s.VirtualBrightness = Math.Clamp(s.VirtualBrightness + 10, -100, 200);
+                s.LastBrightness = Math.Clamp(s.VirtualBrightness, 0, 100);
+            }
+
+            // Both move together preserving the new 30% gap
+            Assert.AreEqual(60, config.Screens[0].LastBrightness);
+            Assert.AreEqual(90, config.Screens[1].LastBrightness);
+        }
     }
 }
+

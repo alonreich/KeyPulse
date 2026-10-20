@@ -29,6 +29,7 @@ namespace KeyPulse
         public Slider BrightnessSlider { get; init; } = null!;
         public Slider ContrastSlider { get; init; } = null!;
         public CheckBox LockRatioCheckBox { get; init; } = null!;
+        public Border SlotBadge { get; init; } = null!;
         public TextBlock StatusBadgeText { get; init; } = null!;
         public bool SupportsContrast { get; set; } = true;
         public bool IsInternalLcd { get; set; }
@@ -41,6 +42,7 @@ namespace KeyPulse
     {
         private static ScreenBrightnessOverlayWindow? _instance;
         private readonly ScreenContainerView[] _containers = new ScreenContainerView[ScreenBrightnessService.MaxScreens];
+        private bool _isUserDraggingMaster;
         private Grid _containersGrid = null!;
         private Button? _identifyBtn;
         private CancellationTokenSource? _liveReadCts;
@@ -56,7 +58,7 @@ namespace KeyPulse
         public ScreenBrightnessOverlayWindow()
         {
             var cfg = ScreenBrightnessService.LoadConfig();
-            Title = "Screen Brightness Quick Sliders";
+            Title = "Brightness/Contrast Slider";
             Width = cfg.OverlayWindowWidth >= 500 ? cfg.OverlayWindowWidth : 700;
             Height = cfg.OverlayWindowHeight >= 400 ? cfg.OverlayWindowHeight : 540;
             MinWidth = 620;
@@ -321,13 +323,19 @@ namespace KeyPulse
 
             var masterMinusBtn = new Button
             {
-                Content = $"−{stepDelta}%",
+                Content = "−",
                 Classes = { "Secondary" },
-                Padding = new Thickness(8, 3),
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center
+                Width = 32,
+                Height = 30,
+                Padding = new Thickness(0),
+                FontSize = 16,
+                FontWeight = FontWeight.Bold,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand)
             };
-            ToolTip.SetTip(masterMinusBtn, $"Step all displays down by {stepDelta}% (preserves differential, clamps at 0%)");
+            ToolTip.SetTip(masterMinusBtn, $"Step all displays down by {stepDelta}% (maintains differential gap)");
             masterMinusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -349,6 +357,9 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center
             };
             ToolTip.SetTip(_masterSlider, "Drag to adjust all displays together while maintaining their relative brightness differential.");
+            _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { _isUserDraggingMaster = true; }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
             _masterSlider.PropertyChanged += (_, pe) =>
             {
                 if (pe.Property != RangeBase.ValueProperty || _suppressMasterEvents) return;
@@ -366,13 +377,19 @@ namespace KeyPulse
 
             var masterPlusBtn = new Button
             {
-                Content = $"+{stepDelta}%",
+                Content = "+",
                 Classes = { "Secondary" },
-                Padding = new Thickness(8, 3),
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center
+                Width = 32,
+                Height = 30,
+                Padding = new Thickness(0),
+                FontSize = 16,
+                FontWeight = FontWeight.Bold,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand)
             };
-            ToolTip.SetTip(masterPlusBtn, $"Step all displays up by {stepDelta}% (preserves differential, clamps at 100%)");
+            ToolTip.SetTip(masterPlusBtn, $"Step all displays up by {stepDelta}% (maintains differential gap)");
             masterPlusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -413,7 +430,7 @@ namespace KeyPulse
                 var containerView = ScreenContainerBuilder.CreateScreenContainer(
                     state,
                     onNickChanged: () => ScreenBrightnessService.NotifyStateChanged(),
-                    onBrightnessChanged: (slot, val) => UpdateMasterBaselineFromScreens());
+                    onBrightnessChanged: (slot, val) => { ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); });
                 _containers[i] = containerView;
             }
 
@@ -498,13 +515,13 @@ namespace KeyPulse
             if (_masterBar != null)
             {
                 _masterBar.IsVisible = activeCount > 1;
-                if (activeCount > 1 && _masterSlider != null)
+                if (activeCount > 1 && _masterSlider != null && !_isUserDraggingMaster)
                 {
-                    var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+                    int avg = (int)Math.Round(activeStates.Average(s => s.Brightness));
                     _suppressMasterEvents = true;
-                    _masterSlider.Value = baseScreen.Brightness;
-                    _lastMasterValue = baseScreen.Brightness;
-                    if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+                    _masterSlider.Value = avg;
+                    _lastMasterValue = avg;
+                    if (_masterValueText != null) _masterValueText.Text = avg.ToString();
                     _suppressMasterEvents = false;
                 }
             }
@@ -528,16 +545,16 @@ namespace KeyPulse
 
         private void UpdateMasterBaselineFromScreens()
         {
-            if (_masterSlider == null) return;
+            if (_masterSlider == null || _isUserDraggingMaster) return;
             var states = ScreenBrightnessService.GetImmediateCachedStates();
             var activeStates = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
             if (activeStates.Count <= 1) return;
 
-            var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+            int avg = (int)Math.Round(activeStates.Average(s => s.Brightness));
             _suppressMasterEvents = true;
-            _masterSlider.Value = baseScreen.Brightness;
-            _lastMasterValue = baseScreen.Brightness;
-            if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+            _masterSlider.Value = avg;
+            _lastMasterValue = avg;
+            if (_masterValueText != null) _masterValueText.Text = avg.ToString();
             _suppressMasterEvents = false;
         }
 
@@ -621,6 +638,10 @@ namespace KeyPulse
                     {
                         ScreenContainerBuilder.SyncFromConfigState(_containers[st.SlotIndex], st);
                     }
+                }
+                if (!_isUserDraggingMaster)
+                {
+                    UpdateMasterBaselineFromScreens();
                 }
             });
         }
@@ -805,6 +826,9 @@ namespace KeyPulse
                 ColumnSpacing = 6
             };
 
+            bool hasCustomNick = !string.IsNullOrWhiteSpace(initialState.Nickname) &&
+                                 !string.Equals(initialState.Nickname, slotLabel, StringComparison.OrdinalIgnoreCase);
+
             var slotBadge = new Border
             {
                 Background = initialState.IsConnected
@@ -813,6 +837,7 @@ namespace KeyPulse
                 CornerRadius = new CornerRadius(5),
                 Padding = new Thickness(6, 2),
                 VerticalAlignment = VerticalAlignment.Center,
+                IsVisible = !hasCustomNick,
                 Child = new TextBlock
                 {
                     Text = slotLabel,
@@ -824,7 +849,7 @@ namespace KeyPulse
             Grid.SetColumn(slotBadge, 0);
             headerGrid.Children.Add(slotBadge);
 
-            string displayNick = string.IsNullOrWhiteSpace(initialState.Nickname) ? slotLabel : initialState.Nickname;
+            string displayNick = hasCustomNick ? initialState.Nickname : slotLabel;
             var titleText = new TextBlock
             {
                 Text = displayNick,
@@ -1222,6 +1247,7 @@ namespace KeyPulse
                 RightContrastColumn = rightColumn,
                 BrightnessSlider = brightnessSlider,
                 ContrastSlider = contrastSlider,
+                SlotBadge = slotBadge,
                 LockRatioCheckBox = lockRatioCheck,
                 StatusBadgeText = statusText,
                 SupportsContrast = !initialState.IsConnected || initialState.SupportsContrast,
@@ -1360,6 +1386,14 @@ namespace KeyPulse
             view.SupportsContrast = !state.IsConnected || state.SupportsContrast;
             view.IsInternalLcd = state.IsInternalLcd;
 
+            if (!view.InlineRenameBox.IsVisible)
+            {
+                bool hasCustom = !string.IsNullOrWhiteSpace(state.Nickname) &&
+                                 !string.Equals(state.Nickname, state.DefaultSlotLabel, StringComparison.OrdinalIgnoreCase);
+                view.SlotBadge.IsVisible = !hasCustom;
+                view.TitleText.Text = hasCustom ? state.Nickname : state.DefaultSlotLabel;
+            }
+
             if (respectUserTouch && view.UserTouched)
             {
                 UpdateContrastInteractivity(view);
@@ -1391,7 +1425,10 @@ namespace KeyPulse
             {
                 if (!view.InlineRenameBox.IsVisible)
                 {
-                    view.TitleText.Text = string.IsNullOrWhiteSpace(state.Nickname) ? state.DefaultSlotLabel : state.Nickname;
+                    bool hasCustom = !string.IsNullOrWhiteSpace(state.Nickname) &&
+                                     !string.Equals(state.Nickname, state.DefaultSlotLabel, StringComparison.OrdinalIgnoreCase);
+                    view.SlotBadge.IsVisible = !hasCustom;
+                    view.TitleText.Text = hasCustom ? state.Nickname : state.DefaultSlotLabel;
                 }
                 view.LockRatioCheckBox.IsChecked = state.LockRatio;
                 view.BrightnessSlider.Value = state.Brightness;

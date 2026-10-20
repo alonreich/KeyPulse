@@ -32,6 +32,7 @@ namespace KeyPulse
         private TextBlock? _masterValueText;
         private int _lastMasterValue = 50;
         private bool _suppressMasterEvents;
+        private bool _isUserDraggingMaster;
         private StackPanel? _directHotkeysStack;
         private CancellationTokenSource? _liveReadCts;
 
@@ -341,7 +342,7 @@ namespace KeyPulse
 
             var trayOverlayBtn = new Button
             {
-                Content = "Open Tray Quick Sliders",
+                Content = "Open Brightness/Contrast Slider",
                 Classes = { "Secondary" },
                 Padding = new Thickness(10, 5),
                 FontSize = 11.5,
@@ -441,13 +442,19 @@ namespace KeyPulse
 
             _masterMinusBtn = new Button
             {
-                Content = $"−{initialDelta}%",
+                Content = "−",
                 Classes = { "Secondary" },
-                Padding = new Thickness(10, 4),
-                FontSize = 11.5,
-                VerticalAlignment = VerticalAlignment.Center
+                Width = 32,
+                Height = 30,
+                Padding = new Thickness(0),
+                FontSize = 16,
+                FontWeight = FontWeight.Bold,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand)
             };
-            ToolTip.SetTip(_masterMinusBtn, $"Step all displays down by {initialDelta}% (preserves differential, clamps at 0%)");
+            ToolTip.SetTip(_masterMinusBtn, $"Step all displays down by {initialDelta}% (maintains differential gap)");
             _masterMinusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -469,6 +476,9 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center
             };
             ToolTip.SetTip(_masterSlider, "Drag to adjust all displays together while maintaining their relative brightness differential.");
+            _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) => { _isUserDraggingMaster = true; }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
+            _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => { _isUserDraggingMaster = false; UpdateMasterBaselineFromScreens(); }, RoutingStrategies.Tunnel);
             _masterSlider.PropertyChanged += (_, pe) =>
             {
                 if (pe.Property != RangeBase.ValueProperty || _suppressMasterEvents) return;
@@ -486,13 +496,19 @@ namespace KeyPulse
 
             _masterPlusBtn = new Button
             {
-                Content = $"+{initialDelta}%",
+                Content = "+",
                 Classes = { "Secondary" },
-                Padding = new Thickness(10, 4),
-                FontSize = 11.5,
-                VerticalAlignment = VerticalAlignment.Center
+                Width = 32,
+                Height = 30,
+                Padding = new Thickness(0),
+                FontSize = 16,
+                FontWeight = FontWeight.Bold,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand)
             };
-            ToolTip.SetTip(_masterPlusBtn, $"Step all displays up by {initialDelta}% (preserves differential, clamps at 100%)");
+            ToolTip.SetTip(_masterPlusBtn, $"Step all displays up by {initialDelta}% (maintains differential gap)");
             _masterPlusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -537,7 +553,7 @@ namespace KeyPulse
                         RenderProfilesList();
                         ScreenBrightnessService.NotifyStateChanged();
                     },
-                    onBrightnessChanged: (slot, val) => UpdateMasterBaselineFromScreens());
+                    onBrightnessChanged: (slot, val) => { ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); });
                 _containers[i] = view;
             }
 
@@ -1298,7 +1314,7 @@ namespace KeyPulse
                 if (sCfg != null && !string.IsNullOrWhiteSpace(sCfg.CustomNickname) &&
                     !string.Equals(sCfg.CustomNickname, slotTitle, StringComparison.OrdinalIgnoreCase))
                 {
-                    slotTitle = $"{slotTitle} ({sCfg.CustomNickname})";
+                    slotTitle = sCfg.CustomNickname;
                 }
                 screenNames.Add(slotTitle);
             }
@@ -2035,7 +2051,7 @@ namespace KeyPulse
                 if (!string.IsNullOrWhiteSpace(screenCfg.CustomNickname) &&
                     !string.Equals(screenCfg.CustomNickname, slotTitle, StringComparison.OrdinalIgnoreCase))
                 {
-                    slotTitle = $"{slotTitle} ({screenCfg.CustomNickname})";
+                    slotTitle = screenCfg.CustomNickname;
                 }
 
                 var slotStack = new StackPanel
@@ -2215,13 +2231,13 @@ namespace KeyPulse
             if (_masterBar != null)
             {
                 _masterBar.IsVisible = activeCount > 1;
-                if (activeCount > 1 && _masterSlider != null)
+                if (activeCount > 1 && _masterSlider != null && !_isUserDraggingMaster)
                 {
-                    var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+                    int avg = (int)Math.Round(activeStates.Average(s => s.Brightness));
                     _suppressMasterEvents = true;
-                    _masterSlider.Value = baseScreen.Brightness;
-                    _lastMasterValue = baseScreen.Brightness;
-                    if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+                    _masterSlider!.Value = avg;
+                    _lastMasterValue = avg;
+                    if (_masterValueText != null) _masterValueText.Text = avg.ToString();
                     _suppressMasterEvents = false;
                 }
             }
@@ -2229,16 +2245,16 @@ namespace KeyPulse
 
         private void UpdateMasterBaselineFromScreens()
         {
-            if (_masterSlider == null) return;
+            if (_masterSlider == null || _isUserDraggingMaster) return;
             var states = ScreenBrightnessService.GetImmediateCachedStates();
             var activeStates = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
             if (activeStates.Count <= 1) return;
 
-            var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+            int avg = (int)Math.Round(activeStates.Average(s => s.Brightness));
             _suppressMasterEvents = true;
-            _masterSlider.Value = baseScreen.Brightness;
-            _lastMasterValue = baseScreen.Brightness;
-            if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+            _masterSlider!.Value = avg;
+            _lastMasterValue = avg;
+            if (_masterValueText != null) _masterValueText.Text = avg.ToString();
             _suppressMasterEvents = false;
         }
 
@@ -2308,6 +2324,10 @@ namespace KeyPulse
                     }
                 }
 
+                if (!_isUserDraggingMaster)
+                {
+                    UpdateMasterBaselineFromScreens();
+                }
                 RenderProfilesList();
                 RenderDirectHotkeysList();
             });

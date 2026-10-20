@@ -110,7 +110,7 @@ public partial class App : Application
                 brightnessSubMenu.Items.Add(new NativeMenuItemSeparator());
             }
 
-            var quickSlidersItem = new NativeMenuItem("Quick Sliders (Overlay)");
+            var quickSlidersItem = new NativeMenuItem("Brightness/Contrast Slider");
             quickSlidersItem.Click += current.ScreenBrightnessOverlay_Clicked;
             brightnessSubMenu.Items.Add(quickSlidersItem);
 

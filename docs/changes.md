@@ -8,6 +8,27 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Multi-Monitor Virtual Clamping Memory & Drag Session State (`Models.cs`, `ScreenBrightnessService.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)
+- **Virtual Clamping Offsets (`Models.cs`, `ScreenBrightnessService.cs`)**:
+  - Added `VirtualBrightness` and `VirtualContrast` (default 65, clamp range `[-100, 200]`) to `ScreenHardwareSetting`.
+  - In `RequestMasterLevelChange`, calculated `newVirtualB = Math.Clamp(screen.VirtualBrightness + delta, -100, 200)` and derived physical level `newPhysicalB = Math.Clamp(newVirtualB, 0, 100)`. Hardware writes clamp to valid [0, 100] DDC/CI / backlight ranges, while differential offsets are remembered even when multiple screens hit 0% or 100%.
+  - Added `ReanchorAllScreens()` called on individual slider changes to synchronize `VirtualBrightness = LastBrightness` and `VirtualContrast = LastContrast`, establishing the new differential ratio without offset drift.
+  - Added `_isUserDraggingMaster` drag session tracking attached via pointer capture events (`PointerPressed`, `PointerReleased`, `PointerCaptureLost`) to prevent background state synchronization from interrupting or resetting the slider thumb mid-drag.
+  - Master slider baseline in both main window and overlay window now tracks the rounded average of all connected screens.
+
+### UI Simplification & Custom Display Nickname Propagation
+- **Master Stepper Controls**:
+  - Replaced `−5%` / `+5%` labels with minimalist `−` / `+` bold 16pt glyphs styled with 32x30 square footprint, centered alignment, and hand cursor.
+- **Consistent Display Nickname Display**:
+  - In `ScreenContainerBuilder.CreateScreenContainer`, `ApplyLiveStateToContainer`, and `SyncFromConfigState`: when a custom nickname is present, `SlotBadge` is hidden (`IsVisible = !hasCustomNick`) and title displays the nickname directly.
+  - In `ScreenBrightnessWindow` direct shortcut and preset editor rows: display `sCfg.CustomNickname` directly instead of prepending default slot names.
+  - In `ScreenBrightnessService.ShowIdentifyBanners`: prominent identification banner shows custom nickname directly.
+- **Overlay Window Renaming**:
+  - Renamed "Quick Sliders (Overlay)" to "Brightness/Contrast Slider" across `App.axaml.cs` tray menu, `ScreenBrightnessWindow.cs`, and `ScreenBrightnessOverlayWindow.cs`.
+
+### Non-Intrusive Desktop Shortcut on Update (`SetupWindow.cs`)
+- In `InstallWorkerAsync` Step 5, added probe checking `(_isUpdate || isUpgrade) && desktop != null && !File.Exists(desktop)`. When detected, desktop shortcut creation is skipped (`desktop = null; shouldCreateDesktop = false`), avoiding unwanted shortcut re-creation on clean desktops. Updated `CreateShortcutsAsync` with `desktopShortcutRequested` parameter to avoid false-positive warning logs.
+
 ### Update Installer Elevation & Admin Task Preservation Resilience
 - **Scheduled Task Fast-Path & Non-Elevated Protection (`Program.cs`)**:
   - In `Program.CreateOrUpdateAdminTask`, added a non-destructive fast-path querying `TryGetAdminTaskViaCom` and `RunSchtasks /Query /XML`. If `KeyPulse_AdminTask` is already registered, targets `Program.ExePath`, and possesses `<RunLevel>HighestAvailable</RunLevel>`, it verifies XML integrity without invoking destructive `RegisterTask` or `schtasks /Create /XML /F` commands that fail with `ERROR: Access is denied` under unelevated tokens.

@@ -204,9 +204,9 @@ namespace KeyPulse
                 DirectHotkeys = new List<ScreenDirectHotkey>(),
                 Screens = new List<ScreenHardwareSetting>
                 {
-                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 65, LastContrast = 65 },
-                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = true, LastBrightness = 65, LastContrast = 65 },
-                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = true, LastBrightness = 65, LastContrast = 65 }
+                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 65, LastContrast = 65, VirtualBrightness = 65, VirtualContrast = 65 },
+                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = true, LastBrightness = 65, LastContrast = 65, VirtualBrightness = 65, VirtualContrast = 65 },
+                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = true, LastBrightness = 65, LastContrast = 65, VirtualBrightness = 65, VirtualContrast = 65 }
                 },
                 Profiles = new List<ScreenBrightnessProfile>
                 {
@@ -294,6 +294,8 @@ namespace KeyPulse
                     }
                     existing.LastBrightness = Math.Clamp(existing.LastBrightness, 0, 100);
                     existing.LastContrast = Math.Clamp(existing.LastContrast, 0, 100);
+                    if (existing.VirtualBrightness == 0 && existing.LastBrightness > 0) existing.VirtualBrightness = existing.LastBrightness;
+                    if (existing.VirtualContrast == 0 && existing.LastContrast > 0) existing.VirtualContrast = existing.LastContrast;
                     if (existing.LockRatio)
                     {
                         existing.LastContrast = existing.LastBrightness;
@@ -705,6 +707,8 @@ namespace KeyPulse
                 }
                 slotCfg.LastBrightness = brightness;
                 slotCfg.LastContrast = contrast;
+                slotCfg.VirtualBrightness = brightness;
+                slotCfg.VirtualContrast = contrast;
             }
 
             Program.LogDebug($"[ScreenBrightness] RequestScreenLevelChange slot={slotIndex} b={brightness} c={contrast} updateContrastFromLock={updateContrastFromLock}");
@@ -1212,16 +1216,8 @@ namespace KeyPulse
 
             if (cfg.LockMonitorDifferential || connectedSlots.Count == 1)
             {
-                foreach (var slot in connectedSlots)
-                {
-                    var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
-                    if (screen != null)
-                    {
-                        int newB = Math.Clamp(screen.LastBrightness + delta, 0, 100);
-                        int newC = screen.LockRatio ? newB : Math.Clamp(screen.LastContrast + delta, 0, 100);
-                        RequestScreenLevelChange(slot, newB, newC, updateContrastFromLock: screen.LockRatio);
-                    }
-                }
+                RequestMasterLevelChange(delta);
+                return;
             }
             else
             {
@@ -1298,6 +1294,20 @@ namespace KeyPulse
             NotifyStateChanged();
         }
 
+        public static void ReanchorAllScreens()
+        {
+            var cfg = LoadConfig();
+            lock (ConfigLock)
+            {
+                foreach (var s in cfg.Screens)
+                {
+                    s.VirtualBrightness = s.LastBrightness;
+                    s.VirtualContrast = s.LastContrast;
+                }
+            }
+            SaveConfig(cfg);
+        }
+
         public static void RequestMasterLevelChange(int deltaBrightness)
         {
             var cfg = LoadConfig();
@@ -1309,9 +1319,17 @@ namespace KeyPulse
                 var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
                 if (screen != null)
                 {
-                    int newB = Math.Clamp(screen.LastBrightness + deltaBrightness, 0, 100);
-                    int newC = screen.LockRatio ? newB : Math.Clamp(screen.LastContrast + deltaBrightness, 0, 100);
-                    RequestScreenLevelChange(slot, newB, newC, updateContrastFromLock: screen.LockRatio);
+                    if (screen.VirtualBrightness == 0 && screen.LastBrightness > 0)
+                    {
+                        screen.VirtualBrightness = screen.LastBrightness;
+                    }
+
+                    int newVirtualB = Math.Clamp(screen.VirtualBrightness + deltaBrightness, -100, 200);
+                    screen.VirtualBrightness = newVirtualB;
+
+                    int newPhysicalB = Math.Clamp(newVirtualB, 0, 100);
+                    int newPhysicalC = screen.LockRatio ? newPhysicalB : Math.Clamp(screen.LastContrast + deltaBrightness, 0, 100);
+                    RequestScreenLevelChange(slot, newPhysicalB, newPhysicalC, updateContrastFromLock: screen.LockRatio);
                 }
             }
 
@@ -1333,6 +1351,8 @@ namespace KeyPulse
                     int c = screen.LockRatio ? b : Math.Clamp(target.Contrast, 0, 100);
                     screen.LastBrightness = b;
                     screen.LastContrast = c;
+                    screen.VirtualBrightness = b;
+                    screen.VirtualContrast = c;
                 }
             }
         }
@@ -1395,9 +1415,9 @@ namespace KeyPulse
                     var slotCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
                     string slotLabel = DefaultSlotName(slotIndex);
                     string customName = slotCfg?.CustomNickname ?? slotLabel;
-                    string displayTitle = string.Equals(customName, slotLabel, StringComparison.OrdinalIgnoreCase)
-                        ? slotLabel
-                        : $"{slotLabel} • {customName}";
+                    string displayTitle = !string.IsNullOrWhiteSpace(customName) && !string.Equals(customName, slotLabel, StringComparison.OrdinalIgnoreCase)
+                        ? customName
+                        : slotLabel;
 
                     var banner = new Window
                     {
