@@ -8,6 +8,8 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+## [v2026.10.20.0939] - 2026-10-20
+
 ### Multi-Monitor Virtual Clamping Memory & Drag Session State (`Models.cs`, `ScreenBrightnessService.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)
 - **Virtual Clamping Offsets (`Models.cs`, `ScreenBrightnessService.cs`)**:
   - Added `VirtualBrightness` and `VirtualContrast` (default 65, clamp range `[-100, 200]`) to `ScreenHardwareSetting`.
