@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.20.0939] - 2026-10-20
+
 ### Added
 - **Multi-Monitor Differential Memory with Safe Boundary Clamping**: Implemented virtual boundary tracking (`VirtualBrightness` and `VirtualContrast`) across all displays. When adjusting the synced master slider or step shortcuts, displays clamp safely at 0% or 100% to protect physical hardware and controllers, while retaining their virtual differential offsets in memory. Reversing direction unclamps monitors in the exact reverse order, flawlessly preserving custom gaps between 2, 3, or more displays. Adjusting any individual display slider immediately re-anchors the differential baseline for subsequent master adjustments.
 - **Master Stepper Clear Action Buttons**: Streamlined the master stepper buttons from confusing `−5%` and `+5%` labels to clean, minimalist, high-contrast `−` and `+` square buttons with dedicated hover/pressed visual states and hand cursors.
@@ -181,6 +183,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-Flight Download Cancellation & Indeterminate Progress**: Users can cancel long-running updates mid-download, with smooth indeterminate progress feedback for unmetered streams.
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
+
+## [v2026.10.20.0939] - 2026-10-20
 
 ### Added
 - **Multi-Monitor Differential Memory with Safe Boundary Clamping**: Implemented virtual boundary tracking (`VirtualBrightness` and `VirtualContrast`) across all displays. When adjusting the synced master slider or step shortcuts, displays clamp safely at 0% or 100% to protect physical hardware and controllers, while retaining their virtual differential offsets in memory. Reversing direction unclamps monitors in the exact reverse order, flawlessly preserving custom gaps between 2, 3, or more displays. Adjusting any individual display slider immediately re-anchors the differential baseline for subsequent master adjustments.
