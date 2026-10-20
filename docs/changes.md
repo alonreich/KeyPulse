@@ -8,6 +8,27 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Windows Application Security & False-Positive Remediation (`HotKeyManager.cs`, `Program.cs`, `SetupWindow.cs`, `ScreenBrightnessWindow.cs`, `app.manifest`, `BuildPipeline.ps1`)
+- **Keylogger Hook Elimination (`HotKeyManager.cs`, `ScreenBrightnessWindow.cs`)**:
+  - Fully purged `SetWindowsHookEx(WH_KEYBOARD_LL)`, `UnhookWindowsHookEx`, `CallNextHookEx`, and low-level keyboard hook callback delegates from the codebase.
+  - Migrated in-app shortcut recording in `MainWindow.axaml.cs` and `ScreenBrightnessWindow.cs` to native Avalonia `KeyDown` events with `MapAvaloniaKeyToVirtualKey`, maintaining standard Win32 `RegisterHotKey` for background global shortcuts.
+  - Zero low-level keyboard hooks remain in the compiled binary PE import table, eliminating false-positive `Behavior:Win32/Keylogger` detections.
+- **Dropper Pattern Fast-Path (`Program.cs`)**:
+  - Implemented early fast-path check in `ExtractNativeLibs()`: verifies whether `libSkiaSharp.dll`, `av_libglesv2.dll`, and `libHarfBuzzSharp.dll` already exist in `RuntimeLibDir`.
+  - When verified, skips decompression, resource reading, `.tmp` file staging, and stamp writing entirely, invoking `SetDllDirectory()` directly in < 1 ms.
+- **Canary Crash Recovery File Swapping (`Program.cs`)**:
+  - Replaced out-of-process `cmd.exe /c ping 127.0.0.1 -n 2 >nul & move /y ... & start ...` with native in-process C# file relocation (`File.Move` to `.old`, `File.Copy` backup, and `MoveFileEx(oldExe, null, MOVEFILE_DELAY_UNTIL_REBOOT)`).
+  - Eliminates LOLBAS process creation and ping delay loops flagged by behavioral sandboxes.
+- **PowerShell Bypass Removal (`SetupWindow.cs`)**:
+  - Removed `TryCreateShortcutViaPowerShell` executing `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ...`.
+  - Windows shortcuts (`.lnk`) now rely exclusively on unmanaged COM VTables (`IShellLinkW` / `IPersistFile`), preventing Windows Defender Exploit Guard alerts.
+- **Single-File Setup & Staging Cleanup (`Program.cs`, `App.axaml.cs`)**:
+  - Removed secondary child process spawn (`--install-worker`) when running outside the installation directory. `App.axaml.cs` directly instantiates `SetupWindow` in the primary process.
+  - Staged uninstaller in `%LOCALAPPDATA%\KeyPulse_Uninstall` now retains the canonical `KeyPulse.exe` name instead of `KeyPulse_Uninstaller.exe`.
+- **PE Manifest & Trust Alignment (`app.manifest`, `BuildPipeline.ps1`)**:
+  - Changed `app.manifest` assemblyIdentity from `KeyPulse.Desktop` to `KeyPulse`, matching `OriginalFilename` and `TargetName`.
+  - Removed fallback to untrusted self-signed `.pfx` certificate in `BuildPipeline.ps1`, avoiding `CERT_E_UNTRUSTEDROOT` SmartScreen blocks while enforcing RFC-3161 SHA-256 timestamping when signing certificates are configured.
+
 ### Display Hardware Control Lockup & Autonomous DDC/CI Bus Recovery (`ScreenBrightnessService.cs`, `HotKeyManager.cs`)
 - **Root Cause Analysis & Throttle State Machine Deadlock Fix**:
   - Investigated issue where KeyPulse monitor brightness control suddenly ceased responding after monitor sleep or idle timeouts, only recovering if Twinkle Tray was launched as Administrator.

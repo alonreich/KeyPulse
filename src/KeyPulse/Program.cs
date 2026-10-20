@@ -60,6 +60,10 @@ class Program
 
     public const string AdminTaskName = "KeyPulse_AdminTask";
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool MoveFileEx(string lpExistingFileName, string? lpNewFileName, int dwFlags);
+    private const int MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
 
@@ -277,13 +281,15 @@ class Program
                     try
                     {
                         File.Delete(CanaryFilePath);
-                        var cmd = $"/c ping 127.0.0.1 -n 2 >nul & move /y \"{backupExe}\" \"{ExePath}\" >nul & start \"\" \"{ExePath}\"";
+                        var oldExe = ExePath + ".old";
+                        try { if (File.Exists(oldExe)) File.Delete(oldExe); } catch { }
+                        File.Move(ExePath, oldExe, true);
+                        File.Copy(backupExe, ExePath, true);
+                        MoveFileEx(oldExe, null, MOVEFILE_DELAY_UNTIL_REBOOT);
                         Process.Start(new ProcessStartInfo
                         {
-                            FileName = "cmd.exe",
-                            Arguments = cmd,
-                            CreateNoWindow = true,
-                            UseShellExecute = false
+                            FileName = ExePath,
+                            UseShellExecute = true
                         });
                         Environment.Exit(0);
                     }
@@ -391,7 +397,7 @@ class Program
 
             var stagingDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), IsDevMode ? "KeyPulse_DEV_Uninstall" : "KeyPulse_Uninstall");
             Directory.CreateDirectory(stagingDir);
-            var tempUninstaller = Path.Combine(stagingDir, "KeyPulse_Uninstaller.exe");
+            var tempUninstaller = Path.Combine(stagingDir, "KeyPulse.exe");
             if (!Environment.ProcessPath!.Equals(tempUninstaller, StringComparison.OrdinalIgnoreCase))
             {
                 try
@@ -495,21 +501,12 @@ class Program
 
             try
             {
-                var ps = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = Environment.ProcessPath!,
-                        Arguments = "--install-worker",
-                        UseShellExecute = true
-                    }
-                };
-                ps.Start();
-                ps.Dispose();
+                ExtractNativeLibs();
+                BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
             }
             catch (Exception ex)
             {
-                LogCrash($"Install relaunch failed: {ex.Message}");
+                LogCrash($"Setup start failed: {ex.Message}");
             }
             finally
             {
@@ -1386,7 +1383,13 @@ class Program
     {
         var startupState = QueryStartupState();
 
-        var deleted = RunSchtasks($"/Delete /TN \"{AdminTaskName}\" /F", out var exitCode, out var output);
+        int exitCode = 0;
+        string output = string.Empty;
+        var deleted = TryDeleteAdminTaskViaCom();
+        if (!deleted)
+        {
+            deleted = RunSchtasks($"/Delete /TN \"{AdminTaskName}\" /F", out exitCode, out output);
+        }
         InvalidateAdminTaskState();
 
         if (!deleted)
@@ -1567,11 +1570,21 @@ class Program
     {
         LogDebug("ExtractNativeLibs started");
 
+        var outDir = RuntimeLibDir;
+        if (Directory.Exists(outDir) &&
+            File.Exists(Path.Combine(outDir, "libSkiaSharp.dll")) &&
+            File.Exists(Path.Combine(outDir, "av_libglesv2.dll")) &&
+            File.Exists(Path.Combine(outDir, "libHarfBuzzSharp.dll")))
+        {
+            SetDllDirectory(outDir);
+            LogDebug("ExtractNativeLibs fast-path: native libraries already present.");
+            return;
+        }
+
         try { if (Directory.Exists(LegacyNativeLibDir)) Directory.Delete(LegacyNativeLibDir, true); } catch { }
 
         var asm = Assembly.GetExecutingAssembly();
         var resources = asm.GetManifestResourceNames();
-        var outDir = RuntimeLibDir;
 
         try
         {
@@ -1738,7 +1751,7 @@ class Program
         return sha.ComputeHash(stream);
     }
 
-    private static bool IsRunningFromInstallPath()
+    public static bool IsRunningFromInstallPath()
     {
         return AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/').Equals(InstallDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
     }

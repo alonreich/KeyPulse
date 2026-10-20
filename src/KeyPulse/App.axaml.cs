@@ -307,7 +307,7 @@ public partial class App : Application
                 desktop.MainWindow = new SetupWindow(false, isUpdate: true);
                 KeyPulse.Program.LogDebug("Set SetupWindow(update)");
             }
-            else if (System.Linq.Enumerable.Contains(args, "--install-worker"))
+            else if (System.Linq.Enumerable.Contains(args, "--install-worker") || (!KeyPulse.Program.IsRunningFromInstallPath() && !KeyPulse.Program.IsDevMode))
             {
                 desktop.MainWindow = new SetupWindow(false, isUpdate: false);
                 KeyPulse.Program.LogDebug("Set SetupWindow(install)");

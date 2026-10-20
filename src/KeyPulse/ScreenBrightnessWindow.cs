@@ -1778,6 +1778,38 @@ namespace KeyPulse
                     return;
                 }
 
+                var vk = (int)MainWindow.MapAvaloniaKeyToVirtualKey(e.Key);
+                if (vk != 0)
+                {
+                    var mods = e.KeyModifiers;
+                    var parts = new List<string>();
+                    if (mods.HasFlag(KeyModifiers.Control)) parts.Add("Ctrl");
+                    if (mods.HasFlag(KeyModifiers.Alt)) parts.Add("Alt");
+                    if (mods.HasFlag(KeyModifiers.Shift)) parts.Add("Shift");
+                    if (mods.HasFlag(KeyModifiers.Meta)) parts.Add("Win");
+
+                    bool isModifierOnly = (e.Key == Key.LeftCtrl || e.Key == Key.RightCtrl ||
+                        e.Key == Key.LeftAlt || e.Key == Key.RightAlt ||
+                        e.Key == Key.LeftShift || e.Key == Key.RightShift ||
+                        e.Key == Key.LWin || e.Key == Key.RWin);
+
+                    if (!isModifierOnly)
+                    {
+                        var keyName = HotkeyManager.VirtualKeyToName((uint)vk);
+                        if (!string.IsNullOrEmpty(keyName))
+                        {
+                            parts.Add(keyName);
+                            string combo = string.Join("+", parts);
+                            box.Text = combo;
+                            onUpdated(combo);
+                        }
+                    }
+                    else if (parts.Count > 0)
+                    {
+                        box.Text = string.Join("+", parts) + "+";
+                    }
+                }
+
                 e.Handled = true;
             };
         }

@@ -550,42 +550,38 @@ function Test-CompiledOutput {
     return $true
 }
 
-# SIG_01: Authenticode code-signing helper with RFC-3161 Digicert timestamping and offline fallback
+# SIG_01: Authenticode code-signing helper with RFC-3161 Digicert timestamping (no self-signed untrusted root fallback)
 function Invoke-CodeSign {
     param([string]$TargetExe)
     $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)
     $thumbprint = $env:KEYPULSE_CERT_THUMBPRINT
+
     if ($thumbprint -and $signtool) {
         Write-Host "[SIGN] Authenticode signing $TargetExe using certificate thumbprint $thumbprint..."
         & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $TargetExe > $null 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[SIGN] Executable signed and timestamped via certificate store. [OK]"
             return $true
-        }
-        & $signtool sign /sha1 $thumbprint /fd SHA256 $TargetExe > $null 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "[SIGN] Executable signed via certificate store (offline).        [OK]"
-            return $true
+        } else {
+            Write-Host "WARNING: [SIGN] Signing via certificate store failed (exit code $LASTEXITCODE)."
+            return $false
         }
     }
 
     $certPath = if ($env:KEYPULSE_CERT_PATH -and (Test-Path -LiteralPath $env:KEYPULSE_CERT_PATH)) {
         $env:KEYPULSE_CERT_PATH
     } else {
-        $localPfx = Join-Path $repoRoot 'ssl-certificate\KeyPulse_CodeSigning.pfx'
-        if (Test-Path -LiteralPath $localPfx) { $localPfx } else { $null }
-    }
-    if (-not $certPath) {
-        Write-Host "[SIGN] No code signing certificate configured (skipping Authenticode sign)."
-        return $false
-    }
-    $certPwd = if ($env:KEYPULSE_CERT_PASSWORD) {
-        $env:KEYPULSE_CERT_PASSWORD
-    } elseif ($certPath -like "*KeyPulse_CodeSigning.pfx") {
-        'KeyPulseSigningKey2026!'
-    } else {
         $null
     }
+
+    if (-not $certPath) {
+        Write-Host "[SIGN] No trusted code signing certificate configured ($env:KEYPULSE_CERT_THUMBPRINT or $env:KEYPULSE_CERT_PATH)."
+        Write-Host "[SIGN] Skipping Authenticode signing to avoid untrusted root chain errors (CERT_E_UNTRUSTEDROOT)."
+        Write-Host "[SIGN] Release SHA256 can be submitted to Microsoft Defender Security Intelligence portal for free reputation."
+        return $false
+    }
+
+    $certPwd = $env:KEYPULSE_CERT_PASSWORD
 
     Write-Host "[SIGN] Authenticode signing $TargetExe with $([System.IO.Path]::GetFileName($certPath))..."
     $signed = $false
@@ -595,8 +591,7 @@ function Invoke-CodeSign {
         if ($LASTEXITCODE -eq 0) {
             $signed = $true
         } else {
-            & $signtool sign /f $certPath @pwdArg /fd SHA256 $TargetExe > $null 2>&1
-            if ($LASTEXITCODE -eq 0) { $signed = $true }
+            Write-Host "WARNING: [SIGN] signtool signing failed with code $LASTEXITCODE."
         }
     }
     if (-not $signed) {
@@ -605,13 +600,11 @@ function Invoke-CodeSign {
             try {
                 $sig = Set-AuthenticodeSignature -FilePath $TargetExe -Certificate $pfx -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
                 if ($null -ne $sig.SignerCertificate) { $signed = $true }
-            } catch { }
-            if (-not $signed) {
-                $sig = Set-AuthenticodeSignature -FilePath $TargetExe -Certificate $pfx -HashAlgorithm SHA256
-                if ($null -ne $sig.SignerCertificate) { $signed = $true }
+            } catch {
+                Write-Host "WARNING: [SIGN] PowerShell signing failed: $($_.Exception.Message)"
             }
         } catch {
-            Write-Host "WARNING: [SIGN] PowerShell signing failed: $($_.Exception.Message)"
+            Write-Host "WARNING: [SIGN] Could not load certificate: $($_.Exception.Message)"
         }
     }
     if ($signed) {

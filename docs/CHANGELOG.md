@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security & False-Positive Remediation
+- **Safe Win32 Hotkey Integration**: Completely removed low-level keyboard hook calls (`SetWindowsHookEx(WH_KEYBOARD_LL)`), eliminating keylogger false-positive triggers across Windows Defender and heuristic engines. Shortcut capture in the UI now relies on native Avalonia input events, while background global shortcuts continue to run safely via standard `RegisterHotKey`.
+- **Eliminated Dropper Pattern with Fast-Path Runtime Loading**: Added a zero-disk-write fast-path in `ExtractNativeLibs()`. Installed launches verify existing native DLLs in `runtime\` and immediately call `SetDllDirectory()` without decompressing, writing `.tmp` files, or modifying disk contents.
+- **Removed Hidden Shells & Evasion Patterns**: Replaced out-of-process `cmd.exe /c ping 127.0.0.1` file-swapping in canary crash recovery with pure in-process Win32/C# file relocation (`File.Move` + `File.Copy` + `MoveFileEx`), removing suspicious command processor execution.
+- **Pure Unmanaged COM Shortcuts**: Removed all hidden `powershell.exe -ExecutionPolicy Bypass` shortcut creation fallbacks in the installer. Windows shortcuts are now generated exclusively via native unmanaged Shell COM VTables (`IShellLinkW` / `IPersistFile`).
+- **Single-File Setup Direct Initialization**: Launching the standalone `KeyPulse.exe` installer now directly displays the setup UI within the primary process without launching secondary worker processes (`--install-worker`).
+- **PE Metadata Alignment**: Standardized `app.manifest` assemblyIdentity to match the output binary `KeyPulse.exe` and aligned temporary uninstaller staging to `KeyPulse.exe` to prevent PE `OriginalFilename` mismatches.
+- **Trust & Signing Hardening**: Removed self-signed certificate fallback in `BuildPipeline.ps1` to prevent untrusted root chain errors (`CERT_E_UNTRUSTEDROOT`), enforcing strict RFC-3161 SHA-256 timestamping when signing certificates are configured.
+
 ## [v2026.10.20.1705] - 2026-10-20
 
 ### Fixed
@@ -215,6 +224,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-Flight Download Cancellation & Indeterminate Progress**: Users can cancel long-running updates mid-download, with smooth indeterminate progress feedback for unmetered streams.
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
+
+### Security & False-Positive Remediation
+- **Safe Win32 Hotkey Integration**: Completely removed low-level keyboard hook calls (`SetWindowsHookEx(WH_KEYBOARD_LL)`), eliminating keylogger false-positive triggers across Windows Defender and heuristic engines. Shortcut capture in the UI now relies on native Avalonia input events, while background global shortcuts continue to run safely via standard `RegisterHotKey`.
+- **Eliminated Dropper Pattern with Fast-Path Runtime Loading**: Added a zero-disk-write fast-path in `ExtractNativeLibs()`. Installed launches verify existing native DLLs in `runtime\` and immediately call `SetDllDirectory()` without decompressing, writing `.tmp` files, or modifying disk contents.
+- **Removed Hidden Shells & Evasion Patterns**: Replaced out-of-process `cmd.exe /c ping 127.0.0.1` file-swapping in canary crash recovery with pure in-process Win32/C# file relocation (`File.Move` + `File.Copy` + `MoveFileEx`), removing suspicious command processor execution.
+- **Pure Unmanaged COM Shortcuts**: Removed all hidden `powershell.exe -ExecutionPolicy Bypass` shortcut creation fallbacks in the installer. Windows shortcuts are now generated exclusively via native unmanaged Shell COM VTables (`IShellLinkW` / `IPersistFile`).
+- **Single-File Setup Direct Initialization**: Launching the standalone `KeyPulse.exe` installer now directly displays the setup UI within the primary process without launching secondary worker processes (`--install-worker`).
+- **PE Metadata Alignment**: Standardized `app.manifest` assemblyIdentity to match the output binary `KeyPulse.exe` and aligned temporary uninstaller staging to `KeyPulse.exe` to prevent PE `OriginalFilename` mismatches.
+- **Trust & Signing Hardening**: Removed self-signed certificate fallback in `BuildPipeline.ps1` to prevent untrusted root chain errors (`CERT_E_UNTRUSTEDROOT`), enforcing strict RFC-3161 SHA-256 timestamping when signing certificates are configured.
 
 ## [v2026.10.20.1705] - 2026-10-20
 

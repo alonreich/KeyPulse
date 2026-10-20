@@ -74,10 +74,6 @@ namespace KeyPulse
         private static int _currentId = 0;
         private static System.Collections.Concurrent.ConcurrentQueue<Action> _taskQueue = new();
 
-        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-        private static LowLevelKeyboardProc _proc = HookCallback;
-        private static IntPtr _hookID = IntPtr.Zero;
-        private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100;
         private const int WM_SYSKEYDOWN = 0x0104;
         private const int WM_KEYUP = 0x0101;
@@ -105,30 +101,13 @@ namespace KeyPulse
         /// <summary>Last Win32 error seen by a failed RegisterHotKey call.</summary>
         public static int LastRegisterError { get; private set; }
 
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
 
         public static Action<int, bool, bool, bool, bool>? OnRawKey;
 
         public static void EnableCaptureHook()
         {
             ResetCaptureModifierState();
-            if (_hookID == IntPtr.Zero)
-            {
-                using (var curProcess = Process.GetCurrentProcess())
-                using (var curModule = curProcess.MainModule)
-                {
-                    if (curModule != null)
-                        _hookID = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
-                }
-            }
             IsCaptureMode = true;
         }
 
@@ -136,11 +115,6 @@ namespace KeyPulse
         {
             IsCaptureMode = false;
             ResetCaptureModifierState();
-            if (_hookID != IntPtr.Zero)
-            {
-                UnhookWindowsHookEx(_hookID);
-                _hookID = IntPtr.Zero;
-            }
         }
 
         [DllImport("user32.dll")]
@@ -213,57 +187,7 @@ namespace KeyPulse
             return processId == CurrentProcessId;
         }
 
-        private const int HookExtraInfoOffset = 16;
 
-        /// <summary>
-        /// ISSUE_14: keystrokes KeyPulse injects itself carry InputSimulator.InjectionTag in
-        /// dwExtraInfo, and are ignored here. Without this the capture hook can read back the very
-        /// keys InputSimulator is sending and record them as if the user had pressed them.
-        ///
-        /// This deliberately tests OUR tag and not Windows' generic LLKHF_INJECTED flag: remote
-        /// desktop sessions, virtual machines and some laptop function-key drivers deliver ordinary
-        /// user keystrokes with that flag set, and treating those as ours would stop the shortcut
-        /// box from recording anything at all in exactly those environments.
-        /// </summary>
-        private static bool IsOwnInjectedEvent(IntPtr lParam)
-        {
-            try
-            {
-                return Marshal.ReadIntPtr(lParam, HookExtraInfoOffset) == InputSimulator.InjectionTag;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            if (nCode >= 0 && IsCaptureMode && !IsOwnInjectedEvent(lParam) && IsKeyPulseForeground())
-            {
-                int vkCode = Marshal.ReadInt32(lParam);
-
-                if (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)
-                {
-                    UpdateCaptureModifierState(vkCode, true);
-                    GetModifierSnapshot(vkCode, out var ctrl, out var alt, out var shift, out var win);
-                    OnRawKey?.Invoke(vkCode, ctrl, alt, shift, win);
-                }
-                else if (wParam == (IntPtr)WM_KEYUP || wParam == (IntPtr)WM_SYSKEYUP)
-                {
-                    UpdateCaptureModifierState(vkCode, false);
-                }
-
-                if (vkCode == 0x1B || vkCode == 0x09)
-                {
-                    return CallNextHookEx(_hookID, nCode, wParam, lParam);
-                }
-
-                return (IntPtr)1;
-            }
-
-            return CallNextHookEx(_hookID, nCode, wParam, lParam);
-        }
 
         public static void Start()
         {

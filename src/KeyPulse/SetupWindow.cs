@@ -616,31 +616,7 @@ namespace KeyPulse
             }
         }
 
-        private static bool TryCreateShortcutViaPowerShell(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation)
-        {
-            try
-            {
-                var escShortcut = shortcutPath.Replace("'", "''");
-                var escTarget = targetPath.Replace("'", "''");
-                var escDir = workingDir.Replace("'", "''");
-                var escDesc = description.Replace("'", "''");
-                var escIcon = iconLocation.Replace("'", "''");
-                var psScript = $"$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{escShortcut}'); $s.TargetPath = '{escTarget}'; $s.WorkingDirectory = '{escDir}'; $s.Description = '{escDesc}'; $s.IconLocation = '{escIcon},0'; $s.Save()";
-                var psi = new ProcessStartInfo("powershell.exe", $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{psScript}\"")
-                {
-                    CreateNoWindow = true,
-                    UseShellExecute = false
-                };
-                using var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    proc.WaitForExit(5000);
-                    return File.Exists(shortcutPath);
-                }
-            }
-            catch { }
-            return false;
-        }
+        private static bool TryCreateShortcutViaPowerShell(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation) => false;
 
         internal static bool CreateShortcut(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation, out string? errorMessage)
         {
@@ -655,12 +631,8 @@ namespace KeyPulse
                     return true;
                 }
 
-                if (TryCreateShortcutViaPowerShell(shortcutPath, targetPath, workingDir, description, iconLocation))
-                {
-                    return true;
-                }
 
-                errorMessage = "Both native COM VTable and PowerShell shortcut creation attempts failed.";
+                errorMessage = "Native Windows Shell COM shortcut creation failed.";
                 return false;
             }
             catch (Exception ex)
