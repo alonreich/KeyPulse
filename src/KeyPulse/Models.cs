@@ -838,8 +838,8 @@ namespace KeyPulse
         /// 0 = Screen A, 1 = Screen B, 2 = Screen C, -1 = All Screens.
         /// </summary>
         public int TargetSlotIndex { get; set; } = 0;
-        public int Brightness { get; set; } = 65;
-        public int Contrast { get; set; } = 65;
+        public int Brightness { get; set; } = 50;
+        public int Contrast { get; set; } = 50;
         public bool LockRatio { get; set; } = true;
     }
 

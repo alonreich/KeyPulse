@@ -765,6 +765,9 @@ namespace KeyPulse
                 var consumedSavedIndices = new HashSet<int>();
                 var unsavedItems = new List<(int Index, IntPtr Pidl)>();
                 int placedCount = 0;
+                int newArranged = 0;
+                try
+                {
 
                 int spaceX = profile.IconSpacingX > 0 ? profile.IconSpacingX : 76;
                 int spaceY = profile.IconSpacingY > 0 ? profile.IconSpacingY : 100;
@@ -850,7 +853,7 @@ namespace KeyPulse
                     }
                 }
 
-                int newArranged = 0;
+                newArranged = 0;
                 if (unsavedItems.Count > 0 && behavior != UnsavedIconBehavior.LeaveInPlace)
                 {
                     if (behavior == UnsavedIconBehavior.CenterGrid || behavior == UnsavedIconBehavior.SecondaryMonitorCenterGrid)
@@ -940,9 +943,17 @@ namespace KeyPulse
                     }
                 }
 
-                foreach (var item in unsavedItems)
+                }
+                finally
                 {
-                    CoTaskMemFree(item.Pidl);
+                    foreach (var item in unsavedItems)
+                {
+                    if (item.Pidl != IntPtr.Zero)
+                    {
+                        try { CoTaskMemFree(item.Pidl); } catch { }
+                    }
+                }
+
                 }
 
                 try { shellView?.Refresh(); } catch { }

@@ -8,6 +8,36 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Display Hardware Control Lockup & Autonomous DDC/CI Bus Recovery (`ScreenBrightnessService.cs`, `HotKeyManager.cs`)
+- **Root Cause Analysis & Throttle State Machine Deadlock Fix**:
+  - Investigated issue where KeyPulse monitor brightness control suddenly ceased responding after monitor sleep or idle timeouts, only recovering if Twinkle Tray was launched as Administrator.
+  - Root Cause 1: In `ExecutePendingWriteForSlot`, `throttle.LastWrittenBrightness = targetB` and `throttle.LastWrittenContrast = targetC` were unconditionally updated regardless of whether `WriteSingleScreenHardwareWithRetry` succeeded. When a monitor entered DPMS sleep or had an I2C bus timeout, the write failed but the throttle recorded the target as written. Subsequent slider adjustments or hotkey presses back to that value were discarded as "targets unchanged", permanently deadlocking hardware writes.
+  - Root Cause 2: KeyPulse lacked OS-level display change and power broadcast listeners. Twinkle Tray listened to `WM_DISPLAYCHANGE` and `WM_POWERBROADCAST`, issuing privileged VESA VCP wake commands (`0xDF`, `0xD6`, `0x10`) that reset the GPU display controller's I2C multiplexer. Running Twinkle Tray elevated reset the GPU driver's I2C bus, which indirectly allowed KeyPulse to communicate again.
+  - Fix: In `ExecutePendingWriteForSlot`, guarded throttle updates so `LastWrittenBrightness` and `LastWrittenContrast` only update when `written == true`.
+  - Added `WakeDdcBus(IntPtr hPhys)` issuing non-destructive VESA VCP `0xDF` and `0x10` handshake queries to wake dormant display scalers and synchronize I2C clocks.
+  - Added physical monitor handle cache invalidation and settling delay prior to retry in `WriteSingleScreenHardwareWithRetry`.
+  - Converted `HotKeyManager` message window from `HWND_MESSAGE` (`-3`) to a top-level hidden unowned window (`IntPtr.Zero`), enabling reception of broadcast `WM_DISPLAYCHANGE` (`0x007E`) and `WM_POWERBROADCAST` (`0x0218`) messages.
+  - Dispatched `ScreenBrightnessService.OnDisplayChangedOrWoken()` and `DesktopOrganizerService.HandleDisplayChangeDebounced()` on broadcast events, restoring autonomous bus recovery without external dependencies.
+
+### Master Slider Ceiling Breakthrough Virtual Level Batch Updates (`ScreenBrightnessService.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)
+- Added `SetScreenLevelsBatch` overload taking 5-tuples `(SlotIndex, Brightness, Contrast, VirtualBrightness, VirtualContrast)` in `ScreenBrightnessService`.
+- Updated `ApplyMasterSliderMovement` in `ScreenBrightnessOverlayWindow` and `ScreenBrightnessWindow` to maintain uncompressed linear differential offsets (`vb`, `vc`) during ceiling and floor breakthrough.
+- Removed destructive `ReanchorAllScreens()` call from master slider `PointerReleasedEvent`, preserving relative differential ratios seamlessly when dragging back down from 100%.
+
+### Preset Target Sliders In-Memory Update & Pointer Release Persistence (`ScreenBrightnessWindow.cs`)
+- Removed synchronous `ScreenBrightnessService.SaveConfig(cfg)` from `bSlider.PropertyChanged` and `cSlider.PropertyChanged` in preset editor rows.
+- Bound persistence to `PointerReleasedEvent` and `PointerCaptureLostEvent`, updating in-memory during drag and writing to disk only upon user release.
+
+### Dynamic Quick Presets Bar in Overlay (`ScreenBrightnessOverlayWindow.cs`)
+- Promoted local `presetsPanel` to private field `_presetsPanel`.
+- Wired `PopulateQuickPresetsBar(_presetsPanel)` inside `OnServiceStateChanged()`, dynamically synchronizing quick preset buttons, active highlight states, and labels upon profile switches or configuration modifications.
+
+### Screen Direct Hotkey Default Baseline Standardization (`Models.cs`)
+- Updated `ScreenDirectHotkey.Brightness` and `Contrast` initial factory defaults from 65% to 50% to align with application-wide 50% balanced baseline.
+
+### Desktop Shell COM PIDL Leak Prevention on Cancellation (`DesktopOrganizerService.cs`)
+- Wrapped `RestoreLayout` loop and unsaved item positioning in `try ... finally` blocks to guarantee `CoTaskMemFree` is called for every unmanaged `item.Pidl` pointer in `unsavedItems`, preventing shell memory leaks when layout restoration is cancelled.
+
 ### Master Slider Drag Boundary Physics & Breakthrough Interpolation (`ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`, `ScreenBrightnessService.cs`)
 - **Two-Stage Drag Boundary Physics**:
   - Implemented `_brickWallUp` and `_brickWallDown` calculations based on drag baseline screens.

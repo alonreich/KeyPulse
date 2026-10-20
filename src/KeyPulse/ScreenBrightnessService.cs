@@ -493,6 +493,77 @@ namespace KeyPulse
         private static List<int>? _cachedConnectedSlots;
         private static DateTime _lastConnectedSlotsCheck = DateTime.MinValue;
 
+        public static void InvalidateMonitorCache()
+        {
+            lock (ConfigLock)
+            {
+                _cachedConnectedSlots = null;
+                _lastConnectedSlotsCheck = DateTime.MinValue;
+            }
+        }
+
+        public static void ResetThrottles()
+        {
+            foreach (var kvp in Throttles)
+            {
+                lock (kvp.Value.Sync)
+                {
+                    kvp.Value.LastWrittenBrightness = -1;
+                    kvp.Value.LastWrittenContrast = -1;
+                }
+            }
+        }
+
+        public static void WakeDdcBus(IntPtr hMonitor)
+        {
+            if (hMonitor == IntPtr.Zero) return;
+            try
+            {
+                if (GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) && count > 0)
+                {
+                    var pms = new PHYSICAL_MONITOR[count];
+                    if (GetPhysicalMonitorsFromHMONITOR(hMonitor, count, pms))
+                    {
+                        for (int i = 0; i < count; i++)
+                        {
+                            IntPtr hPhys = pms[i].hPhysicalMonitor;
+                            if (hPhys == IntPtr.Zero) continue;
+                            try
+                            {
+                                GetVCPFeatureAndVCPFeatureReply(hPhys, 0xDF, out _, out _, out _);
+                                Thread.Sleep(20);
+                                GetVCPFeatureAndVCPFeatureReply(hPhys, 0x10, out _, out _, out _);
+                            }
+                            catch { }
+                        }
+                        DestroyPhysicalMonitors(count, pms);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void OnDisplayChangedOrWoken()
+        {
+            InvalidateMonitorCache();
+            ResetThrottles();
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    Thread.Sleep(400);
+                    var cfg = LoadConfig();
+                    var bound = BindMonitorsToSlots(cfg);
+                    foreach (var kvp in bound)
+                    {
+                        WakeDdcBus(kvp.Value.HMonitor);
+                    }
+                    NotifyStateChanged();
+                }
+                catch { }
+            });
+        }
+
         public static List<int> GetConnectedSlotIndices(ScreenBrightnessConfig? cfg = null)
         {
             cfg ??= LoadConfig();
@@ -823,10 +894,13 @@ namespace KeyPulse
             bool written = WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, changeB, changeC);
             Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} write result={written}");
 
-            lock (throttle.Sync)
+            if (written)
             {
-                throttle.LastWrittenBrightness = targetB;
-                throttle.LastWrittenContrast = targetC;
+                lock (throttle.Sync)
+                {
+                    throttle.LastWrittenBrightness = targetB;
+                    throttle.LastWrittenContrast = targetC;
+                }
             }
 
             bool needsFollowUp = false;
@@ -894,10 +968,13 @@ namespace KeyPulse
                         return true;
                     }
 
-                    Thread.Sleep(50);
+                    Thread.Sleep(60);
+                    InvalidateMonitorCache();
                     var refreshed = BindMonitorsToSlots(cfg);
                     if (refreshed.TryGetValue(slotIndex, out var freshMon))
                     {
+                        WakeDdcBus(freshMon.HMonitor);
+                        Thread.Sleep(30);
                         bool freshOk = TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
                         Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} retry freshMon hMon={freshMon.HMonitor} result={freshOk}");
                         Thread.Sleep(30);
@@ -1541,26 +1618,32 @@ namespace KeyPulse
             NotifyStateChanged();
         }
 
-        public static void SetScreenLevelsBatch(IReadOnlyList<(int SlotIndex, int Brightness, int Contrast)> levels)
+        public static void SetScreenLevelsBatch(IReadOnlyList<(int SlotIndex, int Brightness, int Contrast, int VirtualBrightness, int VirtualContrast)> levels)
         {
             if (levels == null || levels.Count == 0) return;
             var cfg = LoadConfig();
             lock (ConfigLock)
             {
-                foreach (var (slotIndex, b, c) in levels)
+                foreach (var (slotIndex, b, c, vb, vc) in levels)
                 {
                     var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
                     if (screen != null)
                     {
                         screen.LastBrightness = Math.Clamp(b, 0, 100);
                         screen.LastContrast = Math.Clamp(c, 0, 100);
-                        screen.VirtualBrightness = screen.LastBrightness;
-                        screen.VirtualContrast = screen.LastContrast;
+                        screen.VirtualBrightness = Math.Clamp(vb, -100, 200);
+                        screen.VirtualContrast = Math.Clamp(vc, -100, 200);
                         QueueThrottledHardwareWrite(slotIndex, screen.LastBrightness, screen.LastContrast);
                     }
                 }
             }
             NotifyStateChanged();
+        }
+
+        public static void SetScreenLevelsBatch(IReadOnlyList<(int SlotIndex, int Brightness, int Contrast)> levels)
+        {
+            if (levels == null || levels.Count == 0) return;
+            SetScreenLevelsBatch(levels.Select(x => (x.SlotIndex, x.Brightness, x.Contrast, x.Brightness, x.Contrast)).ToList());
         }
 
         #endregion

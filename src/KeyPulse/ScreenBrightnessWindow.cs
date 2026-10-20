@@ -33,7 +33,7 @@ namespace KeyPulse
         private int _lastMasterValue = 50;
         private bool _suppressMasterEvents;
         private bool _isUserDraggingMaster;
-        private List<(int SlotIndex, int Brightness, int Contrast, bool LockRatio)> _masterDragBaselines = new();
+        private List<(int SlotIndex, int Brightness, int Contrast, bool LockRatio, int VirtualBrightness, int VirtualContrast)> _masterDragBaselines = new();
         private double _masterDragStartValue;
         private int _brickWallUp;
         private int _brickWallDown;
@@ -495,12 +495,21 @@ namespace KeyPulse
                 {
                     activeScreens.Add(states[0]);
                 }
-                _masterDragBaselines = activeScreens.Select(s => (s.SlotIndex, s.Brightness, s.Contrast, s.LockRatio)).ToList();
+                var cfg = ScreenBrightnessService.LoadConfig();
+                _masterDragBaselines = activeScreens.Select(s =>
+                {
+                    var sc = cfg.Screens.FirstOrDefault(x => x.SlotIndex == s.SlotIndex);
+                    int vb = sc?.VirtualBrightness ?? s.Brightness;
+                    int vc = sc?.VirtualContrast ?? s.Contrast;
+                    if (vb == 0 && s.Brightness > 0) vb = s.Brightness;
+                    if (vc == 0 && s.Contrast > 0) vc = s.Contrast;
+                    return (s.SlotIndex, s.Brightness, s.Contrast, s.LockRatio, vb, vc);
+                }).ToList();
                 _masterDragStartValue = _masterSlider.Value;
                 _lastPushedMasterValue = (int)Math.Round(_masterDragStartValue);
 
-                int maxUp = _masterDragBaselines.Count > 0 ? _masterDragBaselines.Min(s => 100 - s.Brightness) : 0;
-                int maxDown = _masterDragBaselines.Count > 0 ? _masterDragBaselines.Min(s => s.Brightness) : 0;
+                int maxUp = _masterDragBaselines.Count > 0 ? _masterDragBaselines.Min(s => Math.Max(0, 100 - s.Brightness)) : 0;
+                int maxDown = _masterDragBaselines.Count > 0 ? _masterDragBaselines.Min(s => Math.Max(0, s.Brightness)) : 0;
 
                 _brickWallUp = (int)Math.Round(_masterDragStartValue + maxUp);
                 _brickWallDown = (int)Math.Round(_masterDragStartValue - maxDown);
@@ -514,7 +523,6 @@ namespace KeyPulse
             _masterSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) =>
             {
                 _isUserDraggingMaster = false;
-                ScreenBrightnessService.ReanchorAllScreens();
                 ScreenBrightnessService.FlushConfig();
                 UpdateMasterBaselineFromScreens();
             }, RoutingStrategies.Tunnel);
@@ -582,7 +590,8 @@ namespace KeyPulse
                 _lastMasterValue = targetVal;
                 if (_masterValueText != null) _masterValueText.Text = targetVal.ToString();
 
-                var batch = new List<(int SlotIndex, int Brightness, int Contrast)>(_masterDragBaselines.Count);
+                var batch = new List<(int SlotIndex, int Brightness, int Contrast, int VirtualBrightness, int VirtualContrast)>(_masterDragBaselines.Count);
+                int delta = (int)Math.Round(targetVal - _masterDragStartValue);
 
                 if (targetVal >= _brickWallUp && _breakthroughUp)
                 {
@@ -594,7 +603,9 @@ namespace KeyPulse
                         int b = (int)Math.Round(wallB + t * (100 - wallB));
                         b = Math.Clamp(b, 0, 100);
                         int c = s.LockRatio ? b : Math.Clamp(s.Contrast + (b - s.Brightness), 0, 100);
-                        batch.Add((s.SlotIndex, b, c));
+                        int vb = Math.Clamp(s.VirtualBrightness + delta, -100, 200);
+                        int vc = s.LockRatio ? vb : Math.Clamp(s.VirtualContrast + delta, -100, 200);
+                        batch.Add((s.SlotIndex, b, c, vb, vc));
                     }
                 }
                 else if (targetVal <= _brickWallDown && _breakthroughDown)
@@ -607,17 +618,20 @@ namespace KeyPulse
                         int b = (int)Math.Round(wallB * t);
                         b = Math.Clamp(b, 0, 100);
                         int c = s.LockRatio ? b : Math.Clamp(s.Contrast + (b - s.Brightness), 0, 100);
-                        batch.Add((s.SlotIndex, b, c));
+                        int vb = Math.Clamp(s.VirtualBrightness + delta, -100, 200);
+                        int vc = s.LockRatio ? vb : Math.Clamp(s.VirtualContrast + delta, -100, 200);
+                        batch.Add((s.SlotIndex, b, c, vb, vc));
                     }
                 }
                 else
                 {
-                    int delta = (int)Math.Round(targetVal - _masterDragStartValue);
                     foreach (var s in _masterDragBaselines)
                     {
-                        int b = Math.Clamp(s.Brightness + delta, 0, 100);
-                        int c = s.LockRatio ? b : Math.Clamp(s.Contrast + delta, 0, 100);
-                        batch.Add((s.SlotIndex, b, c));
+                        int vb = Math.Clamp(s.VirtualBrightness + delta, -100, 200);
+                        int vc = s.LockRatio ? vb : Math.Clamp(s.VirtualContrast + delta, -100, 200);
+                        int b = Math.Clamp(vb, 0, 100);
+                        int c = s.LockRatio ? b : Math.Clamp(vc, 0, 100);
+                        batch.Add((s.SlotIndex, b, c, vb, vc));
                     }
                 }
 
@@ -2265,8 +2279,16 @@ namespace KeyPulse
                         target.Contrast = val;
                     }
                     bValText.Text = $"{val}%";
-                    ScreenBrightnessService.SaveConfig(cfg);
                 };
+
+                bSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) =>
+                {
+                    ScreenBrightnessService.SaveConfig(cfg);
+                }, RoutingStrategies.Tunnel);
+                bSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) =>
+                {
+                    ScreenBrightnessService.SaveConfig(cfg);
+                }, RoutingStrategies.Tunnel);
 
                 bRow.Children.Add(enableChk);
                 bRow.Children.Add(bSlider);
@@ -2320,8 +2342,16 @@ namespace KeyPulse
                         int val = (int)Math.Round(cSlider.Value);
                         target.Contrast = val;
                         cValText.Text = $"{val}%";
-                        ScreenBrightnessService.SaveConfig(cfg);
                     };
+
+                    cSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) =>
+                    {
+                        ScreenBrightnessService.SaveConfig(cfg);
+                    }, RoutingStrategies.Tunnel);
+                    cSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) =>
+                    {
+                        ScreenBrightnessService.SaveConfig(cfg);
+                    }, RoutingStrategies.Tunnel);
 
                     cRow.Children.Add(cSlider);
                     cRow.Children.Add(cValText);

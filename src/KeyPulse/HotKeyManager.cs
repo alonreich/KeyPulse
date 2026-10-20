@@ -272,8 +272,11 @@ namespace KeyPulse
             var tcs = new ManualResetEventSlim(false);
             _thread = new Thread(() =>
             {
-                _hWnd = CreateWindowEx(0, "Static", "KeyPulseMessageWindow", 0, 0, 0, 0, 0, new IntPtr(-3), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                _hWnd = CreateWindowEx(0, "Static", "KeyPulseMessageWindow", 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
                 tcs.Set();
+
+                const int WM_DISPLAYCHANGE = 0x007E;
+                const int WM_POWERBROADCAST = 0x0218;
 
                 int bRet;
                 while ((bRet = GetMessage(out MSG msg, IntPtr.Zero, 0, 0)) != 0)
@@ -301,6 +304,22 @@ namespace KeyPulse
                         {
                             try { task(); } catch { }
                         }
+                    }
+                    else if (msg.message == WM_DISPLAYCHANGE || msg.message == WM_POWERBROADCAST)
+                    {
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            try
+                            {
+                                Program.LogDebug("[System] WM_DISPLAYCHANGE / WM_POWERBROADCAST detected. Refreshing monitors & DDC bus.");
+                                ScreenBrightnessService.OnDisplayChangedOrWoken();
+                                DesktopOrganizerService.HandleDisplayChangeDebounced();
+                            }
+                            catch (Exception ex)
+                            {
+                                Program.LogDebug($"[System] Error handling display change: {ex.Message}");
+                            }
+                        });
                     }
                     TranslateMessage(ref msg);
                     DispatchMessage(ref msg);

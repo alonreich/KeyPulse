@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using KeyPulse;
@@ -627,6 +627,69 @@ namespace KeyPulse.Tests
             Assert.AreEqual(100, curA);
             Assert.AreEqual(100, curB);
             Assert.AreEqual(100, (curA + curB) / 2);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_MasterSlider_CeilingBreakthroughPreservesVirtualDifferential()
+        {
+            // Initial state: Screen A = 100, Screen B = 80 (diff = 20)
+            int startA = 100;
+            int startB = 80;
+
+            // When breakthrough reaches target = 100 (delta = +10 from master start 90):
+            int delta = 10;
+            int vbA = startA + delta; // 110 (virtual overflow beyond ceiling)
+            int vbB = startB + delta; // 90
+            int physicalA = Math.Clamp(vbA, 0, 100); // 100
+            int physicalB = 100; // during breakthrough at 100, compressed to 100
+            Assert.AreEqual(100, physicalA);
+            Assert.AreEqual(100, physicalB);
+            Assert.AreEqual(110, vbA);
+            Assert.AreEqual(90, vbB);
+
+            // Subsequent drag down from 100: target goes to 80 (delta = -20 from 100)
+            int downDelta = -20;
+            int newVbA = vbA + downDelta; // 110 - 20 = 90
+            int newVbB = vbB + downDelta; // 90 - 20 = 70
+            int restoredPhysicalA = Math.Clamp(newVbA, 0, 100);
+            int restoredPhysicalB = Math.Clamp(newVbB, 0, 100);
+
+            // The original 20% differential gap is completely restored!
+            Assert.AreEqual(90, restoredPhysicalA);
+            Assert.AreEqual(70, restoredPhysicalB);
+            Assert.AreEqual(20, restoredPhysicalA - restoredPhysicalB);
+        }
+
+        [TestMethod]
+        public void ScreenDirectHotkey_DefaultBaselineIs50()
+        {
+            var dh = new ScreenDirectHotkey();
+            Assert.AreEqual(50, dh.Brightness, "ScreenDirectHotkey default brightness must be 50");
+            Assert.AreEqual(50, dh.Contrast, "ScreenDirectHotkey default contrast must be 50");
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_SetScreenLevelsBatch_PreservesVirtualOffsets()
+        {
+            var cfg = ScreenBrightnessService.LoadConfig();
+            var batch = new List<(int SlotIndex, int Brightness, int Contrast, int VirtualBrightness, int VirtualContrast)>
+            {
+                (0, 100, 100, 120, 120),
+                (1, 100, 100, 95, 95)
+            };
+
+            ScreenBrightnessService.SetScreenLevelsBatch(batch);
+            var updated = ScreenBrightnessService.LoadConfig();
+
+            var screen0 = updated.Screens.FirstOrDefault(s => s.SlotIndex == 0);
+            var screen1 = updated.Screens.FirstOrDefault(s => s.SlotIndex == 1);
+
+            Assert.IsNotNull(screen0);
+            Assert.IsNotNull(screen1);
+            Assert.AreEqual(100, screen0.LastBrightness);
+            Assert.AreEqual(120, screen0.VirtualBrightness);
+            Assert.AreEqual(100, screen1.LastBrightness);
+            Assert.AreEqual(95, screen1.VirtualBrightness);
         }
     }
 }

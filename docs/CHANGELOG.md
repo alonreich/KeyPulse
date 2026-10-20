@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Master Slider Ceiling Differential Gap Preservation**: Fixed an issue where dragging the master horizontal slider to 100% (ceiling breakthrough) caused all monitors to collapse to identical brightness forever. Relative differential offsets are now preserved in virtual space, smoothly restoring each monitor's individual relative offset when dragging back down from 100%.
+- **Eliminated Preset Target Slider Disk Thrashing**: Fixed synchronous disk writes inside preset target brightness/contrast sliders. Adjustments now update in-memory at 60 FPS during drag and flush to disk only on pointer release.
+- **Dynamic Quick Presets Bar in Overlay**: The quick presets buttons at the bottom of the overlay window now dynamically update when presets are edited, renamed, or cycled.
+- **Instant Hotkey Default Baseline Standardization**: New Instant Screen Level hotkey shortcuts now default to the standard 50% baseline instead of 65%.
+- **Memory Safety in Desktop Organizer**: Added guaranteed `try ... finally` release for unmanaged Windows Shell COM PIDLs during layout restoration even if cancelled.
+- **Active DDC/CI Bus Recovery & WM_DISPLAYCHANGE Power Listener**: Fixed monitor hardware control suddenly failing after monitor sleep or idle timeouts. Added top-level window message processing for `WM_DISPLAYCHANGE` and `WM_POWERBROADCAST`, automatic VESA DDC/CI bus wake handshakes, and fixed a throttle deadlock where failed writes permanently locked out future hardware writes.
+
 ## [v2026.10.20.1259] - 2026-10-20
 
 ### Added
@@ -205,6 +213,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-Flight Download Cancellation & Indeterminate Progress**: Users can cancel long-running updates mid-download, with smooth indeterminate progress feedback for unmetered streams.
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
+
+### Fixed
+- **Master Slider Ceiling Differential Gap Preservation**: Fixed an issue where dragging the master horizontal slider to 100% (ceiling breakthrough) caused all monitors to collapse to identical brightness forever. Relative differential offsets are now preserved in virtual space, smoothly restoring each monitor's individual relative offset when dragging back down from 100%.
+- **Eliminated Preset Target Slider Disk Thrashing**: Fixed synchronous disk writes inside preset target brightness/contrast sliders. Adjustments now update in-memory at 60 FPS during drag and flush to disk only on pointer release.
+- **Dynamic Quick Presets Bar in Overlay**: The quick presets buttons at the bottom of the overlay window now dynamically update when presets are edited, renamed, or cycled.
+- **Instant Hotkey Default Baseline Standardization**: New Instant Screen Level hotkey shortcuts now default to the standard 50% baseline instead of 65%.
+- **Memory Safety in Desktop Organizer**: Added guaranteed `try ... finally` release for unmanaged Windows Shell COM PIDLs during layout restoration even if cancelled.
+- **Active DDC/CI Bus Recovery & WM_DISPLAYCHANGE Power Listener**: Fixed monitor hardware control suddenly failing after monitor sleep or idle timeouts. Added top-level window message processing for `WM_DISPLAYCHANGE` and `WM_POWERBROADCAST`, automatic VESA DDC/CI bus wake handshakes, and fixed a throttle deadlock where failed writes permanently locked out future hardware writes.
 
 ## [v2026.10.20.1259] - 2026-10-20
 
