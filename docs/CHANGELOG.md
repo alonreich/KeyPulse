@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Brightness Step Hotkeys Persistence**: Fixed an issue where stepping brightness up or down via global hotkeys (`Ctrl+Alt+=` / `Ctrl+Alt+-`) or master overlay nudge buttons did not persist to disk under default differential lock or single-monitor setups, causing brightness to revert upon application restart.
+- **Desktop Layout Inline Rename Cancellation**: Fixed an issue where clicking the Cancel button in the Desktop Organizer profile rename editor committed and saved unwanted name edits due to early focus loss. Clicking Cancel now reliably discards changes and restores the previous layout name.
+- **Robust Clipboard Restore on InsertText**: Enhanced clipboard format restoration during `InsertText` actions by introducing resilient retry backoffs and exception isolation against external clipboard monitors and history managers.
+
 ## [v2026.10.20.1850] - 2026-10-20
 
 ### Security & False-Positive Remediation
@@ -226,6 +231,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **In-Flight Download Cancellation & Indeterminate Progress**: Users can cancel long-running updates mid-download, with smooth indeterminate progress feedback for unmetered streams.
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
+
+### Fixed
+- **Brightness Step Hotkeys Persistence**: Fixed an issue where stepping brightness up or down via global hotkeys (`Ctrl+Alt+=` / `Ctrl+Alt+-`) or master overlay nudge buttons did not persist to disk under default differential lock or single-monitor setups, causing brightness to revert upon application restart.
+- **Desktop Layout Inline Rename Cancellation**: Fixed an issue where clicking the Cancel button in the Desktop Organizer profile rename editor committed and saved unwanted name edits due to early focus loss. Clicking Cancel now reliably discards changes and restores the previous layout name.
+- **Robust Clipboard Restore on InsertText**: Enhanced clipboard format restoration during `InsertText` actions by introducing resilient retry backoffs and exception isolation against external clipboard monitors and history managers.
 
 ## [v2026.10.20.1850] - 2026-10-20
 

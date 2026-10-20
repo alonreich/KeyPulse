@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -102,7 +102,6 @@ namespace KeyPulse
         public static int LastRegisterError { get; private set; }
 
 
-
         public static Action<int, bool, bool, bool, bool>? OnRawKey;
 
         public static void EnableCaptureHook()
@@ -186,7 +185,6 @@ namespace KeyPulse
             GetWindowThreadProcessId(hWnd, out var processId);
             return processId == CurrentProcessId;
         }
-
 
 
         public static void Start()

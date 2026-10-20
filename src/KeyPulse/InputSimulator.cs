@@ -665,15 +665,27 @@ namespace KeyPulse
         {
             if (!snapshot.Captured) return;
 
-            if (!SafeOpenClipboard())
+            bool opened = false;
+            for (int attempt = 0; attempt < 40; attempt++)
             {
-                Program.LogDebug("Clipboard restore skipped: clipboard could not be opened.");
+                if (SafeOpenClipboard())
+                {
+                    opened = true;
+                    break;
+                }
+                Thread.Sleep(25);
+            }
+
+            if (!opened)
+            {
+                Program.LogDebug("Clipboard restore skipped: clipboard could not be opened after retries.");
                 return;
             }
 
             try
             {
                 EmptyClipboard();
+                int restoredCount = 0;
                 foreach (var kvp in snapshot.Formats)
                 {
                     IntPtr hGlobal = GlobalAlloc(GMEM_MOVABLE | GMEM_ZEROINIT, (UIntPtr)(uint)kvp.Value.Length);
@@ -692,8 +704,18 @@ namespace KeyPulse
                     if (SetClipboardData(kvp.Key, hGlobal) == IntPtr.Zero)
                     {
                         GlobalFree(hGlobal);
+                        Program.LogDebug($"SetClipboardData failed for format {kvp.Key}.");
+                    }
+                    else
+                    {
+                        restoredCount++;
                     }
                 }
+                Program.LogDebug($"Clipboard restore completed: {restoredCount}/{snapshot.Formats.Count} formats restored.");
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug($"Clipboard restore failed: {ex.Message}");
             }
             finally
             {

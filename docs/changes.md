@@ -8,6 +8,18 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Screen Brightness, Desktop Layout Inline Editing & Input Simulation Reliability (`ScreenBrightnessService.cs`, `App.axaml.cs`, `DesktopOrganizerWindow.axaml.cs`, `InputSimulator.cs`)
+- **Brightness Step Hotkeys Persistence (`ScreenBrightnessService.cs`, `App.axaml.cs`)**:
+  - Removed early return bypassing `SaveConfig` in `TriggerBrightnessStep` when `cfg.LockMonitorDifferential || connectedSlots.Count == 1`.
+  - Added `SaveConfigInternal(cfg)` inside `RequestMasterLevelChange` lock to guarantee immediate disk persistence for both step hotkey presses and master +/- nudge clicks.
+  - Added `ScreenBrightnessService.FlushConfig()` to `App.Exit_Clicked` to ensure all in-memory brightness state is written before process termination.
+- **Desktop Layout Inline Rename Cancellation (`DesktopOrganizerWindow.axaml.cs`)**:
+  - Guarded `renameBox.LostFocus` by inspecting `cancelRenameBtn.IsPointerOver` and binding `cancelRenameBtn.PointerPressed` to `CancelRename()`, preventing unwanted rename commits when clicking Cancel.
+  - Restored `renameBox.Text = profile.Name` upon rename cancellation.
+- **Resilient Clipboard Restore (`InputSimulator.cs`)**:
+  - Enhanced `RestoreClipboard` with a 40-attempt (up to 1,000 ms) retry loop around `SafeOpenClipboard` to accommodate contention from external clipboard monitors and history managers.
+  - Added exception handling and detailed format restoration metrics logging.
+
 ### Windows Application Security & False-Positive Remediation (`HotKeyManager.cs`, `Program.cs`, `SetupWindow.cs`, `ScreenBrightnessWindow.cs`, `app.manifest`, `BuildPipeline.ps1`)
 - **Keylogger Hook Elimination (`HotKeyManager.cs`, `ScreenBrightnessWindow.cs`)**:
   - Fully purged `SetWindowsHookEx(WH_KEYBOARD_LL)`, `UnhookWindowsHookEx`, `CallNextHookEx`, and low-level keyboard hook callback delegates from the codebase.

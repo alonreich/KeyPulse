@@ -1172,7 +1172,6 @@ class Program
     {
         error = string.Empty;
 
-        // Fast-path: Check if the task already exists with the correct executable path and RunLevel
         bool taskMatchesExe = false;
         bool taskIsElevated = false;
         bool taskIsEnabled = false;

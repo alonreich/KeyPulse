@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -413,7 +413,6 @@ namespace KeyPulse
 
             _masterSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) =>
             {
-                // Retain drag session through pointer capture transitions
             }, RoutingStrategies.Tunnel);
 
             _masterSlider.PropertyChanged += (_, pe) =>

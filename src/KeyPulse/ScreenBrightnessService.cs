@@ -1321,7 +1321,6 @@ namespace KeyPulse
             if (cfg.LockMonitorDifferential || connectedSlots.Count == 1)
             {
                 RequestMasterLevelChange(delta);
-                return;
             }
             else
             {
@@ -1458,6 +1457,7 @@ namespace KeyPulse
                         RequestScreenLevelChangeInternal(slot, newPhysicalB, newPhysicalC, updateContrastFromLock: screen.LockRatio, preserveVirtual: true);
                     }
                 }
+                SaveConfigInternal(cfg);
             }
 
             NotifyStateChanged();

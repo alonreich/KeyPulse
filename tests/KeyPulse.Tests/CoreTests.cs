@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using KeyPulse;
@@ -456,7 +456,6 @@ namespace KeyPulse.Tests
                 new ScreenHardwareSetting { SlotIndex = 2, LastBrightness = 15, VirtualBrightness = 15 }
             };
 
-            // Drag down by -20% -> all hit bottom floor (0%) but remember their virtual levels
             int deltaDown = -20;
             foreach (var s in screens)
             {
@@ -468,12 +467,10 @@ namespace KeyPulse.Tests
             Assert.AreEqual(-10, screens[1].VirtualBrightness);
             Assert.AreEqual(-5, screens[2].VirtualBrightness);
 
-            // Physical levels are clamped safely to 0 (hardware is protected)
             Assert.AreEqual(0, screens[0].LastBrightness);
             Assert.AreEqual(0, screens[1].LastBrightness);
             Assert.AreEqual(0, screens[2].LastBrightness);
 
-            // Drag back up by +15% -> screen 2 reaches 10%, screen 1 reaches 5%, screen 0 stays at 0%
             int deltaUp1 = 15;
             foreach (var s in screens)
             {
@@ -489,7 +486,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(5, screens[1].LastBrightness);
             Assert.AreEqual(10, screens[2].LastBrightness);
 
-            // Drag back up remaining +5% (total +20%) -> exact original levels restored
             int deltaUp2 = 5;
             foreach (var s in screens)
             {
@@ -518,10 +514,8 @@ namespace KeyPulse.Tests
                 }
             };
 
-            // User moves Screen B to 80%
             config.Screens[1].LastBrightness = 80;
 
-            // Reanchoring aligns virtual brightness to current physical brightness
             foreach (var s in config.Screens)
             {
                 s.VirtualBrightness = s.LastBrightness;
@@ -530,14 +524,12 @@ namespace KeyPulse.Tests
             Assert.AreEqual(50, config.Screens[0].VirtualBrightness);
             Assert.AreEqual(80, config.Screens[1].VirtualBrightness);
 
-            // Step master by +10%
             foreach (var s in config.Screens)
             {
                 s.VirtualBrightness = Math.Clamp(s.VirtualBrightness + 10, -100, 200);
                 s.LastBrightness = Math.Clamp(s.VirtualBrightness, 0, 100);
             }
 
-            // Both move together preserving the new 30% gap
             Assert.AreEqual(60, config.Screens[0].LastBrightness);
             Assert.AreEqual(90, config.Screens[1].LastBrightness);
         }
@@ -575,7 +567,6 @@ namespace KeyPulse.Tests
                 }
             };
 
-            // Link Screen 0 to next (Screen 1)
             cfg.Screens[0].IsLinkedToNext = true;
             var group = ScreenBrightnessService.GetLinkedSlotGroup(cfg, 0);
             Assert.AreEqual(2, group.Count);
@@ -597,30 +588,25 @@ namespace KeyPulse.Tests
         [TestMethod]
         public void ScreenBrightness_MasterSlider_BrickWallAndBreakthroughInterpolation()
         {
-            // Screen A = 60, Screen B = 80. Master drag start = 70.
             int startA = 60;
             int startB = 80;
             double startMaster = 70;
 
-            int maxUp = Math.Min(100 - startA, 100 - startB); // min(40, 20) = 20
-            int brickWallUp = (int)Math.Round(startMaster + maxUp); // 90
+            int maxUp = Math.Min(100 - startA, 100 - startB);
+            int brickWallUp = (int)Math.Round(startMaster + maxUp);
             Assert.AreEqual(90, brickWallUp);
 
-            // Phase 1: at brick wall (90)
-            int wallA = startA + (brickWallUp - (int)startMaster); // 80
-            int wallB = startB + (brickWallUp - (int)startMaster); // 100
+            int wallA = startA + (brickWallUp - (int)startMaster);
+            int wallB = startB + (brickWallUp - (int)startMaster);
             Assert.AreEqual(80, wallA);
             Assert.AreEqual(100, wallB);
 
-            // Phase 2: breakthrough past brick wall towards 100
-            // At target = 95 (halfway between 90 and 100)
-            double t = (95 - brickWallUp) / (100.0 - brickWallUp); // 0.5
-            int curA = (int)Math.Round(wallA + t * (100 - wallA)); // 80 + 0.5 * 20 = 90
-            int curB = (int)Math.Round(wallB + t * (100 - wallB)); // 100 + 0 = 100
+            double t = (95 - brickWallUp) / (100.0 - brickWallUp);
+            int curA = (int)Math.Round(wallA + t * (100 - wallA));
+            int curB = (int)Math.Round(wallB + t * (100 - wallB));
             Assert.AreEqual(90, curA);
             Assert.AreEqual(100, curB);
 
-            // At target = 100
             t = 1.0;
             curA = (int)Math.Round(wallA + t * (100 - wallA));
             curB = (int)Math.Round(wallB + t * (100 - wallB));
@@ -632,29 +618,25 @@ namespace KeyPulse.Tests
         [TestMethod]
         public void ScreenBrightness_MasterSlider_CeilingBreakthroughPreservesVirtualDifferential()
         {
-            // Initial state: Screen A = 100, Screen B = 80 (diff = 20)
             int startA = 100;
             int startB = 80;
 
-            // When breakthrough reaches target = 100 (delta = +10 from master start 90):
             int delta = 10;
-            int vbA = startA + delta; // 110 (virtual overflow beyond ceiling)
-            int vbB = startB + delta; // 90
-            int physicalA = Math.Clamp(vbA, 0, 100); // 100
-            int physicalB = 100; // during breakthrough at 100, compressed to 100
+            int vbA = startA + delta;
+            int vbB = startB + delta;
+            int physicalA = Math.Clamp(vbA, 0, 100);
+            int physicalB = 100;
             Assert.AreEqual(100, physicalA);
             Assert.AreEqual(100, physicalB);
             Assert.AreEqual(110, vbA);
             Assert.AreEqual(90, vbB);
 
-            // Subsequent drag down from 100: target goes to 80 (delta = -20 from 100)
             int downDelta = -20;
-            int newVbA = vbA + downDelta; // 110 - 20 = 90
-            int newVbB = vbB + downDelta; // 90 - 20 = 70
+            int newVbA = vbA + downDelta;
+            int newVbB = vbB + downDelta;
             int restoredPhysicalA = Math.Clamp(newVbA, 0, 100);
             int restoredPhysicalB = Math.Clamp(newVbB, 0, 100);
 
-            // The original 20% differential gap is completely restored!
             Assert.AreEqual(90, restoredPhysicalA);
             Assert.AreEqual(70, restoredPhysicalB);
             Assert.AreEqual(20, restoredPhysicalA - restoredPhysicalB);
@@ -690,6 +672,20 @@ namespace KeyPulse.Tests
             Assert.AreEqual(120, screen0.VirtualBrightness);
             Assert.AreEqual(100, screen1.LastBrightness);
             Assert.AreEqual(95, screen1.VirtualBrightness);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_TriggerBrightnessStep_PersistsConfigToDisk()
+        {
+            var initialCfg = ScreenBrightnessService.ResetToDefaults();
+            var screen0 = initialCfg.Screens.First(s => s.SlotIndex == 0);
+            int originalBrightness = screen0.LastBrightness;
+
+            ScreenBrightnessService.TriggerBrightnessStep(10);
+            var reloaded = ScreenBrightnessService.LoadConfig();
+            var updatedScreen0 = reloaded.Screens.First(s => s.SlotIndex == 0);
+
+            Assert.AreEqual(originalBrightness + 10, updatedScreen0.LastBrightness, "TriggerBrightnessStep must persist brightness changes to disk");
         }
     }
 }

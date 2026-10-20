@@ -455,6 +455,7 @@ namespace KeyPulse
 
             void CancelRename()
             {
+                renameBox.Text = profile.Name;
                 renameRow.IsVisible = false;
                 titleRow.IsVisible = true;
             }
@@ -491,6 +492,11 @@ namespace KeyPulse
                 CommitRename();
             };
 
+            cancelRenameBtn.PointerPressed += (s, e) =>
+            {
+                CancelRename();
+            };
+
             cancelRenameBtn.Click += (s, e) =>
             {
                 Program.PlaySound("click");
@@ -510,7 +516,15 @@ namespace KeyPulse
                     CancelRename();
                 }
             };
-            renameBox.LostFocus += (s, le) => CommitRename();
+            renameBox.LostFocus += (s, le) =>
+            {
+                if (cancelRenameBtn.IsPointerOver)
+                {
+                    CancelRename();
+                    return;
+                }
+                CommitRename();
+            };
 
             leftStack.Children.Add(titleRow);
             leftStack.Children.Add(renameRow);

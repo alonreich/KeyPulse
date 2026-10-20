@@ -472,6 +472,7 @@ public partial class App : Application
     public void Exit_Clicked(object? sender, System.EventArgs e)
     {
         IsExiting = true;
+        ScreenBrightnessService.FlushConfig();
         IpcService.StopServer();
         InputSimulator.CancelTyping();
         HotkeyManager.DisableCaptureHook();
