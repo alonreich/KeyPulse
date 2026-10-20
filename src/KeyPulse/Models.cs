@@ -530,6 +530,7 @@ namespace KeyPulse
         public double SettingsWindowY { get; set; } = double.NaN;
         public double SettingsWindowWidth { get; set; } = 640;
         public double SettingsWindowHeight { get; set; } = 680;
+        public string SettingsWindowState { get; set; } = "Normal";
         public int LastActiveSettingsTab { get; set; } = 0;
 
         public double DesktopOrganizerWindowX { get; set; } = double.NaN;
@@ -542,7 +543,8 @@ namespace KeyPulse
         public double ScreenBrightnessWindowWidth { get; set; } = 880;
         public double ScreenBrightnessWindowHeight { get; set; } = 740;
 
-        public bool UseGoogleChromeForUrls { get; set; } = true;
+        public bool UseGoogleChromeForUrls { get; set; } = false;
+        public string PreferredBrowser { get; set; } = "System";
 
         /// <summary>
         /// Mirror of the Windows startup state so elevating/de-elevating cannot silently lose it.
@@ -641,6 +643,7 @@ namespace KeyPulse
         public double SettingsWindowY { get; set; } = double.NaN;
         public double SettingsWindowWidth { get; set; }
         public double SettingsWindowHeight { get; set; }
+        public string SettingsWindowState { get; set; } = "Normal";
 
         public double SetupWindowX { get; set; } = double.NaN;
         public double SetupWindowY { get; set; } = double.NaN;
@@ -668,7 +671,8 @@ namespace KeyPulse
     {
         public List<BackupShortcut> Shortcuts { get; set; } = new();
 
-        public bool UseGoogleChromeForUrls { get; set; } = true;
+        public bool UseGoogleChromeForUrls { get; set; } = false;
+        public string PreferredBrowser { get; set; } = "System";
         public bool SoundEnabled { get; set; } = true;
         public int TypingDelayMs { get; set; } = 1;
         public string Theme { get; set; } = "System";
@@ -676,6 +680,9 @@ namespace KeyPulse
         public bool ShortcutSortDescending { get; set; }
         public bool HasSeenTrayHint { get; set; }
         public int LastActiveSettingsTab { get; set; }
+        public bool AutoCheckForUpdates { get; set; } = true;
+        public string UpdateChannel { get; set; } = "Stable";
+        public string SkippedUpdateVersion { get; set; } = string.Empty;
 
         public BackupWindowLayout Window { get; set; } = new();
 
@@ -810,6 +817,10 @@ namespace KeyPulse
         public string StepDownHotkey { get; set; } = string.Empty;
         public int StepDelta { get; set; } = 5;
         public bool LockMonitorDifferential { get; set; } = true;
+        public double OverlayWindowX { get; set; } = double.NaN;
+        public double OverlayWindowY { get; set; } = double.NaN;
+        public double OverlayWindowWidth { get; set; } = 700;
+        public double OverlayWindowHeight { get; set; } = 540;
         public List<ScreenHardwareSetting> Screens { get; set; } = new();
         public List<ScreenBrightnessProfile> Profiles { get; set; } = new();
         public List<ScreenDirectHotkey> DirectHotkeys { get; set; } = new();

@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **One-Click Admin Relaunch from Startup Notice**: Added an immediate "Restart As Administrator" primary action button to the Administrator mode startup notice dialog, allowing users who launched KeyPulse manually via desktop shortcuts to elevate directly without opening Settings.
+- **Synced All-Displays Master Slider & Gap Preservation**: Renamed master brightness bar to "ALL DISPLAYS (SYNCED)" with a dedicated "SYNCED MASTER" badge and vibrant gradient border/background. Moving individual monitor sliders now recalibrates and preserves relative differential offsets when subsequently adjusting the master synced slider or step hotkeys.
+- **Movable, Resizable & Geometry-Remembering Brightness Overlay**: Enabled window resizing and title bar dragging (BeginMoveDrag) on the Quick Sliders overlay (ScreenBrightnessOverlayWindow), persisting custom window bounds and coordinates in ScreenBrightnessConfig.
+- **Direct Desktop Organizer Automation in Settings**: Surfaced "Automatically restore icon positions on display or resolution change" and "Automatically create periodic backup snapshots" checkboxes directly on the Displays & Icons preferences card.
+- **Step Delta Selector**: Added an interactive step size selector (1%, 2%, 5%, 10%) bound directly to cfg.StepDelta in the Screen Brightness manager.
+- **Expanded Preferred Web Browser Selection**: Added browser selector dropdown supporting System Default (Recommended), Google Chrome, Microsoft Edge, Mozilla Firefox, and Brave Browser with real-time detection and fallback notices.
+- **Password Show/Hide Eye Toggle**: Added an 👁 reveal/mask toggle button beside password fields in backup encryption and unlock dialogs.
+- **Settings Window Single-Instance & Modal Parenting**: Guarded settings from duplicate instances and established strict modal window ownership across backup and passphrase dialogs to prevent orphaned child windows.
+
+### Changed
+- **4-Tab Categorized Settings Information Architecture**: Consolidated 8 scattered tabs into 4 top-tier application groupings: **General**, **Appearance**, **Displays & Icons**, and **Backup & Updates**, complete with full search filtering and contextual tab defaults restoration.
+- **Conditional Update Channel Interactivity**: Automatically dim and disable the Update Channel dropdown when "Automatically check for updates on startup" is unchecked.
+- **Admin Privilege Microcopy & Light Theme Contrast**: Replaced technical elevation labels with ultra-short, clear microcopy ("Run as Admin", "Revert to User") and enhanced badge background/border contrast for WCAG AA compliance in Light mode.
+
+### Fixed
+- **Systray Navigation Auto-Hide (#50)**: Clicking *Screen Brightness*, *Desktop Organizer*, or *Settings* from the system tray menu now immediately hides the main shortcuts window instead of leaving it stranded in the background.
+- **Quick Sliders Overlay Numeric Truncation & Slider Collisions (#52)**: Fixed clipping and overlapping labels/sliders in the overlay window by constraining slider heights to 110px, enabling card clipping, and wrapping status text.
+- **Visual Distinction for Synced Master Slider (#53)**: Applied distinctive gradient styling and badges to the master synced slider so users immediately distinguish it from individual monitor controls.
+- **Shortcut Table Column Vertical Alignment (#54)**: Synchronized list item grid layout and horizontal scroll compensation to eliminate column header separator distortion.
+- **Backup Setting Persistence & State Memory (#1, #8)**: Ensured PreferredBrowser, AutoCheckForUpdates, UpdateChannel, SkippedUpdateVersion, and SettingsWindowState are fully serialized in backup exports and remembered across app sessions.
+- **Typing Delay Inline Validation (#12)**: Added inline validation messages alerting users when typing delay inputs fall outside the valid 1–200 ms range.
+- **Non-Topmost Dialog Focus (#17)**: Removed forced topmost flags on confirmation dialogs to prevent broken system Z-ordering.
+
 ## [v2026.10.19.2052] - 2026-10-19
 
 ### Added
@@ -140,7 +164,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Release Channel Selector**: Users can switch between Stable and Beta release channels under Settings > About & Software Updates.
 - **In-Flight Download Cancellation & Indeterminate Progress**: Users can cancel long-running updates mid-download, with smooth indeterminate progress feedback for unmetered streams.
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
-- **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]` before allowing releases.
+- **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
+
+### Added
+- **One-Click Admin Relaunch from Startup Notice**: Added an immediate "Restart As Administrator" primary action button to the Administrator mode startup notice dialog, allowing users who launched KeyPulse manually via desktop shortcuts to elevate directly without opening Settings.
+- **Synced All-Displays Master Slider & Gap Preservation**: Renamed master brightness bar to "ALL DISPLAYS (SYNCED)" with a dedicated "SYNCED MASTER" badge and vibrant gradient border/background. Moving individual monitor sliders now recalibrates and preserves relative differential offsets when subsequently adjusting the master synced slider or step hotkeys.
+- **Movable, Resizable & Geometry-Remembering Brightness Overlay**: Enabled window resizing and title bar dragging (`BeginMoveDrag`) on the Quick Sliders overlay (`ScreenBrightnessOverlayWindow`), persisting custom window bounds and coordinates in `ScreenBrightnessConfig`.
+- **Direct Desktop Organizer Automation in Settings**: Surfaced "Automatically restore icon positions on display or resolution change" and "Automatically create periodic backup snapshots" checkboxes directly on the Displays & Icons preferences card.
+- **Step Delta Selector**: Added an interactive step size selector (1%, 2%, 5%, 10%) bound directly to `cfg.StepDelta` in the Screen Brightness manager.
+- **Expanded Preferred Web Browser Selection**: Added browser selector dropdown supporting System Default (Recommended), Google Chrome, Microsoft Edge, Mozilla Firefox, and Brave Browser with real-time detection and fallback notices.
+- **Password Show/Hide Eye Toggle**: Added an `👁` reveal/mask toggle button beside password fields in backup encryption and unlock dialogs.
+- **Settings Window Single-Instance & Modal Parenting**: Guarded settings from duplicate instances and established strict modal window ownership across backup and passphrase dialogs to prevent orphaned child windows.
+
+### Changed
+- **4-Tab Categorized Settings Information Architecture**: Consolidated 8 scattered tabs into 4 top-tier application groupings: **General**, **Appearance**, **Displays & Icons**, and **Backup & Updates**, complete with full search filtering and contextual tab defaults restoration.
+- **Conditional Update Channel Interactivity**: Automatically dim and disable the Update Channel dropdown when "Automatically check for updates on startup" is unchecked.
+- **Admin Privilege Microcopy & Light Theme Contrast**: Replaced technical elevation labels with ultra-short, clear microcopy ("Run as Admin", "Revert to User") and enhanced badge background/border contrast for WCAG AA compliance in Light mode.
+
+### Fixed
+- **Systray Navigation Auto-Hide (#50)**: Clicking *Screen Brightness*, *Desktop Organizer*, or *Settings* from the system tray menu now immediately hides the main shortcuts window instead of leaving it stranded in the background.
+- **Quick Sliders Overlay Numeric Truncation & Slider Collisions (#52)**: Fixed clipping and overlapping labels/sliders in the overlay window by constraining slider heights to 110px, enabling card clipping, and wrapping status text.
+- **Visual Distinction for Synced Master Slider (#53)**: Applied distinctive gradient styling and badges to the master synced slider so users immediately distinguish it from individual monitor controls.
+- **Shortcut Table Column Vertical Alignment (#54)**: Synchronized list item grid layout and horizontal scroll compensation to eliminate column header separator distortion.
+- **Backup Setting Persistence & State Memory (#1, #8)**: Ensured `PreferredBrowser`, `AutoCheckForUpdates`, `UpdateChannel`, `SkippedUpdateVersion`, and `SettingsWindowState` are fully serialized in backup exports and remembered across app sessions.
+- **Typing Delay Inline Validation (#12)**: Added inline validation messages alerting users when typing delay inputs fall outside the valid 1–200 ms range.
+- **Non-Topmost Dialog Focus (#17)**: Removed forced topmost flags on confirmation dialogs to prevent broken system Z-ordering.` before allowing releases.
 - **NativeAOT CI Verification**: CI workflow validates full IL trimming, reflection-free serialization, and platform linker compatibility via `-p:PublishAot=true`.
 
 ### Changed

@@ -27,6 +27,8 @@ namespace KeyPulse
         private bool _suppressDifferentialCheckEvent;
         private Border? _masterBar;
         private Slider? _masterSlider;
+        private Button? _masterMinusBtn;
+        private Button? _masterPlusBtn;
         private TextBlock? _masterValueText;
         private int _lastMasterValue = 50;
         private bool _suppressMasterEvents;
@@ -373,9 +375,27 @@ namespace KeyPulse
 
             _masterBar = new Border
             {
-                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
-                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
-                BorderThickness = new Thickness(1),
+                Background = new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                    EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                    GradientStops =
+                    {
+                        new GradientStop(Color.Parse("#1E293B"), 0.0),
+                        new GradientStop(Color.Parse("#0F2942"), 1.0)
+                    }
+                },
+                BorderBrush = new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                    EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                    GradientStops =
+                    {
+                        new GradientStop(Color.Parse("#38BDF8"), 0.0),
+                        new GradientStop(Color.Parse("#818CF8"), 1.0)
+                    }
+                },
+                BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(14, 10),
                 Margin = new Thickness(0, 0, 0, 2),
@@ -384,37 +404,59 @@ namespace KeyPulse
 
             var masterGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto,Auto"),
+                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,*,Auto,Auto"),
                 ColumnSpacing = 10
             };
 
+            var masterBadge = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#0284C7")),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(7, 3),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = "SYNCED MASTER",
+                    FontSize = 10,
+                    FontWeight = FontWeight.ExtraBold,
+                    Foreground = Brushes.White
+                }
+            };
+            Grid.SetColumn(masterBadge, 0);
+            masterGrid.Children.Add(masterBadge);
+
             var masterLabel = new TextBlock
             {
-                Text = "All Displays (Linked Master):",
+                Text = "⚡ ALL DISPLAYS (SYNCED):",
                 FontSize = 12.5,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
+                FontWeight = FontWeight.Bold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#38BDF8"),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            Grid.SetColumn(masterLabel, 0);
+            Grid.SetColumn(masterLabel, 1);
             masterGrid.Children.Add(masterLabel);
 
-            var masterMinusBtn = new Button
+            var initialDelta = ScreenBrightnessService.LoadConfig().StepDelta;
+            if (initialDelta <= 0) initialDelta = 5;
+
+            _masterMinusBtn = new Button
             {
-                Content = "-5%",
+                Content = $"−{initialDelta}%",
                 Classes = { "Secondary" },
                 Padding = new Thickness(10, 4),
                 FontSize = 11.5,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            ToolTip.SetTip(masterMinusBtn, "Step all displays down by 5% (preserves differential, clamps at 0%)");
-            masterMinusBtn.Click += (_, _) =>
+            ToolTip.SetTip(_masterMinusBtn, $"Step all displays down by {initialDelta}% (preserves differential, clamps at 0%)");
+            _masterMinusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                ScreenBrightnessService.TriggerBrightnessStep(-5);
+                var curDelta = ScreenBrightnessService.LoadConfig().StepDelta;
+                if (curDelta <= 0) curDelta = 5;
+                ScreenBrightnessService.RequestMasterLevelChange(-curDelta);
             };
-            Grid.SetColumn(masterMinusBtn, 1);
-            masterGrid.Children.Add(masterMinusBtn);
+            Grid.SetColumn(_masterMinusBtn, 2);
+            masterGrid.Children.Add(_masterMinusBtn);
 
             _masterSlider = new Slider
             {
@@ -439,25 +481,27 @@ namespace KeyPulse
                     ScreenBrightnessService.RequestMasterLevelChange(delta);
                 }
             };
-            Grid.SetColumn(_masterSlider, 2);
+            Grid.SetColumn(_masterSlider, 3);
             masterGrid.Children.Add(_masterSlider);
 
-            var masterPlusBtn = new Button
+            _masterPlusBtn = new Button
             {
-                Content = "+5%",
+                Content = $"+{initialDelta}%",
                 Classes = { "Secondary" },
                 Padding = new Thickness(10, 4),
                 FontSize = 11.5,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            ToolTip.SetTip(masterPlusBtn, "Step all displays up by 5% (preserves differential, clamps at 100%)");
-            masterPlusBtn.Click += (_, _) =>
+            ToolTip.SetTip(_masterPlusBtn, $"Step all displays up by {initialDelta}% (preserves differential, clamps at 100%)");
+            _masterPlusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                ScreenBrightnessService.TriggerBrightnessStep(5);
+                var curDelta = ScreenBrightnessService.LoadConfig().StepDelta;
+                if (curDelta <= 0) curDelta = 5;
+                ScreenBrightnessService.RequestMasterLevelChange(curDelta);
             };
-            Grid.SetColumn(masterPlusBtn, 3);
-            masterGrid.Children.Add(masterPlusBtn);
+            Grid.SetColumn(_masterPlusBtn, 4);
+            masterGrid.Children.Add(_masterPlusBtn);
 
             _masterValueText = new TextBlock
             {
@@ -469,7 +513,7 @@ namespace KeyPulse
                 MinWidth = 28,
                 TextAlignment = TextAlignment.Right
             };
-            Grid.SetColumn(_masterValueText, 4);
+            Grid.SetColumn(_masterValueText, 5);
             masterGrid.Children.Add(_masterValueText);
 
             _masterBar.Child = masterGrid;
@@ -492,7 +536,8 @@ namespace KeyPulse
                     {
                         RenderProfilesList();
                         ScreenBrightnessService.NotifyStateChanged();
-                    });
+                    },
+                    onBrightnessChanged: (slot, val) => UpdateMasterBaselineFromScreens());
                 _containers[i] = view;
             }
 
@@ -954,6 +999,42 @@ namespace KeyPulse
             downStack.Children.Add(downClearBtn);
             controlsRow.Children.Add(downStack);
 
+            int currentDelta = cfg.StepDelta > 0 ? cfg.StepDelta : 5;
+
+            var stepDeltaStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 20, 6)
+            };
+            stepDeltaStack.Children.Add(new TextBlock
+            {
+                Text = "Step Delta:",
+                FontSize = 11.5,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            var stepDeltaCombo = new ComboBox
+            {
+                ItemsSource = new[] { "1%", "2%", "5% (Default)", "10%" },
+                Width = 125,
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            stepDeltaCombo.SelectedIndex = currentDelta switch
+            {
+                1 => 0,
+                2 => 1,
+                10 => 3,
+                _ => 2
+            };
+            ToolTip.SetTip(stepDeltaCombo, "Amount to increment or decrement brightness with step hotkeys and synced master buttons.");
+            stepDeltaStack.Children.Add(stepDeltaCombo);
+            controlsRow.Children.Add(stepDeltaStack);
+
             var stepUpStack = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -961,14 +1042,15 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 20, 6)
             };
-            stepUpStack.Children.Add(new TextBlock
+            var stepUpLabel = new TextBlock
             {
-                Text = "Step Up (+5%):",
+                Text = $"Step Up (+{currentDelta}%):",
                 FontSize = 11.5,
                 FontWeight = FontWeight.SemiBold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
                 VerticalAlignment = VerticalAlignment.Center
-            });
+            };
+            stepUpStack.Children.Add(stepUpLabel);
             AttachHotkeyRecorder(stepUpBox, combo =>
             {
                 ClearConflicting(combo, stepUpBox);
@@ -1005,14 +1087,15 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 20, 6)
             };
-            stepDownStack.Children.Add(new TextBlock
+            var stepDownLabel = new TextBlock
             {
-                Text = "Step Down (-5%):",
+                Text = $"Step Down (-{currentDelta}%):",
                 FontSize = 11.5,
                 FontWeight = FontWeight.SemiBold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
                 VerticalAlignment = VerticalAlignment.Center
-            });
+            };
+            stepDownStack.Children.Add(stepDownLabel);
             AttachHotkeyRecorder(stepDownBox, combo =>
             {
                 ClearConflicting(combo, stepDownBox);
@@ -1046,12 +1129,32 @@ namespace KeyPulse
 
             var hint = new TextBlock
             {
-                Text = "Cycle hotkeys step through presets (up to 10 presets) in lowest-first order. Step hotkeys bump brightness by ±5%. Individual presets can also have their own dedicated shortcut below.",
+                Text = $"Cycle hotkeys step through presets (up to 10 presets) in lowest-first order. Step hotkeys bump brightness by ±{currentDelta}%. Individual presets can also have their own dedicated shortcut below.",
                 FontSize = 11,
                 Classes = { "Muted" },
                 TextWrapping = TextWrapping.Wrap
             };
             root.Children.Add(hint);
+
+            stepDeltaCombo.SelectionChanged += (_, _) =>
+            {
+                int newDelta = stepDeltaCombo.SelectedIndex switch
+                {
+                    0 => 1,
+                    1 => 2,
+                    3 => 10,
+                    _ => 5
+                };
+                cfg.StepDelta = newDelta;
+                ScreenBrightnessService.SaveConfig(cfg);
+                ScreenBrightnessService.RegisterBrightnessHotkeys();
+                stepUpLabel.Text = $"Step Up (+{newDelta}%):";
+                stepDownLabel.Text = $"Step Down (-{newDelta}%):";
+                if (_masterMinusBtn != null) _masterMinusBtn.Content = $"−{newDelta}%";
+                if (_masterPlusBtn != null) _masterPlusBtn.Content = $"+{newDelta}%";
+                hint.Text = $"Cycle hotkeys step through presets (up to 10 presets) in lowest-first order. Step hotkeys bump brightness by ±{newDelta}%. Individual presets can also have their own dedicated shortcut below.";
+                SetStatus($"Step delta set to ±{newDelta}%.", true);
+            };
 
             border.Child = root;
             return border;
@@ -2122,6 +2225,21 @@ namespace KeyPulse
                     _suppressMasterEvents = false;
                 }
             }
+        }
+
+        private void UpdateMasterBaselineFromScreens()
+        {
+            if (_masterSlider == null) return;
+            var states = ScreenBrightnessService.GetImmediateCachedStates();
+            var activeStates = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
+            if (activeStates.Count <= 1) return;
+
+            var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+            _suppressMasterEvents = true;
+            _masterSlider.Value = baseScreen.Brightness;
+            _lastMasterValue = baseScreen.Brightness;
+            if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+            _suppressMasterEvents = false;
         }
 
         private async void OnWindowOpened(object? sender, EventArgs e)

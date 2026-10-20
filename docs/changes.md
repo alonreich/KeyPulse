@@ -8,6 +8,28 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Settings & Preferences Information Architecture & Wiring (Audit Issues #1–#17)
+- **Settings Architecture & Tab Sprawl Consolidation (#9)**: Consolidated settings from 8 tabs into 4 top-tier application categories: General (category 0: Startup, Sound, Typing delay, Web Browser, Admin mode), Appearance (category 1: Light/Dark/System theme), Displays & Icons (category 2: Screen Brightness & Desktop Organizer), and Backup & Updates (category 3: Updates, Backup/Import, Danger Zone).
+- **Desktop Organizer Automation Settings (#10)**: Surfaced AutoRestoreOnDisplayChange and AutoPeriodicSnapshotEnabled checkboxes directly on the Displays & Icons preferences card in MainWindow.axaml.cs, synchronized with DesktopOrganizerService.
+- **Conditional Update Channel Dimming (#11)**: Implemented RefreshUpdateChannelInteractivity() to dynamically disable and dim channelCombo (55% opacity) when AutoCheckForUpdates is disabled.
+- **Typing Delay Inline Validation (#12)**: Added inline speedErrorText block validating 1–200 ms range inputs, auto-reverting to current config on invalid entries.
+- **Admin Privilege Microcopy & Light Contrast (#5, #15)**: Simplified privilege elevation buttons to concise native text ("Run as Admin", "Revert to User") with WCAG AA compliant theme-aware styling.
+- **Expanded Preferred Web Browser Selection (#3, #16)**: Added PreferredBrowser to AppConfig and BackupPayload, with support for "System", "Chrome", "Edge", "Firefox", and "Brave", complete with real-time detection via TryFindBrowser and automatic fallback.
+- **Backup State Persistence & Settings Window Memory (#1, #8)**: Added SettingsWindowState (Normal, Maximized) and serialized PreferredBrowser, AutoCheckForUpdates, UpdateChannel, and SkippedUpdateVersion into BackupPayload and ApplyBackupPayload.
+- **Password Mask/Reveal Toggle (#4)**: Added interactive 👁 toggle buttons to password fields in AskBackupPassphraseAsync and AskUnlockPassphraseAsync.
+- **Modal Window Ownership & Settings Single-Instance (#6, #7)**: Added _activeSettingsWindow guard to prevent duplicate Settings instances and established modal parenting (ShowDialogOrWindowAsync(..., owner: w)) for all child dialogs.
+- **Non-Topmost Dialog Focus (#17)**: Removed forced topmost flags in ConfirmSettingsActionAsync to preserve clean system Z-ordering.
+
+### Screen Brightness & Tray Lifecycle (#50–#54)
+- **Systray Navigation Auto-Hide (#50)**: In MainWindow.axaml.cs, added `this.Hide()` when opening ScreenBrightnessWindow, DesktopOrganizerWindow, or Settings from the system tray menu.
+- **Differential Synced Master Brightness Slider (#51)**: Renamed master bar to ⚡ ALL DISPLAYS (SYNCED): with a SYNCED MASTER badge. Moving individual screen sliders recalibrates differential baselines (UpdateMasterBaselineFromScreens), preserving custom per-monitor offsets during master slider or hotkey adjustments.
+- **Movable, Resizable & Memory-Enabled Overlay (#52)**: Enabled CanResize = true and BeginMoveDrag on ScreenBrightnessOverlayWindow. Persisted OverlayWindowX, OverlayWindowY, OverlayWindowWidth, and OverlayWindowHeight in ScreenBrightnessConfig. Fixed slider clipping by setting slider MinHeight = 110, card ClipToBounds = true, and wrapping status text.
+- **Master Slider Visual Distinction (#53)**: Applied linear gradient styling (#162032 to #1e1b4b), vibrant border gradient (#38BDF8 to #818CF8), and SYNCED MASTER badge to master control bars.
+- **Custom Shortcut Keys Table Alignment (#54)**: Standardized zero margins and padding in ListBox.ShortcutList in App.axaml, aligned headers in MainWindow.axaml, and synchronized horizontal scroll offsets in HotkeyList_ScrollChanged.
+
+### Process Elevation & Admin Mode Notice
+- **One-Click Admin Relaunch from Startup Notice**: Replaced static error popup in VerifyAdminModeIsRealAsync() with a dedicated dialog containing an immediate "Restart As Administrator" action button and RelaunchAsAdministrator(adminNoticeWin), enabling seamless elevation via UAC with clean state persistence and mutex handoff.
+
 ### Hardware Display Control & DDC/CI Interop
 - **DDC/CI Concurrency Hardening & Direct Write Throttling (`ScreenBrightnessService.cs`)**:
   - In `TryWriteDdcMonitor`, eliminated redundant pre-write I2C read queries that previously triggered I2C bus lockups and slider freezes when run concurrently with other monitor utilities (e.g., Twinkle Tray).

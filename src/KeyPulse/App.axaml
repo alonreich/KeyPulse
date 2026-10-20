@@ -294,9 +294,19 @@
             <Setter Property="Padding" Value="8,4" />
             <Setter Property="Cursor" Value="Arrow" />
         </Style>
+        <Style Selector="ListBox.ShortcutList">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
         <Style Selector="ListBox.ShortcutList ListBoxItem">
             <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="CornerRadius" Value="0" />
             <Setter Property="HorizontalAlignment" Value="Left" />
+            <Setter Property="MinWidth" Value="0" />
         </Style>
         <Style Selector="ListBoxItem:pointerover">
             <Setter Property="Background" Value="{DynamicResource AppHoverBrush}" />

@@ -264,7 +264,8 @@
                      an identical definition in the header grid and the row template below. The two
                      lists MUST be kept byte-for-byte identical. -->
                 <Grid Grid.Row="0"
-                      Name="ShortcutHeaderGrid">
+                      Name="ShortcutHeaderGrid"
+                      HorizontalAlignment="Left">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="110" MaxWidth="260" />
                         <ColumnDefinition Width="6" />
@@ -378,6 +379,10 @@
                 <Grid Grid.Row="1" Name="HotkeyListContainer">
                     <ListBox Name="HotkeyList"
                              Classes="ShortcutList"
+                             Padding="0"
+                             Margin="0"
+                             BorderThickness="0"
+                             Background="Transparent"
                              SelectionChanged="HotkeyList_SelectionChanged"
                              ItemsSource="{Binding VisibleHotkeys}"
                              ScrollViewer.VerticalScrollBarVisibility="Visible"

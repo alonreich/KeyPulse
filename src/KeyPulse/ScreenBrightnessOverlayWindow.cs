@@ -55,10 +55,13 @@ namespace KeyPulse
 
         public ScreenBrightnessOverlayWindow()
         {
+            var cfg = ScreenBrightnessService.LoadConfig();
             Title = "Screen Brightness Quick Sliders";
-            Width = 650;
-            Height = 460;
-            CanResize = false;
+            Width = cfg.OverlayWindowWidth >= 500 ? cfg.OverlayWindowWidth : 700;
+            Height = cfg.OverlayWindowHeight >= 400 ? cfg.OverlayWindowHeight : 540;
+            MinWidth = 620;
+            MinHeight = 480;
+            CanResize = true;
             ShowInTaskbar = false;
             Topmost = true;
             WindowDecorations = WindowDecorations.None;
@@ -119,7 +122,7 @@ namespace KeyPulse
                         _instance.UpdateVisibleScreenContainers(latestStates);
                         _instance._openedUtc = DateTime.UtcNow;
                         _instance.Show();
-                        _instance.PositionNearTrayClamped();
+                        _instance.PositionOrRestoreClamped();
                         _instance.Activate();
                         _instance.Focus();
                         return;
@@ -133,7 +136,7 @@ namespace KeyPulse
                 _instance = new ScreenBrightnessOverlayWindow();
                 _instance._openedUtc = DateTime.UtcNow;
                 _instance.Show();
-                _instance.PositionNearTrayClamped();
+                _instance.PositionOrRestoreClamped();
                 _instance.Activate();
                 _instance.Focus();
             });
@@ -159,6 +162,22 @@ namespace KeyPulse
             {
                 ColumnDefinitions = new ColumnDefinitions("*,Auto"),
                 Margin = new Thickness(0, 0, 0, 10)
+            };
+            headerGrid.PointerPressed += (s, e) =>
+            {
+                if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed &&
+                    e.Source is not Button && e.Source is not TextBox)
+                {
+                    BeginMoveDrag(e);
+                }
+            };
+            outerBorder.PointerPressed += (s, e) =>
+            {
+                if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed &&
+                    (ReferenceEquals(e.Source, outerBorder) || ReferenceEquals(e.Source, rootGrid)))
+                {
+                    BeginMoveDrag(e);
+                }
             };
 
             var titleStack = new StackPanel { Spacing = 2 };
@@ -236,47 +255,87 @@ namespace KeyPulse
 
             _masterBar = new Border
             {
-                Background = AppBrush("AppPanelRaisedBrush", "#1E293B"),
-                BorderBrush = AppBrush("AppBorderBrush", "#334155"),
-                BorderThickness = new Thickness(1),
+                Background = new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                    EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                    GradientStops =
+                    {
+                        new GradientStop(Color.Parse("#1E293B"), 0.0),
+                        new GradientStop(Color.Parse("#0F2942"), 1.0)
+                    }
+                },
+                BorderBrush = new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                    EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                    GradientStops =
+                    {
+                        new GradientStop(Color.Parse("#38BDF8"), 0.0),
+                        new GradientStop(Color.Parse("#818CF8"), 1.0)
+                    }
+                },
+                BorderThickness = new Thickness(1.5),
                 CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12, 6),
+                Padding = new Thickness(12, 8),
                 Margin = new Thickness(0, 0, 0, 10),
                 IsVisible = false
             };
 
             var masterGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto,Auto"),
+                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,*,Auto,Auto"),
                 ColumnSpacing = 8
             };
 
+            var masterBadge = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#0284C7")),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(6, 2),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = "SYNCED MASTER",
+                    FontSize = 9.5,
+                    FontWeight = FontWeight.ExtraBold,
+                    Foreground = Brushes.White
+                }
+            };
+            Grid.SetColumn(masterBadge, 0);
+            masterGrid.Children.Add(masterBadge);
+
             var masterLabel = new TextBlock
             {
-                Text = "⚡ All Displays (Linked):",
+                Text = "⚡ ALL DISPLAYS (SYNCED):",
                 FontSize = 11.5,
-                FontWeight = FontWeight.SemiBold,
+                FontWeight = FontWeight.Bold,
                 Foreground = AppBrush("AppAccentBrush", "#38BDF8"),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            Grid.SetColumn(masterLabel, 0);
+            Grid.SetColumn(masterLabel, 1);
             masterGrid.Children.Add(masterLabel);
+
+            var stepDelta = ScreenBrightnessService.LoadConfig().StepDelta;
+            if (stepDelta <= 0) stepDelta = 5;
 
             var masterMinusBtn = new Button
             {
-                Content = "−5%",
+                Content = $"−{stepDelta}%",
                 Classes = { "Secondary" },
                 Padding = new Thickness(8, 3),
                 FontSize = 11,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            ToolTip.SetTip(masterMinusBtn, "Step all displays down by 5% (preserves differential, clamps at 0%)");
+            ToolTip.SetTip(masterMinusBtn, $"Step all displays down by {stepDelta}% (preserves differential, clamps at 0%)");
             masterMinusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                ScreenBrightnessService.TriggerBrightnessStep(-5);
+                var curDelta = ScreenBrightnessService.LoadConfig().StepDelta;
+                if (curDelta <= 0) curDelta = 5;
+                ScreenBrightnessService.RequestMasterLevelChange(-curDelta);
             };
-            Grid.SetColumn(masterMinusBtn, 1);
+            Grid.SetColumn(masterMinusBtn, 2);
             masterGrid.Children.Add(masterMinusBtn);
 
             _masterSlider = new Slider
@@ -302,24 +361,26 @@ namespace KeyPulse
                     ScreenBrightnessService.RequestMasterLevelChange(delta);
                 }
             };
-            Grid.SetColumn(_masterSlider, 2);
+            Grid.SetColumn(_masterSlider, 3);
             masterGrid.Children.Add(_masterSlider);
 
             var masterPlusBtn = new Button
             {
-                Content = "+5%",
+                Content = $"+{stepDelta}%",
                 Classes = { "Secondary" },
                 Padding = new Thickness(8, 3),
                 FontSize = 11,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            ToolTip.SetTip(masterPlusBtn, "Step all displays up by 5% (preserves differential, clamps at 100%)");
+            ToolTip.SetTip(masterPlusBtn, $"Step all displays up by {stepDelta}% (preserves differential, clamps at 100%)");
             masterPlusBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                ScreenBrightnessService.TriggerBrightnessStep(5);
+                var curDelta = ScreenBrightnessService.LoadConfig().StepDelta;
+                if (curDelta <= 0) curDelta = 5;
+                ScreenBrightnessService.RequestMasterLevelChange(curDelta);
             };
-            Grid.SetColumn(masterPlusBtn, 3);
+            Grid.SetColumn(masterPlusBtn, 4);
             masterGrid.Children.Add(masterPlusBtn);
 
             _masterValueText = new TextBlock
@@ -332,7 +393,7 @@ namespace KeyPulse
                 MinWidth = 24,
                 TextAlignment = TextAlignment.Right
             };
-            Grid.SetColumn(_masterValueText, 4);
+            Grid.SetColumn(_masterValueText, 5);
             masterGrid.Children.Add(_masterValueText);
 
             _masterBar.Child = masterGrid;
@@ -351,7 +412,8 @@ namespace KeyPulse
                 var state = initialStates.First(s => s.SlotIndex == i);
                 var containerView = ScreenContainerBuilder.CreateScreenContainer(
                     state,
-                    onNickChanged: () => ScreenBrightnessService.NotifyStateChanged());
+                    onNickChanged: () => ScreenBrightnessService.NotifyStateChanged(),
+                    onBrightnessChanged: (slot, val) => UpdateMasterBaselineFromScreens());
                 _containers[i] = containerView;
             }
 
@@ -447,18 +509,36 @@ namespace KeyPulse
                 }
             }
 
-            double targetWidth = activeCount switch
+            var ovCfg = ScreenBrightnessService.LoadConfig();
+            if (double.IsNaN(ovCfg.OverlayWindowX) && (ovCfg.OverlayWindowWidth <= 0 || ovCfg.OverlayWindowWidth == 700))
             {
-                1 => 420,
-                2 => 540,
-                _ => 680
-            };
+                double targetWidth = activeCount switch
+                {
+                    1 => 440,
+                    2 => 580,
+                    _ => 700
+                };
 
-            if (Math.Abs(Width - targetWidth) > 1)
-            {
-                Width = targetWidth;
-                PositionNearTrayClamped();
+                if (Math.Abs(Width - targetWidth) > 1)
+                {
+                    Width = targetWidth;
+                }
             }
+        }
+
+        private void UpdateMasterBaselineFromScreens()
+        {
+            if (_masterSlider == null) return;
+            var states = ScreenBrightnessService.GetImmediateCachedStates();
+            var activeStates = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
+            if (activeStates.Count <= 1) return;
+
+            var baseScreen = activeStates.FirstOrDefault(s => s.SlotIndex == 0) ?? activeStates[0];
+            _suppressMasterEvents = true;
+            _masterSlider.Value = baseScreen.Brightness;
+            _lastMasterValue = baseScreen.Brightness;
+            if (_masterValueText != null) _masterValueText.Text = baseScreen.Brightness.ToString();
+            _suppressMasterEvents = false;
         }
 
         private void PopulateQuickPresetsBar(StackPanel presetsPanel)
@@ -494,7 +574,7 @@ namespace KeyPulse
         private async void OnOverlayOpened(object? sender, EventArgs e)
         {
             _openedUtc = DateTime.UtcNow;
-            PositionNearTrayClamped();
+            PositionOrRestoreClamped();
             _liveReadCts?.Cancel();
             _liveReadCts?.Dispose();
             _liveReadCts = new CancellationTokenSource();
@@ -543,6 +623,46 @@ namespace KeyPulse
                     }
                 }
             });
+        }
+
+        private void PositionOrRestoreClamped()
+        {
+            try
+            {
+                var cfg = ScreenBrightnessService.LoadConfig();
+                if (!double.IsNaN(cfg.OverlayWindowX) && !double.IsNaN(cfg.OverlayWindowY))
+                {
+                    int x = (int)Math.Round(cfg.OverlayWindowX);
+                    int y = (int)Math.Round(cfg.OverlayWindowY);
+                    var screens = Screens;
+                    if (screens != null)
+                    {
+                        var screen = screens.ScreenFromPoint(new PixelPoint(x, y));
+                        if (screen != null)
+                        {
+                            Position = new PixelPoint(x, y);
+                            return;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            PositionNearTrayClamped();
+        }
+
+        private void SaveWindowGeometry()
+        {
+            try
+            {
+                var cfg = ScreenBrightnessService.LoadConfig();
+                cfg.OverlayWindowX = Position.X;
+                cfg.OverlayWindowY = Position.Y;
+                cfg.OverlayWindowWidth = (int)Math.Round(Width);
+                cfg.OverlayWindowHeight = (int)Math.Round(Height);
+                ScreenBrightnessService.SaveConfig(cfg);
+            }
+            catch { }
         }
 
         private void PositionNearTrayClamped()
@@ -613,6 +733,7 @@ namespace KeyPulse
         {
             if (_isClosing) return;
             _isClosing = true;
+            SaveWindowGeometry();
             ScreenBrightnessService.FlushConfig();
             try { Close(); } catch { }
         }
@@ -657,7 +778,7 @@ namespace KeyPulse
 
     internal static class ScreenContainerBuilder
     {
-        public static ScreenContainerView CreateScreenContainer(ScreenLiveState initialState, Action? onNickChanged = null)
+        public static ScreenContainerView CreateScreenContainer(ScreenLiveState initialState, Action? onNickChanged = null, Action<int, int>? onBrightnessChanged = null)
         {
             int slotIndex = initialState.SlotIndex;
             string slotLabel = initialState.DefaultSlotLabel;
@@ -669,7 +790,8 @@ namespace KeyPulse
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(12, 10),
-                Focusable = true
+                Focusable = true,
+                ClipToBounds = true
             };
 
             var mainGrid = new Grid
@@ -775,7 +897,9 @@ namespace KeyPulse
                 FontSize = 10,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#64748B"),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                MaxLines = 2
             };
 
             bool isCancellingRename = false;
@@ -941,7 +1065,7 @@ namespace KeyPulse
                 FontWeight = FontWeight.Bold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#38BDF8"),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 0, 0, 8)
+                Margin = new Thickness(0, 0, 0, 4)
             };
 
             var brightnessSlider = new Slider
@@ -954,8 +1078,8 @@ namespace KeyPulse
                 IsSnapToTickEnabled = true,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Stretch,
-                MinHeight = 145,
-                Margin = new Thickness(0, 6, 0, 8)
+                MinHeight = 110,
+                Margin = new Thickness(0, 4, 0, 4)
             };
             ToolTip.SetTip(brightnessSlider, "Adjust hardware backlight brightness (0% to 100%). Use mouse wheel or drag.");
 
@@ -973,7 +1097,7 @@ namespace KeyPulse
                 FontWeight = FontWeight.SemiBold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#E2E8F0"),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 6, 0, 0)
+                Margin = new Thickness(0, 4, 0, 0)
             };
             Grid.SetRow(bLabel, 2);
             leftColumn.Children.Add(brightnessValueText);
@@ -989,7 +1113,7 @@ namespace KeyPulse
                 FontWeight = FontWeight.Bold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#A78BFA"),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 0, 0, 8)
+                Margin = new Thickness(0, 0, 0, 4)
             };
 
             var contrastSlider = new Slider
@@ -1002,8 +1126,8 @@ namespace KeyPulse
                 IsSnapToTickEnabled = true,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Stretch,
-                MinHeight = 145,
-                Margin = new Thickness(0, 6, 0, 8)
+                MinHeight = 110,
+                Margin = new Thickness(0, 4, 0, 4)
             };
 
             var rightColumn = new Grid
@@ -1020,7 +1144,7 @@ namespace KeyPulse
                 FontWeight = FontWeight.SemiBold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#E2E8F0"),
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 6, 0, 0)
+                Margin = new Thickness(0, 4, 0, 0)
             };
             Grid.SetRow(cLabel, 2);
             rightColumn.Children.Add(contrastValueText);
@@ -1128,6 +1252,7 @@ namespace KeyPulse
 
                 int c = locked ? b : (int)Math.Round(contrastSlider.Value);
                 ScreenBrightnessService.RequestScreenLevelChange(slotIndex, b, c, updateContrastFromLock: locked);
+                onBrightnessChanged?.Invoke(slotIndex, b);
             };
 
             contrastSlider.PropertyChanged += (_, e) =>
