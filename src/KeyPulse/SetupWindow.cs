@@ -1570,7 +1570,7 @@ namespace KeyPulse
                     var appDataParent = Directory.GetParent(appDataDir)?.FullName;
                     if (!string.IsNullOrEmpty(appDataParent))
                     {
-                        foreach (var pattern in new[] { "KeyPulse.before-wipe-*.json", "KeyPulse.desktop_organizer.before-wipe-*.json", "desktop_organizer.before-wipe-*.json" })
+                        foreach (var pattern in new[] { "KeyPulse.before-wipe-*.json", "KeyPulse.config.lkg.before-wipe-*.json", "KeyPulse.desktop_organizer.before-wipe-*.json", "desktop_organizer.before-wipe-*.json", "KeyPulse.screen_brightness.before-wipe-*.json" })
                         {
                             foreach (var leftover in Directory.GetFiles(appDataParent, pattern))
                             {
