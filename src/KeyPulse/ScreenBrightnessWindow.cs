@@ -44,6 +44,8 @@ namespace KeyPulse
         private int _lastPushedMasterValue = -1;
         private string _lastRenderedScreenConfig = string.Empty;
         private StackPanel? _directHotkeysStack;
+        private readonly Dictionary<string, TextBox> _directHotkeyBoxes = new();
+        private TextBlock? _takenHotkeysText;
         private CancellationTokenSource? _liveReadCts;
 
         public ScreenBrightnessWindow()
@@ -392,6 +394,15 @@ namespace KeyPulse
             globalBarGrid.Children.Add(globalBarButtons);
 
             globalBar.Child = globalBarGrid;
+            _takenHotkeysText = new TextBlock
+            {
+                FontSize = 12,
+                FontWeight = FontWeight.SemiBold,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppDangerBrush", "#F87171")
+            };
+            UpdateTakenHotkeysText();
+            contentStack.Children.Add(_takenHotkeysText);
             contentStack.Children.Add(globalBar);
 
             _masterBar = new Border
@@ -691,7 +702,8 @@ namespace KeyPulse
                         RenderProfilesList();
                         ScreenBrightnessService.NotifyStateChanged();
                     },
-                    onBrightnessChanged: (slot, val) => { ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); });
+                    onBrightnessChanged: (slot, val) => { ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); },
+                    onAssignKey: OnAssignScreenKey);
                 _containers[i] = view;
             }
 
@@ -779,7 +791,7 @@ namespace KeyPulse
 
             _statusText = new TextBlock
             {
-                Text = "Ready. Assign a key combo to 'Cycle Screen Brightness' in the main KeyPulse window to switch presets in-game.",
+                Text = "Ready.",
                 FontSize = 12,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8"),
                 VerticalAlignment = VerticalAlignment.Center
@@ -1409,6 +1421,7 @@ namespace KeyPulse
             _directHotkeysRebuildPending = false;
             _directHotkeysSignature = signature;
             _directHotkeysStack.Children.Clear();
+            _directHotkeyBoxes.Clear();
             if (cfg.DirectHotkeys == null || cfg.DirectHotkeys.Count == 0)
             {
                 var emptyBlock = new TextBlock
@@ -1445,6 +1458,46 @@ namespace KeyPulse
             live.Hotkey = dh.Hotkey;
             ScreenBrightnessService.SaveConfig(cfg);
             _directHotkeysSignature = ScreenBrightnessListReconciler.ComputeDirectHotkeysSignature(ScreenBrightnessService.LoadConfig());
+        }
+
+        /// <summary>
+        /// Card "⌨ Key" button: creates (or reuses an unassigned) instant hotkey for just this screen, pre-filled with the
+        /// screen's current brightness and contrast as separate values, then focuses its shortcut box so the next key
+        /// press records it. Firing it moves only that screen and re-anchors its virtual level, so "All screens" keeps the gap.
+        /// </summary>
+        private void OnAssignScreenKey(int slotIndex)
+        {
+            Program.PlaySound("click");
+            var cfg = ScreenBrightnessService.LoadConfig();
+            var screen = cfg.Screens.FirstOrDefault(x => x.SlotIndex == slotIndex);
+            int b = screen?.LastBrightness ?? 50;
+            int c = screen?.LastContrast ?? b;
+            string screenName = screen != null && !string.IsNullOrWhiteSpace(screen.CustomNickname)
+                ? screen.CustomNickname
+                : ScreenBrightnessService.DefaultSlotName(slotIndex);
+
+            var entry = cfg.DirectHotkeys.FirstOrDefault(d => d.TargetSlotIndex == slotIndex && string.IsNullOrWhiteSpace(d.Hotkey));
+            if (entry == null)
+            {
+                entry = new ScreenDirectHotkey { Name = $"{screenName} key", TargetSlotIndex = slotIndex };
+                cfg.DirectHotkeys.Add(entry);
+            }
+            entry.Brightness = b;
+            entry.Contrast = c;
+            entry.LockRatio = false;
+            ScreenBrightnessService.SaveConfig(cfg);
+
+            string id = entry.Id;
+            RenderDirectHotkeysList();
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_directHotkeyBoxes.TryGetValue(id, out var box))
+                {
+                    box.BringIntoView();
+                    box.Focus();
+                }
+            }, DispatcherPriority.Background);
+            SetStatus($"Press the shortcut for {screenName} now. It will set only {screenName} to {b}% brightness / {c}% contrast (change below).", true);
         }
 
         private static void RemoveDirectHotkey(string id)
@@ -1668,6 +1721,7 @@ namespace KeyPulse
                 FontSize = 11.5,
                 VerticalAlignment = VerticalAlignment.Center
             };
+            _directHotkeyBoxes[dh.Id] = hkBox;
             AttachHotkeyRecorder(hkBox, combo =>
             {
                 dh.Hotkey = combo;
@@ -2917,6 +2971,7 @@ namespace KeyPulse
                 }
                 RenderProfilesList();
                 RenderDirectHotkeysList();
+                UpdateTakenHotkeysText();
             }
 
             if (Dispatcher.UIThread.CheckAccess())
@@ -2927,6 +2982,14 @@ namespace KeyPulse
             {
                 Dispatcher.UIThread.Post(Update);
             }
+        }
+
+        private void UpdateTakenHotkeysText()
+        {
+            if (_takenHotkeysText == null) return;
+            var taken = ScreenBrightnessService.DescribeTakenBrightnessHotkeys();
+            _takenHotkeysText.Text = taken ?? string.Empty;
+            _takenHotkeysText.IsVisible = taken != null;
         }
 
         private void SetStatus(string msg, bool ok)

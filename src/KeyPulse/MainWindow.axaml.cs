@@ -553,7 +553,7 @@ namespace KeyPulse
             return Math.Max(min, Math.Min(max, value));
         }
 
-        private const double StatusColumnMin = 110, StatusColumnMax = 260, StatusColumnDefault = 128;
+        private const double StatusColumnMin = 56, StatusColumnMax = 120, StatusColumnDefault = 64;
         private const double KeyColumnMin = 130, KeyColumnMax = 300, KeyColumnDefault = 150;
         private const double ActionColumnMin = 120, ActionColumnMax = 280, ActionColumnDefault = 200;
         private const double TargetColumnMin = 180, TargetColumnMax = 1600, TargetColumnDefault = 468;
@@ -563,7 +563,7 @@ namespace KeyPulse
         /// a 76px REMOVE, a 100px DUPLICATE and three 6px gaps = 304 (310 with breathing room).
         /// It is NOT user-resizable and NOT "Auto": the header and the rows are two separate grids.
         /// </summary>
-        private const double ActionsColumnWidth = 310;
+        private const double ActionsColumnWidth = 130;
 
         private void ApplyShortcutColumnResources()
         {
@@ -3488,6 +3488,7 @@ namespace KeyPulse
                 cancelButton.Content = "Cancel";
                 cancelButton.IsVisible = true;
             }
+            SetEditorRowActionsVisible(true);
 
             UpdateActionUi();
             UpdateEditorModeText();
@@ -3573,6 +3574,7 @@ namespace KeyPulse
                     cancelButton.Content = "Cancel";
                     cancelButton.IsVisible = false;
                 }
+                SetEditorRowActionsVisible(false);
                 if (this.FindControl<TextBox>("ActionNameText") is TextBox actionNameText) actionNameText.Text = "";
                 if (this.FindControl<TextBox>("KeyCombo") is TextBox keyCombo) keyCombo.Text = "";
                 if (this.FindControl<ComboBox>("ActionCombo") is ComboBox actionCombo) actionCombo.SelectedIndex = 0;
@@ -3690,9 +3692,31 @@ namespace KeyPulse
             btn.Focus();
         }
 
-        public async void Remove_Click(object? sender, RoutedEventArgs e)
+        private void SetEditorRowActionsVisible(bool visible)
         {
-            if (sender is Button btn && btn.DataContext is HotkeyEntry entry)
+            if (this.FindControl<Button>("EditorDuplicateButton") is Button dup) dup.IsVisible = visible;
+            if (this.FindControl<Button>("EditorDeleteButton") is Button del) del.IsVisible = visible;
+        }
+
+        /// <summary>Editor "Delete": removes the row being edited (the row itself only carries On/Off and Run).</summary>
+        public void EditorDelete_Click(object? sender, RoutedEventArgs e)
+        {
+            if (_editingEntry is HotkeyEntry entry) _ = RemoveEntryAsync(entry);
+        }
+
+        /// <summary>Editor "Duplicate": starts a copy of the row being edited.</summary>
+        public void EditorDuplicate_Click(object? sender, RoutedEventArgs e)
+        {
+            if (_editingEntry is HotkeyEntry entry) StartDuplicate(entry);
+        }
+
+        public void Remove_Click(object? sender, RoutedEventArgs e)
+        {
+            if (sender is Button btn && btn.DataContext is HotkeyEntry entry) _ = RemoveEntryAsync(entry);
+        }
+
+        private async System.Threading.Tasks.Task RemoveEntryAsync(HotkeyEntry entry)
+        {
             {
                 if (!await ConfirmRemoveAsync(entry)) return;
                 Program.PlaySound("close");
@@ -3707,9 +3731,13 @@ namespace KeyPulse
 
         public void Duplicate_Click(object? sender, RoutedEventArgs e)
         {
-            Program.PlaySound("click");
-            if (sender is not Button btn || btn.DataContext is not HotkeyEntry source) return;
+            if (sender is Button btn && btn.DataContext is HotkeyEntry source) StartDuplicate(source);
+        }
 
+        private void StartDuplicate(HotkeyEntry source)
+        {
+            Program.PlaySound("click");
+            SetEditorRowActionsVisible(false);
             ClearFieldErrors();
             ClearRowEditingExcept(source);
             source.IsEditing = true;

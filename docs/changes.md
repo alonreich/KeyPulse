@@ -8,6 +8,17 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### UI/UX Simplification Pass 2 (`ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`, `ScreenBrightnessService.cs`, `App.axaml(.cs)`, `MainWindow.axaml(.cs)`, `MainWindow.Settings.cs`, `BackupService.cs`, `Models.cs`)
+- **Overlay ⚙ menu**: Identify Screens and Presets & Setup buttons replaced by one ⚙ `MenuFlyout` (Separate contrast sliders / Identify screens / Presets, shortcuts & setup…). `CreateScreenContainer` gains `showLockRatioToggle` (overlay passes false) and `onAssignKey`; `ScreenContainerView.ShowLockRatioToggle`.
+- **⌨ Key per screen** (full window): `OnAssignScreenKey` creates/reuses a slot-specific `ScreenDirectHotkey` (current B/C, `LockRatio = false`) and focuses its recorder box.
+- **Tray**: flat menu; "Brightness slider" + presets inline; "QUICK ACTIONS" -> "Quick actions"; `App.axaml` default item renamed.
+- **Taken shortcuts**: `DescribeTakenBrightnessHotkeys`, `FriendlyHotkeyPurpose`; `RegisterBrightnessHotkeys` split into a notifying wrapper + `RegisterBrightnessHotkeysLocked`, raising `StateChanged` when the failed set changes. Shown in both windows.
+- **Main window rows**: Remove and Duplicate buttons removed from rows (now `EditorDeleteButton` / `EditorDuplicateButton` in the editor, via `RemoveEntryAsync` / `StartDuplicate`); Run shows "▶ Run"; `ActionsColumnWidth` 310 -> 130. Status cell is a coloured `Ellipse` (`RegistrationBrush`) with the words in the tool tip; status column 56..120 (default 64).
+- **Settings**: admin badge + 3-state button replaced by a `ToggleSwitch` (`TurnAdminOnAsync` / `TurnAdminOffAsync`) plus a mismatch-only "Restart as admin now" button. "Displays & Icons" split into "Brightness" and "Desktop icons"; tabs now 5 (`BackupService.SettingsTabCount`), Backup & Updates is index 4; per-tab defaults reset split accordingly.
+- **Welcome card**: `ScreenBrightnessConfig.HasSeenWelcomeCard` (copied in `CloneConfig`), `BuildWelcomeText`, `CreateWelcomeCard`.
+- Full-window status default text is now "Ready.".
+- Tests: `TakenHotkeys_AreDescribedInPlainWords_AndClearOnceRegistered`, `WelcomeText_UsesConfiguredStepKeys`, clone test covers `HasSeenWelcomeCard`, settings-tab clamp test uses `SettingsTabCount`.
+
 ### Brightness Slider Decluttering (`ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessWindow.cs`)
 - Overlay footer removed: Quick Presets bar (`_presetsPanel`, `PopulateQuickPresetsBar`) and the "Wheel / ↑↓ supported • Esc to close" hint. Hint moved into the close button tooltip.
 - Overlay header: `_headerStatusText` hidden by default (no "Reading live monitor levels..." / "N Displays Active • 250ms Hardware Limiter Ready"); shown in warning colour only for the hardware-read-failed fallback.

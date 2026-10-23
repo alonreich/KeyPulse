@@ -103,6 +103,23 @@
                             IsVisible="False"
                             TabIndex="10"
                             MinWidth="80" />
+                    <!-- Shown only while editing a row: rare actions live here, not on every row. -->
+                    <Button Name="EditorDuplicateButton"
+                            Content="&#x29C9; Duplicate"
+                            Classes="Secondary"
+                            Click="EditorDuplicate_Click"
+                            IsVisible="False"
+                            TabIndex="11"
+                            Margin="8,0,0,0"
+                            ToolTip.Tip="Copy this shortcut's action to a new key combination" />
+                    <Button Name="EditorDeleteButton"
+                            Content="Delete"
+                            Classes="Danger"
+                            Click="EditorDelete_Click"
+                            IsVisible="False"
+                            TabIndex="11"
+                            Margin="8,0,0,0"
+                            ToolTip.Tip="Delete this shortcut" />
                 </StackPanel>
 
                 <!-- Chips displaying all key combinations configured for this action -->
@@ -267,7 +284,7 @@
                       Name="ShortcutHeaderGrid"
                       HorizontalAlignment="Left">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="110" MaxWidth="260" />
+                        <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="56" MaxWidth="120" />
                         <ColumnDefinition Width="6" />
                         <ColumnDefinition Width="{DynamicResource ShortcutKeyColumnWidth}" MinWidth="130" MaxWidth="300" />
                         <ColumnDefinition Width="6" />
@@ -395,7 +412,7 @@
                                     <Grid>
                                         <!-- Must stay identical to ShortcutHeaderGrid above. -->
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="110" MaxWidth="260" />
+                                            <ColumnDefinition Width="{DynamicResource ShortcutStatusColumnWidth}" MinWidth="56" MaxWidth="120" />
                                             <ColumnDefinition Width="6" />
                                             <ColumnDefinition Width="{DynamicResource ShortcutKeyColumnWidth}" MinWidth="130" MaxWidth="300" />
                                             <ColumnDefinition Width="6" />
@@ -406,21 +423,16 @@
                                             <ColumnDefinition Width="{DynamicResource ShortcutActionsColumnWidth}" />
                                         </Grid.ColumnDefinitions>
                                         <Border Grid.Column="0" Classes="ShortcutGridCell">
-                                            <!-- ISSUE_6: the status is a plain, readable label that
-                                                 shows the whole reason. It used to be an 85px button
-                                                 clipped to "Inactive: C..." that toggled the shortcut
-                                                 off when clicked - reading a status must never
-                                                 change anything. Enabling is the separate On/Off
-                                                 control in the Actions column. -->
-                                            <TextBlock Text="{Binding StatusLabel}"
-                                                       HorizontalAlignment="Center"
-                                                       VerticalAlignment="Center"
-                                                       TextAlignment="Center"
-                                                       TextWrapping="Wrap"
-                                                       FontWeight="SemiBold"
-                                                       FontSize="11"
-                                                       Foreground="{Binding RegistrationBrush}"
-                                                       ToolTip.Tip="{Binding StatusTooltip}" />
+                                            <!-- A coloured dot (green ready / amber partial or waiting / red conflict);
+                                                 the full reason is in the tool tip. Reading a status never changes
+                                                 anything (ISSUE_6): enabling is the On/Off control in the Actions column. -->
+                                            <Ellipse Width="12"
+                                                     Height="12"
+                                                     HorizontalAlignment="Center"
+                                                     VerticalAlignment="Center"
+                                                     Fill="{Binding RegistrationBrush}"
+                                                     AutomationProperties.Name="{Binding StatusLabel}"
+                                                     ToolTip.Tip="{Binding StatusTooltip}" />
                                         </Border>
                                         <Grid Grid.Column="1">
                                             <Border Classes="ShortcutGridSeparatorCell" />
@@ -523,11 +535,11 @@
                                                         FontSize="11"
                                                         TabIndex="0"
                                                         ToolTip.Tip="{Binding ToggleTooltip}" />
-                                                <Button Content="Run"
+                                                <Button Content="▶ Run"
                                                         Classes="Secondary"
                                                         Click="Run_Click"
-                                                        Width="46"
-                                                        MinWidth="46"
+                                                        Width="58"
+                                                        MinWidth="58"
                                                         Height="24"
                                                         MinHeight="24"
                                                         Padding="4,2"
@@ -536,46 +548,6 @@
                                                         FontSize="11"
                                                         TabIndex="1"
                                                         ToolTip.Tip="Execute this action immediately" />
-                                                <!-- ISSUE_15: 8.5pt text is roughly two-thirds the
-                                                     size of the smallest text anywhere else here,
-                                                     and REMOVE is a destructive action. -->
-                                                <Button Content="Remove"
-                                                        Classes="Danger"
-                                                        Click="Remove_Click"
-                                                        Width="76"
-                                                        MinWidth="76"
-                                                        Height="24"
-                                                        MinHeight="24"
-                                                        Padding="4,2"
-                                                        HorizontalAlignment="Center"
-                                                        VerticalAlignment="Center"
-                                                        FontSize="11"
-                                                        TabIndex="2"
-                                                        ToolTip.Tip="Delete this shortcut" />
-                                                <Button Classes="Secondary"
-                                                        Click="Duplicate_Click"
-                                                        AutomationProperties.Name="Duplicate this shortcut"
-                                                        Width="100"
-                                                        MinWidth="100"
-                                                        Height="24"
-                                                        MinHeight="24"
-                                                        Padding="4,2"
-                                                        HorizontalAlignment="Center"
-                                                        VerticalAlignment="Center"
-                                                        FontSize="11"
-                                                        TabIndex="2"
-                                                        ToolTip.Tip="Copy this shortcut's action to a new key combination">
-                                                    <StackPanel Orientation="Horizontal"
-                                                                HorizontalAlignment="Center"
-                                                                VerticalAlignment="Center"
-                                                                Spacing="3">
-                                                        <TextBlock Text="&#x29C9;"
-                                                                   FontSize="11"
-                                                                   VerticalAlignment="Center" />
-                                                        <TextBlock Text="Duplicate"
-                                                                   VerticalAlignment="Center" />
-                                                    </StackPanel>
-                                                </Button>
                                             </StackPanel>
                                         </Border>
                                     </Grid>

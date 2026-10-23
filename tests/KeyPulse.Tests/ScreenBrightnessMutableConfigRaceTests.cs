@@ -219,6 +219,7 @@ namespace KeyPulse.Tests
             src.SchemaVersion = 9;
             src.Enabled = true;
             src.DisclaimerAccepted = true;
+            src.HasSeenWelcomeCard = true;
             src.GlobalLockBrightnessContrast = true;
             src.LastCycleProfileId = "abc";
             src.CycleUpHotkey = "Ctrl+1";
@@ -238,6 +239,7 @@ namespace KeyPulse.Tests
 
             Assert.AreEqual(9, clone.SchemaVersion);
             Assert.IsTrue(clone.Enabled && clone.DisclaimerAccepted && clone.GlobalLockBrightnessContrast);
+            Assert.IsTrue(clone.HasSeenWelcomeCard);
             Assert.AreEqual("abc", clone.LastCycleProfileId);
             Assert.AreEqual("Ctrl+1", clone.CycleUpHotkey);
             Assert.AreEqual("Ctrl+2", clone.CycleDownHotkey);

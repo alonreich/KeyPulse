@@ -95,5 +95,32 @@ namespace KeyPulse.Tests
             Assert.AreEqual(0, ScreenBrightnessService.FailedBrightnessHotkeyCountForTesting);
             Assert.IsFalse(ScreenBrightnessService.IsBrightnessHotkeyRetryScheduledForTesting);
         }
+
+        [TestMethod]
+        public void TakenHotkeys_AreDescribedInPlainWords_AndClearOnceRegistered()
+        {
+            _heldByOtherApp.Add("Ctrl+Alt+NumPadAdd");
+            ScreenBrightnessService.RegisterBrightnessHotkeys();
+
+            var text = ScreenBrightnessService.DescribeTakenBrightnessHotkeys();
+            Assert.IsNotNull(text);
+            StringAssert.Contains(text, "Ctrl+Alt+NumPadAdd (brighter)");
+
+            _heldByOtherApp.Clear();
+            ScreenBrightnessService.RetryFailedBrightnessHotkeysForTesting();
+            Assert.IsNull(ScreenBrightnessService.DescribeTakenBrightnessHotkeys());
+        }
+
+        [TestMethod]
+        public void WelcomeText_UsesConfiguredStepKeys()
+        {
+            var cfg = ScreenBrightnessService.CreateDefaultConfig();
+            var text = ScreenBrightnessOverlayWindow.BuildWelcomeText(cfg);
+            StringAssert.Contains(text, "Ctrl+Alt+= / Ctrl+Alt+- = brighter / darker");
+
+            cfg.StepUpHotkey = string.Empty;
+            cfg.StepDownHotkey = string.Empty;
+            Assert.IsFalse(ScreenBrightnessOverlayWindow.BuildWelcomeText(cfg).Contains("brighter"));
+        }
     }
 }

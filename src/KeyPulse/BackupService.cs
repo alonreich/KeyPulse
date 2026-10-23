@@ -53,6 +53,9 @@ namespace KeyPulse
     /// </summary>
     public static class BackupService
     {
+        /// <summary>Number of Settings tabs (General, Appearance, Brightness, Desktop icons, Backup &amp; Updates).</summary>
+        public const int SettingsTabCount = 5;
+
         private const int SaltBytes = 16;
         private const int NonceBytes = 12;
         private const int TagBytes = 16;
@@ -192,7 +195,7 @@ namespace KeyPulse
             config.ShortcutSortColumn = payload.ShortcutSortColumn ?? string.Empty;
             config.ShortcutSortDescending = payload.ShortcutSortDescending;
             config.HasSeenTrayHint = payload.HasSeenTrayHint;
-            config.LastActiveSettingsTab = Math.Clamp(payload.LastActiveSettingsTab, 0, 3);
+            config.LastActiveSettingsTab = Math.Clamp(payload.LastActiveSettingsTab, 0, SettingsTabCount - 1);
         }
 
         /// <summary>

@@ -9,9 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Brightness slider: extra buttons moved behind one ⚙ button (separate contrast, identify screens, presets & setup).
+- New "⌨ Key" button on each screen in the full Brightness window: give one screen its own shortcut that jumps only that screen to the brightness and contrast you pick. "All screens" keeps the new gap.
+- Tray menu is flat: "Brightness slider" with your presets right under it.
+- If another app is using one of your brightness shortcuts, the brightness windows now say which one. It clears when KeyPulse gets the key.
+- Shortcut list: each row has just On/Off and ▶ Run. Click a row to edit it; Duplicate and Delete are in the editor. Status is a coloured dot (hover for details).
+- Settings: one "Run as admin" switch. The "Displays & Icons" tab is now two tabs, "Brightness" and "Desktop icons".
+- First time you open the brightness slider, a short tips card shows the brightness keys. Click "Got it" and it won't come back.
 - The Brightness/Contrast Slider is simpler: no preset buttons (use the tray menu), no hint line, no status text unless something is wrong.
 - The master bar is now just labelled "All screens".
-- Each screen shows one slider while "Sync ratio" is on. Untick it to get a separate Contrast slider.
+- Each screen shows one slider for brightness and contrast together. Want a separate Contrast slider? Slider: ⚙ > "Separate contrast sliders". Full window: untick "Sync ratio".
 
 ### Fixed
 - Brightness sliders and shortcuts stopped working whenever no other brightness app (such as Twinkle Tray) was running. They now work on their own.

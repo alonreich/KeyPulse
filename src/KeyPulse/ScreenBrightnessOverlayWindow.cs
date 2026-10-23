@@ -34,6 +34,7 @@ namespace KeyPulse
         public Border SlotBadge { get; init; } = null!;
         public TextBlock StatusBadgeText { get; init; } = null!;
         public bool SupportsContrast { get; set; } = true;
+        public bool ShowLockRatioToggle { get; init; } = true;
         public bool IsInternalLcd { get; set; }
         public bool UserTouched { get; set; }
         public bool IsDraggingBrightness { get; set; }
@@ -58,9 +59,10 @@ namespace KeyPulse
         private int _lastPushedMasterValue = -1;
         private string _lastRenderedScreenConfig = string.Empty;
         private Grid _containersGrid = null!;
-        private Button? _identifyBtn;
+        private Button? _gearBtn;
         private CancellationTokenSource? _liveReadCts;
         private TextBlock? _headerStatusText;
+        private bool _hardwareReadFailed;
         private Border? _masterBar;
         private Slider? _masterSlider;
         private TextBlock? _masterValueText;
@@ -226,36 +228,48 @@ namespace KeyPulse
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            _identifyBtn = new Button
+            // Everything that is not a slider lives behind one gear button.
+            var separateContrastItem = new MenuItem
             {
-                Content = "Identify Screens",
-                Classes = { "Secondary" },
-                Padding = new Thickness(10, 5),
-                FontSize = 11.5
+                Header = "Separate contrast sliders",
+                ToggleType = MenuItemToggleType.CheckBox
             };
-            ToolTip.SetTip(_identifyBtn, "Flash identification banners on your active displays without closing this overlay.");
-            _identifyBtn.Click += (_, _) =>
+            separateContrastItem.Click += (_, _) => SetSeparateContrast(separateContrastItem.IsChecked);
+
+            var identifyItem = new MenuItem { Header = "Identify screens" };
+            identifyItem.Click += (_, _) =>
             {
                 Program.PlaySound("click");
                 ScreenBrightnessService.ShowIdentifyBanners();
             };
-            headerActions.Children.Add(_identifyBtn);
 
-            var fullWinBtn = new Button
-            {
-                Content = "Presets & Setup",
-                Classes = { "Secondary" },
-                Padding = new Thickness(10, 5),
-                FontSize = 11.5
-            };
-            ToolTip.SetTip(fullWinBtn, "Open full Screen Brightness configuration and shortcut cycle steps.");
-            fullWinBtn.Click += (_, _) =>
+            var setupItem = new MenuItem { Header = "Presets, shortcuts & setup…" };
+            setupItem.Click += (_, _) =>
             {
                 Program.PlaySound("click");
                 ScreenBrightnessWindow.OpenWindow();
                 CloseSafe();
             };
-            headerActions.Children.Add(fullWinBtn);
+
+            var gearMenu = new MenuFlyout();
+            gearMenu.Items.Add(separateContrastItem);
+            gearMenu.Items.Add(identifyItem);
+            gearMenu.Items.Add(new Separator());
+            gearMenu.Items.Add(setupItem);
+            gearMenu.Opening += (_, _) =>
+                separateContrastItem.IsChecked = !ScreenBrightnessService.LoadConfig().Screens.All(x => x.LockRatio);
+
+            _gearBtn = new Button
+            {
+                Content = "⚙",
+                Classes = { "Secondary" },
+                Padding = new Thickness(8, 4),
+                FontSize = 12,
+                Flyout = gearMenu
+            };
+            Avalonia.Automation.AutomationProperties.SetName(_gearBtn, "More options");
+            ToolTip.SetTip(_gearBtn, "More: separate contrast, identify screens, presets & setup.");
+            headerActions.Children.Add(_gearBtn);
 
             var closeBtn = new Button
             {
@@ -567,7 +581,8 @@ namespace KeyPulse
                 var containerView = ScreenContainerBuilder.CreateScreenContainer(
                     state,
                     onNickChanged: () => ScreenBrightnessService.NotifyStateChanged(),
-                    onBrightnessChanged: (slot, val) => { ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); });
+                    onBrightnessChanged: (slot, val) => { ScreenBrightnessService.ReanchorAllScreens(); UpdateMasterBaselineFromScreens(); },
+                    showLockRatioToggle: false);
                 _containers[i] = containerView;
             }
 
@@ -575,6 +590,13 @@ namespace KeyPulse
 
             Grid.SetRow(_containersGrid, 2);
             rootGrid.Children.Add(_containersGrid);
+
+            var welcome = CreateWelcomeCard();
+            if (welcome != null)
+            {
+                Grid.SetRow(welcome, 3);
+                rootGrid.Children.Add(welcome);
+            }
 
             outerBorder.Child = rootGrid;
             Content = outerBorder;
@@ -639,11 +661,6 @@ namespace KeyPulse
                         }
                     }
                 }
-            }
-
-            if (_identifyBtn != null)
-            {
-                _identifyBtn.Content = activeCount == 1 ? "Identify Screen" : "Identify Screens";
             }
 
             if (_masterBar != null)
@@ -767,6 +784,105 @@ namespace KeyPulse
             _suppressMasterEvents = false;
         }
 
+        /// <summary>Wording for the welcome card, built from the user's actual step / preset shortcuts.</summary>
+        internal static string BuildWelcomeText(ScreenBrightnessConfig cfg)
+        {
+            static string First(string combos) =>
+                combos.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? string.Empty;
+
+            var lines = new List<string>();
+            string up = First(cfg.StepUpHotkey ?? string.Empty), down = First(cfg.StepDownHotkey ?? string.Empty);
+            if (up.Length > 0 && down.Length > 0) lines.Add($"{up} / {down} = brighter / darker (all screens).");
+            else if (up.Length > 0) lines.Add($"{up} = brighter (all screens).");
+            else if (down.Length > 0) lines.Add($"{down} = darker (all screens).");
+            lines.Add("Tray icon > presets, one click.");
+            lines.Add("⚙ > Presets, shortcuts & setup: give one screen its own key.");
+            return string.Join("\n", lines);
+        }
+
+        /// <summary>One-time tips card; closing it sets <see cref="ScreenBrightnessConfig.HasSeenWelcomeCard"/> so it never returns.</summary>
+        private Border? CreateWelcomeCard()
+        {
+            var cfg = ScreenBrightnessService.LoadConfig();
+            if (cfg.HasSeenWelcomeCard) return null;
+
+            var card = new Border
+            {
+                Background = AppBrush("AppPanelBrush", "#111827"),
+                BorderBrush = AppBrush("AppAccentBrush", "#38BDF8"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 8),
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 10 };
+            grid.Children.Add(new TextBlock
+            {
+                Text = BuildWelcomeText(cfg),
+                FontSize = 11.5,
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = AppBrush("AppTextPrimaryBrush", "#E2E8F0"),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            var gotIt = new Button
+            {
+                Content = "Got it",
+                Classes = { "Secondary" },
+                Padding = new Thickness(10, 4),
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            gotIt.Click += (_, _) =>
+            {
+                card.IsVisible = false;
+                var latest = ScreenBrightnessService.LoadConfig();
+                latest.HasSeenWelcomeCard = true;
+                ScreenBrightnessService.SaveConfig(latest);
+            };
+            Grid.SetColumn(gotIt, 1);
+            grid.Children.Add(gotIt);
+            card.Child = grid;
+            return card;
+        }
+
+        /// <summary>Header line appears only for a problem: failed hardware read first, else shortcuts taken by another app.</summary>
+        private void UpdateHeaderStatus()
+        {
+            if (_headerStatusText == null) return;
+            string? msg = _hardwareReadFailed
+                ? "⚠️ Hardware read failed, using cached settings."
+                : ScreenBrightnessService.DescribeTakenBrightnessHotkeys();
+            _headerStatusText.Text = msg ?? string.Empty;
+            _headerStatusText.TextWrapping = TextWrapping.Wrap;
+            _headerStatusText.IsVisible = msg != null;
+        }
+
+        /// <summary>Gear-menu toggle: off = one slider per screen (contrast follows brightness), on = separate contrast sliders.</summary>
+        private void SetSeparateContrast(bool separate)
+        {
+            bool lockAll = !separate;
+            var cfg = ScreenBrightnessService.LoadConfig();
+            cfg.GlobalLockBrightnessContrast = lockAll;
+            foreach (var s in cfg.Screens)
+            {
+                s.LockRatio = lockAll;
+                if (lockAll) s.LastContrast = s.LastBrightness;
+            }
+            ScreenBrightnessService.SaveConfig(cfg);
+
+            if (lockAll)
+            {
+                for (int i = 0; i < _containers.Length; i++)
+                {
+                    var view = _containers[i];
+                    if (view == null) continue;
+                    int b = (int)Math.Round(view.BrightnessSlider.Value);
+                    ScreenBrightnessService.RequestScreenLevelChange(i, b, b, updateContrastFromLock: true);
+                }
+            }
+            ScreenBrightnessService.NotifyStateChanged();
+        }
+
         private async void OnOverlayOpened(object? sender, EventArgs e)
         {
             _openedUtc = DateTime.UtcNow;
@@ -804,11 +920,8 @@ namespace KeyPulse
                         ScreenContainerBuilder.ApplyLiveStateToContainer(view, state, respectUserTouch: true);
                     }
 
-                    if (_headerStatusText != null)
-                    {
-                        _headerStatusText.Text = outcome.IsFallback ? "⚠️ Hardware read failed, using cached settings." : string.Empty;
-                        _headerStatusText.IsVisible = outcome.IsFallback;
-                    }
+                    _hardwareReadFailed = outcome.IsFallback;
+                    UpdateHeaderStatus();
                 });
             }
             catch (OperationCanceledException)
@@ -830,11 +943,8 @@ namespace KeyPulse
                             if (st.SlotIndex < 0 || st.SlotIndex >= _containers.Length || _containers[st.SlotIndex] == null) continue;
                             ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
                         }
-                        if (_headerStatusText != null)
-                        {
-                            _headerStatusText.Text = "⚠️ Hardware read failed, using cached settings.";
-                            _headerStatusText.IsVisible = true;
-                        }
+                        _hardwareReadFailed = true;
+                        UpdateHeaderStatus();
                     });
                 }
                 catch (Exception inner) when (!ScreenBrightnessService.IsFatalException(inner))
@@ -867,6 +977,7 @@ namespace KeyPulse
                 {
                     UpdateMasterBaselineFromScreens();
                 }
+                UpdateHeaderStatus();
             }
 
             if (Dispatcher.UIThread.CheckAccess())
@@ -1032,7 +1143,7 @@ namespace KeyPulse
 
     internal static class ScreenContainerBuilder
     {
-        public static ScreenContainerView CreateScreenContainer(ScreenLiveState initialState, Action? onNickChanged = null, Action<int, int>? onBrightnessChanged = null)
+        public static ScreenContainerView CreateScreenContainer(ScreenLiveState initialState, Action? onNickChanged = null, Action<int, int>? onBrightnessChanged = null, bool showLockRatioToggle = true, Action<int>? onAssignKey = null)
         {
             int slotIndex = initialState.SlotIndex;
             string slotLabel = initialState.DefaultSlotLabel;
@@ -1434,6 +1545,21 @@ namespace KeyPulse
 
             lockRow.Children.Add(lockRatioCheck);
 
+            if (onAssignKey != null)
+            {
+                var assignKeyBtn = new Button
+                {
+                    Content = "⌨ Key",
+                    Classes = { "Secondary" },
+                    Padding = new Thickness(8, 3),
+                    FontSize = 11,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                ToolTip.SetTip(assignKeyBtn, "Give this screen its own shortcut: one key jumps only this screen to a brightness and contrast you choose.");
+                assignKeyBtn.Click += (_, _) => onAssignKey(slotIndex);
+                lockRow.Children.Add(assignKeyBtn);
+            }
+
             Grid.SetRow(lockRow, 3);
             mainGrid.Children.Add(lockRow);
 
@@ -1461,6 +1587,7 @@ namespace KeyPulse
                 LockRatioCheckBox = lockRatioCheck,
                 StatusBadgeText = statusText,
                 SupportsContrast = !initialState.IsConnected || initialState.SupportsContrast,
+                ShowLockRatioToggle = showLockRatioToggle,
                 IsInternalLcd = initialState.IsInternalLcd,
                 CommitPendingRename = CommitInlineRename
             };
@@ -1579,7 +1706,7 @@ namespace KeyPulse
             view.SlidersGrid.ColumnSpacing = showContrast ? 8 : 0;
             view.ContrastLabelText.Text = "Contrast";
             view.LockRatioCheckBox.IsEnabled = supportsContrast;
-            view.LockRatioCheckBox.IsVisible = supportsContrast;
+            view.LockRatioCheckBox.IsVisible = supportsContrast && view.ShowLockRatioToggle;
 
             if (!supportsContrast)
             {

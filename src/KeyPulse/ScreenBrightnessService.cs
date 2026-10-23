@@ -352,6 +352,7 @@ namespace KeyPulse
                 SchemaVersion = src.SchemaVersion,
                 Enabled = src.Enabled,
                 DisclaimerAccepted = src.DisclaimerAccepted,
+                HasSeenWelcomeCard = src.HasSeenWelcomeCard,
                 GlobalLockBrightnessContrast = src.GlobalLockBrightnessContrast,
                 LastCycleProfileId = src.LastCycleProfileId,
                 CycleUpHotkey = src.CycleUpHotkey,
@@ -2057,9 +2058,49 @@ namespace KeyPulse
             if (anyRecovered) NotifyStateChanged();
         }
 
+        /// <summary>
+        /// Plain-language warning for brightness shortcuts another app currently owns, or null when all registered.
+        /// Shown in both brightness windows; it clears itself once <see cref="RetryFailedBrightnessHotkeys"/> wins the key.
+        /// </summary>
+        public static string? DescribeTakenBrightnessHotkeys()
+        {
+            List<string> parts;
+            lock (CycleLock)
+            {
+                if (_failedBrightnessHotkeys.Count == 0) return null;
+                parts = _failedBrightnessHotkeys.Select(f => $"{f.Combo} ({FriendlyHotkeyPurpose(f.Desc)})").Distinct().ToList();
+            }
+            return $"⚠️ Taken by another app: {string.Join(", ", parts)}. KeyPulse grabs it as soon as it is free.";
+        }
+
+        private static string FriendlyHotkeyPurpose(string desc) => desc switch
+        {
+            "StepUp" => "brighter",
+            "StepDown" => "darker",
+            "CycleUp" => "next preset",
+            "CycleDown" => "previous preset",
+            _ when desc.StartsWith("Direct-", StringComparison.Ordinal) => "screen key",
+            _ when desc.StartsWith("Profile ", StringComparison.Ordinal) => "preset " + desc.Substring("Profile ".Length).Trim('\''),
+            _ => desc
+        };
+
+        private static string FailedHotkeysSignatureLocked() =>
+            string.Join("|", _failedBrightnessHotkeys.Select(f => f.Combo + "/" + f.Desc));
+
         public static void RegisterBrightnessHotkeys()
         {
+            bool failuresChanged;
             lock (CycleLock)
+            {
+                string failedBefore = FailedHotkeysSignatureLocked();
+                RegisterBrightnessHotkeysLocked();
+                failuresChanged = failedBefore != FailedHotkeysSignatureLocked();
+            }
+            if (failuresChanged) NotifyStateChanged();
+        }
+
+        private static void RegisterBrightnessHotkeysLocked()
+        {
             {
                 UnregisterAllBrightnessHotkeys();
                 if (!IsFeatureActive) return;

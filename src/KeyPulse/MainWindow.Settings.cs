@@ -118,7 +118,7 @@ namespace KeyPulse
                 w.Position = new Avalonia.PixelPoint((int)_currentConfig.SettingsWindowX, (int)_currentConfig.SettingsWindowY);
             }
 
-            int activeTab = Math.Clamp(_currentConfig.LastActiveSettingsTab, 0, 3);
+            int activeTab = Math.Clamp(_currentConfig.LastActiveSettingsTab, 0, BackupService.SettingsTabCount - 1);
             bool suppressSyncEvents = false;
 
             var rootGrid = new Grid
@@ -191,7 +191,7 @@ namespace KeyPulse
             Grid.SetRow(headerGrid, 0);
             rootGrid.Children.Add(headerGrid);
 
-            string[] tabNames = { "General", "Appearance", "Displays & Icons", "Backup & Updates" };
+            string[] tabNames = { "General", "Appearance", "Brightness", "Desktop icons", "Backup & Updates" };
             string[] tabDescriptions = {
                 "Configure Windows startup behavior, privileges, sound effects, preferred browser, and typing speed.",
                 "Customize visual theme (System, Light, Dark) and interface appearance across KeyPulse.",
@@ -340,18 +340,16 @@ namespace KeyPulse
             bool isElevated = Program.IsElevated;
             bool isWiredAdmin = Program.IsAdminTaskInstalled();
 
-            var adminBadge = new Border
+            // One switch: On = KeyPulse runs as admin (logon task installed). The extra button only appears when the
+            // task is on but this session is not elevated yet.
+            var adminToggle = new ToggleSwitch
             {
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(8, 3),
+                OnContent = "On",
+                OffContent = "Off",
+                TabIndex = 11,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
             };
-            var adminBadgeText = new TextBlock
-            {
-                FontSize = 11,
-                FontWeight = FontWeight.SemiBold
-            };
-            adminBadge.Child = adminBadgeText;
+            bool suppressAdminToggle = false;
 
             var adminStatusDesc = new TextBlock
             {
@@ -362,58 +360,29 @@ namespace KeyPulse
 
             var adminBtn = new Button
             {
-                Classes = { "Secondary" },
+                Content = "Restart as admin now",
+                Classes = { "Primary" },
                 Padding = new Thickness(14, 7),
                 Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
-                TabIndex = 11,
-                IsTabStop = true
+                TabIndex = 12,
+                IsTabStop = true,
+                IsVisible = false
             };
+            ToolTip.SetTip(adminBtn, "Admin mode is on, but this session started without admin rights. Restart to apply it.");
 
             void RefreshAdminButtonState(bool elevated, bool wiredAdmin)
             {
-                bool isLight = string.Equals(_currentConfig.Theme, "Light", StringComparison.OrdinalIgnoreCase) ||
-                               (string.Equals(_currentConfig.Theme, "System", StringComparison.OrdinalIgnoreCase) && Application.Current?.ActualThemeVariant == Avalonia.Styling.ThemeVariant.Light);
+                suppressAdminToggle = true;
+                adminToggle.IsChecked = elevated || wiredAdmin;
+                suppressAdminToggle = false;
 
-                if (elevated)
-                {
-                    adminBadge.Background = new SolidColorBrush(Color.Parse(isLight ? "#DCFCE7" : "#143522"));
-                    adminBadge.BorderBrush = new SolidColorBrush(Color.Parse(isLight ? "#86EFAC" : "#166534"));
-                    adminBadge.BorderThickness = new Thickness(1);
-                    adminBadgeText.Text = "Administrator (Elevated Session)";
-                    adminBadgeText.Foreground = new SolidColorBrush(Color.Parse(isLight ? "#166534" : "#4ADE80"));
-                    adminStatusDesc.Text = "Full permissions active. Shortcuts, typing, and hotkeys work inside elevated Command Prompt, PowerShell, Task Manager, and Admin windows.";
-                    adminBtn.Content = "Revert to Standard User";
-                    adminBtn.Classes.Remove("Primary");
-                    adminBtn.Classes.Remove("Danger");
-                    if (!adminBtn.Classes.Contains("Secondary")) adminBtn.Classes.Add("Secondary");
-                    ToolTip.SetTip(adminBtn, "Revert KeyPulse to standard user permissions and restart.");
-                }
-                else if (wiredAdmin)
-                {
-                    adminBadge.Background = new SolidColorBrush(Color.Parse(isLight ? "#FEF3C7" : "#382806"));
-                    adminBadge.BorderBrush = new SolidColorBrush(Color.Parse(isLight ? "#FCD34D" : "#854D0E"));
-                    adminBadge.BorderThickness = new Thickness(1);
-                    adminBadgeText.Text = "Admin Task Configured (Session Standard)";
-                    adminBadgeText.Foreground = new SolidColorBrush(Color.Parse(isLight ? "#92400E" : "#FBBF24"));
-                    adminStatusDesc.Text = "The Administrator logon task is configured in Windows, but this current session is running without Administrator rights.";
-                    adminBtn.Content = "Restart as Administrator";
-                    adminBtn.Classes.Remove("Secondary");
-                    if (!adminBtn.Classes.Contains("Primary")) adminBtn.Classes.Add("Primary");
-                    ToolTip.SetTip(adminBtn, "Click to restart KeyPulse with Administrator rights matching the logon task.");
-                }
-                else
-                {
-                    adminBadge.Background = new SolidColorBrush(Color.Parse(isLight ? "#E2E8F0" : "#1E293B"));
-                    adminBadge.BorderBrush = new SolidColorBrush(Color.Parse(isLight ? "#CBD5E1" : "#334155"));
-                    adminBadge.BorderThickness = new Thickness(1);
-                    adminBadgeText.Text = "Standard User (Normal Isolation)";
-                    adminBadgeText.Foreground = new SolidColorBrush(Color.Parse(isLight ? "#334155" : "#94A3B8"));
-                    adminStatusDesc.Text = "Running as standard user. Shortcuts cannot inject keystrokes into windows running as Administrator.";
-                    adminBtn.Content = "Restart as Administrator";
-                    adminBtn.Classes.Remove("Secondary");
-                    if (!adminBtn.Classes.Contains("Primary")) adminBtn.Classes.Add("Primary");
-                    ToolTip.SetTip(adminBtn, "Restart KeyPulse with Administrator rights to allow hotkeys and typing inside elevated Admin tools.");
-                }
+                bool mismatch = wiredAdmin && !elevated;
+                adminBtn.IsVisible = mismatch;
+                adminStatusDesc.Text = "Only needed so shortcuts also work inside apps that run as admin (Task Manager, admin terminals)."
+                    + (mismatch ? " Admin mode is on, but KeyPulse is not running as admin right now." : string.Empty);
+                ToolTip.SetTip(adminToggle, elevated
+                    ? "On: KeyPulse runs as admin. Turn off to go back to a normal user and restart."
+                    : "Off: KeyPulse runs as a normal user. Turn on to run as admin (restarts KeyPulse).");
             }
             RefreshAdminButtonState(isElevated, isWiredAdmin);
 
@@ -430,17 +399,17 @@ namespace KeyPulse
             var privHeaderStack = new StackPanel
             {
                 Orientation = Avalonia.Layout.Orientation.Horizontal,
-                Spacing = 8,
+                Spacing = 12,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
             };
             privHeaderStack.Children.Add(new TextBlock
             {
-                Text = "Windows Administrator Privileges",
+                Text = "Run as admin",
                 FontWeight = FontWeight.SemiBold,
                 FontSize = 12.5,
                 VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
             });
-            privHeaderStack.Children.Add(adminBadge);
+            privHeaderStack.Children.Add(adminToggle);
             sysIntegrationBody.Children.Add(privHeaderStack);
             sysIntegrationBody.Children.Add(adminStatusDesc);
             sysIntegrationBody.Children.Add(adminBtn);
@@ -1015,7 +984,7 @@ namespace KeyPulse
             doBody.Children.Add(doAutoBackupCheck);
             doBody.Children.Add(doSummaryText);
             doBody.Children.Add(openOrganizerBtn);
-            RegisterSettingCard(2, "Desktop Icon Organizer",
+            RegisterSettingCard(3, "Desktop Icon Organizer",
                 "Saves and restores your desktop icon positions across single or multi-monitor setups, with optional auto-restore when displays connect or change resolution.",
                 "desktop icon organizer layout restore snapshot monitor grid",
                 doBody);
@@ -1151,7 +1120,7 @@ namespace KeyPulse
             updatesBody.Children.Add(autoUpdateCheck);
             updatesBody.Children.Add(channelPanel);
             updatesBody.Children.Add(updateBtnRow);
-            RegisterSettingCard(3, "About & Software Updates",
+            RegisterSettingCard(4, "About & Software Updates",
                 "Application version information, background update check toggles, update channel selection (Stable vs Beta), and manual update checks.",
                 "about version update updates release check github channel stable beta preview upgrade",
                 updatesBody);
@@ -1224,7 +1193,7 @@ namespace KeyPulse
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
             backupBody.Children.Add(backupBtnRow);
-            RegisterSettingCard(3, "Backup & Import Settings",
+            RegisterSettingCard(4, "Backup & Import Settings",
                 "One-click export and import for your entire KeyPulse setup. Backups can be password-encrypted with AES-256-GCM so secret shortcut targets remain protected.",
                 "backup restore export import configuration file json encrypt password",
                 backupBody);
@@ -1250,7 +1219,7 @@ namespace KeyPulse
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
             });
             dangerBody.Children.Add(resetAllBtn);
-            RegisterSettingCard(3, "Danger Zone — Factory Reset",
+            RegisterSettingCard(4, "Danger Zone — Factory Reset",
                 "Destructive preference reset action that restores all out-of-the-box defaults for startup, theme, sounds, typing, brightness, and updates without deleting saved shortcuts.",
                 "danger zone factory reset restore defaults wipe all settings preferences",
                 dangerBody,
@@ -1590,10 +1559,14 @@ namespace KeyPulse
                 else if (activeTab == 2)
                 {
                     ScreenBrightnessService.ResetToDefaults();
-                    DesktopOrganizerService.ResetBehavioralDefaults(out _);
                     SaveConfig();
                 }
                 else if (activeTab == 3)
+                {
+                    DesktopOrganizerService.ResetBehavioralDefaults(out _);
+                    SaveConfig();
+                }
+                else if (activeTab == 4)
                 {
                     _currentConfig.AutoCheckForUpdates = true;
                     _currentConfig.UpdateChannel = "Stable";
@@ -1649,82 +1622,53 @@ namespace KeyPulse
                 statusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
             };
 
-            adminBtn.Click += async (s, ev) =>
+            adminBtn.Click += (s, ev) => RelaunchWithPrivilegeChange(w, StartupElevationService.SetupAdminTaskArgument, statusTxt);
+
+            async System.Threading.Tasks.Task<bool> TurnAdminOnAsync()
             {
-                var currentElevated = Program.IsElevated;
-                var currentWiredAdmin = Program.IsAdminTaskInstalled();
+                var warnW = CreateAppDialog("Security Warning", 420, 260, 420, 260, WindowStartupLocation.CenterOwner, false, true);
+                var warnP = CreateDialogPanel();
+                warnP.Children.Add(new TextBlock { Text = "WARNING", Classes = { "ErrorText", "SectionTitle" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center });
+                warnP.Children.Add(new TextBlock { Text = "Running a hotkey tool as Administrator grants it FULL control over your PC.\n\nIf malware or an exploit were to hijack this app's input pipeline, it could theoretically wipe your hard drive or bypass your antivirus.\n\nAre you absolutely sure you want to run KeyPulse as an Administrator persistently?", TextWrapping = Avalonia.Media.TextWrapping.Wrap, Margin = new Avalonia.Thickness(0, 10, 0, 10) });
 
-                if (currentElevated)
+                var btnPanel = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center, Spacing = 20 };
+                var accepted = false;
+                var okBtn = new Button { Content = "I Accept The Risk", Classes = { "Danger" } };
+                okBtn.Click += (ws, wev) => { accepted = true; warnW.Close(); };
+                var cancelBtn = new Button { Content = "Cancel", Classes = { "Secondary" } };
+                cancelBtn.Click += (ws, wev) => warnW.Close();
+
+                btnPanel.Children.Add(cancelBtn);
+                btnPanel.Children.Add(okBtn);
+                warnP.Children.Add(btnPanel);
+                warnW.Content = warnP;
+
+                await ShowDialogOrWindowAsync(warnW);
+                if (accepted) RelaunchWithPrivilegeChange(w, StartupElevationService.SetupAdminTaskArgument, statusTxt);
+                return accepted;
+            }
+
+            async System.Threading.Tasks.Task<bool> TurnAdminOffAsync()
+            {
+                bool confirmRevert = await ConfirmSettingsActionAsync(
+                    w,
+                    "Turn off admin mode?",
+                    "KeyPulse will remove its Administrator logon task and restart as a normal Windows user.\n\nYour shortcuts are saved first, but they will no longer work inside apps running as admin.",
+                    "Restart as normal user");
+                if (confirmRevert) RelaunchWithPrivilegeChange(w, StartupElevationService.RemoveAdminTaskArgument, statusTxt);
+                return confirmRevert;
+            }
+
+            adminToggle.IsCheckedChanged += async (s, ev) =>
+            {
+                if (suppressAdminToggle) return;
+                bool wantOn = adminToggle.IsChecked == true;
+                bool done = wantOn ? await TurnAdminOnAsync() : await TurnAdminOffAsync();
+                if (!done)
                 {
-                    bool confirmRevert = await ConfirmSettingsActionAsync(
-                        w,
-                        "Revert to Standard User Mode?",
-                        "KeyPulse will remove its Administrator logon task and immediately restart as a standard Windows user.\n\nYour shortcuts will be saved before restarting, but KeyPulse will no longer inject keys into elevated Administrator windows.",
-                        "Restart as Standard User");
-                    if (confirmRevert)
-                    {
-                        RelaunchWithPrivilegeChange(w, StartupElevationService.RemoveAdminTaskArgument, statusTxt);
-                    }
-                }
-                else if (currentWiredAdmin)
-                {
-                    var dialog = CreateAppDialog("Administrator Mode Status", 440, 250, 440, 250, WindowStartupLocation.CenterOwner, false, true);
-                    var p = CreateDialogPanel();
-                    p.Children.Add(new TextBlock { Text = "Administrator Mode Configured", Classes = { "SectionTitle" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center });
-                    p.Children.Add(new TextBlock
-                    {
-                        Text = "The Administrator logon task is already configured in Windows, but KeyPulse is currently running without Administrator rights.\n\nRestart KeyPulse with Administrator rights, or revert to standard user mode?",
-                        TextWrapping = Avalonia.Media.TextWrapping.Wrap,
-                        Margin = new Avalonia.Thickness(0, 8, 0, 12)
-                    });
-
-                    var btnRow = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center, Spacing = 12 };
-                    var btnElevate = new Button { Content = "Restart As Admin", Classes = { "Primary" } };
-                    var btnRevert = new Button { Content = "Revert To User Level", Classes = { "Danger" } };
-                    var btnCancel = new Button { Content = "Cancel", Classes = { "Secondary" } };
-
-                    int choice = 0;
-                    btnElevate.Click += (ds, de) => { choice = 1; dialog.Close(); };
-                    btnRevert.Click += (ds, de) => { choice = 2; dialog.Close(); };
-                    btnCancel.Click += (ds, de) => { choice = 0; dialog.Close(); };
-
-                    btnRow.Children.Add(btnElevate);
-                    btnRow.Children.Add(btnRevert);
-                    btnRow.Children.Add(btnCancel);
-                    p.Children.Add(btnRow);
-                    dialog.Content = p;
-
-                    await ShowDialogOrWindowAsync(dialog);
-                    if (choice == 1)
-                    {
-                        RelaunchWithPrivilegeChange(w, StartupElevationService.SetupAdminTaskArgument, statusTxt);
-                    }
-                    else if (choice == 2)
-                    {
-                        RelaunchWithPrivilegeChange(w, StartupElevationService.RemoveAdminTaskArgument, statusTxt);
-                    }
-                }
-                else
-                {
-                    var warnW = CreateAppDialog("Security Warning", 420, 260, 420, 260, WindowStartupLocation.CenterOwner, false, true);
-                    var warnP = CreateDialogPanel();
-                    warnP.Children.Add(new TextBlock { Text = "WARNING", Classes = { "ErrorText", "SectionTitle" }, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center });
-                    warnP.Children.Add(new TextBlock { Text = "Running a hotkey tool as Administrator grants it FULL control over your PC.\n\nIf malware or an exploit were to hijack this app's input pipeline, it could theoretically wipe your hard drive or bypass your antivirus.\n\nAre you absolutely sure you want to run KeyPulse as an Administrator persistently?", TextWrapping = Avalonia.Media.TextWrapping.Wrap, Margin = new Avalonia.Thickness(0, 10, 0, 10) });
-
-                    var btnPanel = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center, Spacing = 20 };
-                    var accepted = false;
-                    var okBtn = new Button { Content = "I Accept The Risk", Classes = { "Danger" } };
-                    okBtn.Click += (ws, wev) => { accepted = true; warnW.Close(); };
-                    var cancelBtn = new Button { Content = "Cancel", Classes = { "Secondary" } };
-                    cancelBtn.Click += (ws, wev) => warnW.Close();
-
-                    btnPanel.Children.Add(cancelBtn);
-                    btnPanel.Children.Add(okBtn);
-                    warnP.Children.Add(btnPanel);
-                    warnW.Content = warnP;
-
-                    await ShowDialogOrWindowAsync(warnW);
-                    if (accepted) RelaunchWithPrivilegeChange(w, StartupElevationService.SetupAdminTaskArgument, statusTxt);
+                    suppressAdminToggle = true;
+                    adminToggle.IsChecked = !wantOn;
+                    suppressAdminToggle = false;
                 }
             };
 

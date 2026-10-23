@@ -79,9 +79,9 @@
 
             <GridLength x:Key="ShortcutKeyColumnWidth">220</GridLength>
             <GridLength x:Key="ShortcutActionColumnWidth">128</GridLength>
-            <GridLength x:Key="ShortcutStatusColumnWidth">128</GridLength>
+            <GridLength x:Key="ShortcutStatusColumnWidth">64</GridLength>
             <GridLength x:Key="ShortcutTargetColumnWidth">468</GridLength>
-            <GridLength x:Key="ShortcutActionsColumnWidth">310</GridLength>
+            <GridLength x:Key="ShortcutActionsColumnWidth">130</GridLength>
         </ResourceDictionary>
     </Application.Resources>
 
@@ -358,7 +358,7 @@
             <TrayIcon Icon="avares://KeyPulse/KeyPulse.ico" ToolTipText="KeyPulse" Clicked="OpenKeybinds_Clicked">
                 <TrayIcon.Menu>
                     <NativeMenu>
-                        <NativeMenuItem Header="Screen Brightness" Click="ScreenBrightnessOverlay_Clicked" />
+                        <NativeMenuItem Header="Brightness slider" Click="ScreenBrightnessOverlay_Clicked" />
                         <NativeMenuItemSeparator />
                         <NativeMenuItem Header="Desktop Organizer" Click="DesktopOrganizer_Clicked" />
                         <NativeMenuItemSeparator />

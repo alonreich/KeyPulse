@@ -91,42 +91,23 @@ public partial class App : Application
 
             trayIcon.Menu.Items.Clear();
 
+            // Flat menu: one click opens the slider; presets sit right under it (no submenu, no second header).
             if (ScreenBrightnessService.IsFeatureActive)
             {
-                var brightnessSubMenu = new NativeMenu();
-            var sbConfig = ScreenBrightnessService.LoadConfig();
-            var sbQuickProfiles = ScreenBrightnessService.GetTrayQuickActionProfiles(sbConfig);
+                var sliderItem = new NativeMenuItem("Brightness slider");
+                sliderItem.Click += current.ScreenBrightnessOverlay_Clicked;
+                trayIcon.Menu.Items.Add(sliderItem);
 
-            if (sbQuickProfiles.Count > 0)
-            {
-                brightnessSubMenu.Items.Add(new NativeMenuItem("QUICK ACTIONS") { IsEnabled = false });
-                foreach (var profile in sbQuickProfiles)
+                var sbConfig = ScreenBrightnessService.LoadConfig();
+                foreach (var profile in ScreenBrightnessService.GetTrayQuickActionProfiles(sbConfig))
                 {
                     var capturedProfile = profile;
-                    bool isCurrent = profile.Id == sbConfig.LastCycleProfileId;
-                    string prefix = isCurrent ? "✓ " : "  ";
+                    string prefix = profile.Id == sbConfig.LastCycleProfileId ? "    ✓ " : "       ";
                     var pItem = new NativeMenuItem(prefix + ScreenBrightnessService.FormatProfileSummary(capturedProfile, sbConfig));
                     pItem.Click += (s, e) => ScreenBrightnessService.ApplyProfileAsync(capturedProfile);
-                    brightnessSubMenu.Items.Add(pItem);
+                    trayIcon.Menu.Items.Add(pItem);
                 }
-                brightnessSubMenu.Items.Add(new NativeMenuItemSeparator());
-            }
-
-            var quickSlidersItem = new NativeMenuItem("Brightness/Contrast Slider");
-            quickSlidersItem.Click += current.ScreenBrightnessOverlay_Clicked;
-            brightnessSubMenu.Items.Add(quickSlidersItem);
-
-            var openBrightnessItem = new NativeMenuItem("Open Screen Brightness");
-            openBrightnessItem.Click += current.ScreenBrightnessWindow_Clicked;
-            brightnessSubMenu.Items.Add(openBrightnessItem);
-
-            var brightnessRootItem = new NativeMenuItem("Screen Brightness")
-            {
-                Menu = brightnessSubMenu
-            };
-            trayIcon.Menu.Items.Add(brightnessRootItem);
-            trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
-
+                trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
             }
 
             var orgItem = new NativeMenuItem("Desktop Organizer");
@@ -140,7 +121,7 @@ public partial class App : Application
 
             if (quickActions.Count > 0)
             {
-                var headerItem = new NativeMenuItem("QUICK ACTIONS") { IsEnabled = false };
+                var headerItem = new NativeMenuItem("Quick actions") { IsEnabled = false };
                 trayIcon.Menu.Items.Add(headerItem);
 
                 foreach (var entry in quickActions)

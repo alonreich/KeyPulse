@@ -814,6 +814,8 @@ namespace KeyPulse
         public int SchemaVersion { get; set; } = 1;
         public bool Enabled { get; set; } = false;
         public bool DisclaimerAccepted { get; set; } = false;
+        /// <summary>True once the one-time "how to use" card in the Brightness slider was closed.</summary>
+        public bool HasSeenWelcomeCard { get; set; } = false;
         public bool GlobalLockBrightnessContrast { get; set; } = false;
         public string LastCycleProfileId { get; set; } = string.Empty;
         public string CycleUpHotkey { get; set; } = string.Empty;

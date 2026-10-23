@@ -367,7 +367,7 @@ namespace KeyPulse.Tests
             Assert.AreEqual(string.Empty, config.ShortcutSortColumn);
             Assert.AreEqual(42, config.TypingDelayMs);
             CollectionAssert.AreEqual(new[] { 0 }, normalizeCalls);
-            Assert.AreEqual(3, config.LastActiveSettingsTab);
+            Assert.AreEqual(BackupService.SettingsTabCount - 1, config.LastActiveSettingsTab);
             Assert.IsFalse(config.SoundEnabled);
             Assert.IsTrue(config.HasSeenTrayHint);
             Assert.IsTrue(config.LaunchOnBoot, "Restore must leave the machine's startup setting alone.");
