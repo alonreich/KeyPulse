@@ -429,26 +429,9 @@ namespace KeyPulse
                 ColumnSpacing = 10
             };
 
-            var masterBadge = new Border
-            {
-                Background = new SolidColorBrush(Color.Parse("#0284C7")),
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(7, 3),
-                VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock
-                {
-                    Text = "SYNCED MASTER",
-                    FontSize = 10,
-                    FontWeight = FontWeight.ExtraBold,
-                    Foreground = Brushes.White
-                }
-            };
-            Grid.SetColumn(masterBadge, 0);
-            masterGrid.Children.Add(masterBadge);
-
             var masterLabel = new TextBlock
             {
-                Text = "⚡ ALL DISPLAYS (SYNCED):",
+                Text = "All screens",
                 FontSize = 12.5,
                 FontWeight = FontWeight.Bold,
                 Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#38BDF8"),

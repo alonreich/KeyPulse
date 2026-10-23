@@ -56,3 +56,6 @@
 >
 > 8. **DETERMINISTIC MONITOR HANDLE DESTRUCTION**:
 >    Every handle returned by `GetPhysicalMonitorsFromHMONITOR` MUST be freed via `DestroyPhysicalMonitors` in a `finally` block to prevent GDI/kernel handle leaks that exhaust OS-wide DDC/CI resources.
+>
+> 9. **PHYSICAL MONITOR HANDLE `0` IS VALID (NEVER REJECT IT)**:
+>    dxva2 numbers handles from 0; a process gets `hPhysicalMonitor == 0` whenever no other app holds one. Only the BOOL result of `GetPhysicalMonitorsFromHMONITOR` decides success. Never compare a physical handle to `IntPtr.Zero` (enforced by `PhysicalMonitorHandleZeroGuardTests`). Always test brightness with every other DDC tool (Twinkle Tray etc.) closed. Details: `docs/architecture/screen-brightness.md` > Known Pitfall.

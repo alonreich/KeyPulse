@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The Brightness/Contrast Slider is simpler: no preset buttons (use the tray menu), no hint line, no status text unless something is wrong.
+- The master bar is now just labelled "All screens".
+- Each screen shows one slider while "Sync ratio" is on. Untick it to get a separate Contrast slider.
+
+### Fixed
+- Brightness sliders and shortcuts stopped working whenever no other brightness app (such as Twinkle Tray) was running. They now work on their own.
+- The default brighten shortcut Ctrl+Alt+= now works. It was never being recognised before.
+- Brightness shortcuts that another app was using when KeyPulse started now start working automatically within about 10 seconds of that app releasing them.
+
 ## [v2026.10.23.1540] - 2026-10-23
 
 ### Safety

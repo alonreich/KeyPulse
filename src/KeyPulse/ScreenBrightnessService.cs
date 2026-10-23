@@ -1000,7 +1000,7 @@ namespace KeyPulse
             if (hMonitor == IntPtr.Zero) return null;
 
             if (ActiveSessions.TryGetValue(hMonitor, out var cached) &&
-                !cached.IsDisposed && !cached.IsInvalidated && cached.HPhysicalMonitor != IntPtr.Zero)
+                !cached.IsDisposed && !cached.IsInvalidated)
             {
                 return cached;
             }
@@ -1009,7 +1009,7 @@ namespace KeyPulse
             {
                 if (ActiveSessions.TryGetValue(hMonitor, out var existing))
                 {
-                    if (!existing.IsDisposed && !existing.IsInvalidated && existing.HPhysicalMonitor != IntPtr.Zero)
+                    if (!existing.IsDisposed && !existing.IsInvalidated)
                     {
                         return existing;
                     }
@@ -1048,24 +1048,9 @@ namespace KeyPulse
                     }
                 }
 
+                // 0 is a valid physical monitor handle: dxva2 numbers handles from 0, so it is what a process gets
+                // when no other app (e.g. Twinkle Tray) holds one. Success of GetPhysicalMonitorsFromHMONITOR is the only check.
                 IntPtr hPhys = pms[0].hPhysicalMonitor;
-                if (hPhys == IntPtr.Zero)
-                {
-                    LogDdc($"[DDC-SESSION] GetPhysicalMonitorsFromHMONITOR returned zero handle for hMon={hMonitor}.");
-                    try
-                    {
-                        if (DestroyPhysicalMonitorsHookForTesting != null)
-                        {
-                            DestroyPhysicalMonitorsHookForTesting(count, pms);
-                        }
-                        else
-                        {
-                            DestroyPhysicalMonitors(count, pms);
-                        }
-                    }
-                    catch { }
-                    return null;
-                }
 
                 string desc = pms[0].szPhysicalMonitorDescription?.Trim() ?? string.Empty;
                 var session = new DdcMonitorSession(hMonitor, hPhys, desc, pms, count);
@@ -1949,16 +1934,127 @@ namespace KeyPulse
 
         private static readonly List<int> _registeredBrightnessHotkeyIds = new();
 
+        /// <summary>
+        /// Combos another app held when they were registered (e.g. Twinkle Tray owning Ctrl+Alt+=). They are retried
+        /// every <see cref="HotkeyRetryIntervalMs"/> so the shortcut starts working as soon as the other app releases it.
+        /// Guarded by <see cref="CycleLock"/>.
+        /// </summary>
+        private static readonly List<(string Combo, Action Action, string Desc)> _failedBrightnessHotkeys = new();
+        private const int HotkeyRetryIntervalMs = 10000;
+        private static System.Threading.Timer? _hotkeyRetryTimer;
+
+        /// <summary>Test seam: replaces <see cref="HotkeyManager.Register(string, Action, out int)"/>; returns the id, or 0 on failure.</summary>
+        internal static Func<string, Action, int>? BrightnessHotkeyRegisterOverrideForTesting { get; set; }
+
+        /// <summary>Test seam: replaces <see cref="HotkeyManager.Unregister"/> for brightness hotkeys.</summary>
+        internal static Action<int>? BrightnessHotkeyUnregisterOverrideForTesting { get; set; }
+
+        internal static int FailedBrightnessHotkeyCountForTesting
+        {
+            get { lock (CycleLock) return _failedBrightnessHotkeys.Count; }
+        }
+
+        internal static bool IsBrightnessHotkeyRetryScheduledForTesting
+        {
+            get { lock (CycleLock) return _hotkeyRetryTimer != null; }
+        }
+
+        internal static void RetryFailedBrightnessHotkeysForTesting() => RetryFailedBrightnessHotkeys();
+
+        private static bool TryRegisterBrightnessHotkey(string combo, Action action, out int id)
+        {
+            var testRegister = BrightnessHotkeyRegisterOverrideForTesting;
+            if (testRegister != null)
+            {
+                id = testRegister(combo, action);
+                return id != 0;
+            }
+            return HotkeyManager.Register(combo, action, out id);
+        }
+
         public static void UnregisterAllBrightnessHotkeys()
         {
             lock (CycleLock)
             {
+                var testUnregister = BrightnessHotkeyUnregisterOverrideForTesting;
                 foreach (var id in _registeredBrightnessHotkeyIds)
                 {
-                    try { HotkeyManager.Unregister(id); } catch { }
+                    try
+                    {
+                        if (testUnregister != null) testUnregister(id);
+                        else HotkeyManager.Unregister(id);
+                    }
+                    catch { }
                 }
                 _registeredBrightnessHotkeyIds.Clear();
+                _failedBrightnessHotkeys.Clear();
+                StopHotkeyRetryTimerLocked();
             }
+        }
+
+        private static void ScheduleHotkeyRetryLocked()
+        {
+            if (_failedBrightnessHotkeys.Count == 0)
+            {
+                StopHotkeyRetryTimerLocked();
+                return;
+            }
+            if (_hotkeyRetryTimer == null)
+            {
+                _hotkeyRetryTimer = new System.Threading.Timer(_ => RetryFailedBrightnessHotkeys(), null, HotkeyRetryIntervalMs, Timeout.Infinite);
+            }
+            else
+            {
+                _hotkeyRetryTimer.Change(HotkeyRetryIntervalMs, Timeout.Infinite);
+            }
+        }
+
+        private static void StopHotkeyRetryTimerLocked()
+        {
+            _hotkeyRetryTimer?.Dispose();
+            _hotkeyRetryTimer = null;
+        }
+
+        private static void RetryFailedBrightnessHotkeys()
+        {
+            bool anyRecovered = false;
+            try
+            {
+                lock (CycleLock)
+                {
+                    if (_failedBrightnessHotkeys.Count == 0)
+                    {
+                        StopHotkeyRetryTimerLocked();
+                        return;
+                    }
+                    if (!IsFeatureActive)
+                    {
+                        _failedBrightnessHotkeys.Clear();
+                        StopHotkeyRetryTimerLocked();
+                        return;
+                    }
+
+                    for (int i = _failedBrightnessHotkeys.Count - 1; i >= 0; i--)
+                    {
+                        var (combo, action, desc) = _failedBrightnessHotkeys[i];
+                        if (TryRegisterBrightnessHotkey(combo, action, out int id))
+                        {
+                            _registeredBrightnessHotkeyIds.Add(id);
+                            _failedBrightnessHotkeys.RemoveAt(i);
+                            anyRecovered = true;
+                            Program.LogDebug($"[ScreenBrightness] Registered {desc} hotkey on retry (another app released it): {combo} (id={id})");
+                        }
+                    }
+
+                    ScheduleHotkeyRetryLocked();
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug($"[ScreenBrightness] Brightness hotkey retry failed: {ex.Message}");
+            }
+
+            if (anyRecovered) NotifyStateChanged();
         }
 
         public static void RegisterBrightnessHotkeys()
@@ -1975,14 +2071,19 @@ namespace KeyPulse
                     var parts = hotkeys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     foreach (var combo in parts)
                     {
-                        if (HotkeyManager.Register(combo, action, out int id))
+                        if (TryRegisterBrightnessHotkey(combo, action, out int id))
                         {
                             _registeredBrightnessHotkeyIds.Add(id);
                             Program.LogDebug($"[ScreenBrightness] Registered {desc} hotkey: {combo} (id={id})");
                         }
+                        else if (HotkeyManager.TryParseCombo(combo, out _, out _))
+                        {
+                            _failedBrightnessHotkeys.Add((combo, action, desc));
+                            Program.LogDebug($"[ScreenBrightness] Failed to register {desc} hotkey: {combo} (win32Err={HotkeyManager.LastRegisterError}); will retry every {HotkeyRetryIntervalMs / 1000}s in case another app holds it.");
+                        }
                         else
                         {
-                            Program.LogDebug($"[ScreenBrightness] Failed to register {desc} hotkey: {combo}");
+                            Program.LogDebug($"[ScreenBrightness] Failed to register {desc} hotkey: {combo} (unparseable combo, not retried)");
                         }
                     }
                 }
@@ -2037,6 +2138,8 @@ namespace KeyPulse
                         }
                     }
                 }
+
+                ScheduleHotkeyRetryLocked();
             }
         }
 
@@ -2562,7 +2665,6 @@ namespace KeyPulse
                 for (int i = 0; i < count; i++)
                 {
                     IntPtr hPhys = physicalMonitors[i].hPhysicalMonitor;
-                    if (hPhys == IntPtr.Zero) continue;
 
                     if (string.IsNullOrWhiteSpace(description) && !string.IsNullOrWhiteSpace(physicalMonitors[i].szPhysicalMonitorDescription))
                     {
@@ -2668,8 +2770,8 @@ namespace KeyPulse
 
                 for (int i = 0; i < count; i++)
                 {
+                    // 0 is a valid handle (see GetOrCreateSession); never skip it.
                     IntPtr hPhysical = physicalMonitors[i].hPhysicalMonitor;
-                    if (hPhysical == IntPtr.Zero) continue;
 
                     bool wroteB = false;
                     bool wroteC = false;

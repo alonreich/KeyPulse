@@ -192,8 +192,10 @@ namespace KeyPulse.Tests
         }
 
         [TestMethod]
-        public void GetOrCreateSession_ZeroHandleReturned_CleansUpHandlesAndDoesNotStore()
+        public void GetOrCreateSession_ZeroPhysicalHandle_IsValidAndStored()
         {
+            // dxva2 numbers physical monitor handles from 0: a process gets handle 0 whenever no other app
+            // (e.g. Twinkle Tray) holds one, and DDC/CI commands on it work. Rejecting it broke all writes.
             var hMon = new IntPtr(0x8888);
             int destroyCalls = 0;
 
@@ -210,10 +212,11 @@ namespace KeyPulse.Tests
             };
 
             var session = ScreenBrightnessService.GetOrCreateSessionForTesting(hMon);
-            Assert.IsNull(session, "GetOrCreateSession must return null when hPhysicalMonitor is IntPtr.Zero");
-            Assert.AreEqual(1, destroyCalls, "Zero-handle edge case must call DestroyPhysicalMonitors immediately");
-            Assert.IsFalse(ScreenBrightnessService.HasActiveSessionForTesting(hMon));
-            Assert.AreEqual(0, ScreenBrightnessService.ActiveSessionCountForTesting, "No session should be cached for zero handle");
+            Assert.IsNotNull(session, "Handle 0 from a successful GetPhysicalMonitorsFromHMONITOR is a valid handle");
+            Assert.AreEqual(IntPtr.Zero, session!.HPhysicalMonitor);
+            Assert.AreEqual(0, destroyCalls, "A valid handle must not be destroyed on creation");
+            Assert.IsTrue(ScreenBrightnessService.HasActiveSessionForTesting(hMon));
+            Assert.AreSame(session, ScreenBrightnessService.GetOrCreateSessionForTesting(hMon), "Cached handle-0 session must be reused");
         }
 
         [TestMethod]

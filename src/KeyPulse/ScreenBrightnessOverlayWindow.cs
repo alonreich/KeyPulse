@@ -26,6 +26,8 @@ namespace KeyPulse
         public TextBlock ContrastValueText { get; init; } = null!;
         public TextBlock ContrastLabelText { get; init; } = null!;
         public Grid RightContrastColumn { get; init; } = null!;
+        public Grid SlidersGrid { get; init; } = null!;
+        public TextBlock BrightnessLabelText { get; init; } = null!;
         public Slider BrightnessSlider { get; init; } = null!;
         public Slider ContrastSlider { get; init; } = null!;
         public CheckBox LockRatioCheckBox { get; init; } = null!;
@@ -64,7 +66,6 @@ namespace KeyPulse
         private TextBlock? _masterValueText;
         private int _lastMasterValue = 50;
         private bool _suppressMasterEvents;
-        private StackPanel? _presetsPanel;
         private DateTime _openedUtc = DateTime.MinValue;
         private bool _isClosing;
 
@@ -207,11 +208,12 @@ namespace KeyPulse
                 FontWeight = FontWeight.Bold,
                 Foreground = AppBrush("AppTextPrimaryBrush", "#F8FAFC")
             });
+            // Shown only when something is wrong (hardware read failed); a healthy window shows just the title.
             _headerStatusText = new TextBlock
             {
-                Text = "Reading live monitor levels...",
                 FontSize = 11,
-                Foreground = AppBrush("AppTextMutedBrush", "#94A3B8")
+                Foreground = AppBrush("AppWarningBrush", "#F59E0B"),
+                IsVisible = false
             };
             titleStack.Children.Add(_headerStatusText);
             Grid.SetColumn(titleStack, 0);
@@ -263,7 +265,7 @@ namespace KeyPulse
                 FontSize = 12
             };
             Avalonia.Automation.AutomationProperties.SetName(closeBtn, "Close");
-            ToolTip.SetTip(closeBtn, "Close overlay (Esc)");
+            ToolTip.SetTip(closeBtn, "Close (Esc). Tip: mouse wheel or ↑/↓ moves a slider.");
             closeBtn.Click += (_, _) => CloseSafe();
             headerActions.Children.Add(closeBtn);
 
@@ -307,26 +309,9 @@ namespace KeyPulse
                 ColumnSpacing = 8
             };
 
-            var masterBadge = new Border
-            {
-                Background = new SolidColorBrush(Color.Parse("#0284C7")),
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(6, 2),
-                VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock
-                {
-                    Text = "SYNCED MASTER",
-                    FontSize = 9.5,
-                    FontWeight = FontWeight.ExtraBold,
-                    Foreground = Brushes.White
-                }
-            };
-            Grid.SetColumn(masterBadge, 0);
-            masterGrid.Children.Add(masterBadge);
-
             var masterLabel = new TextBlock
             {
-                Text = "⚡ ALL DISPLAYS (SYNCED):",
+                Text = "All screens",
                 FontSize = 11.5,
                 FontWeight = FontWeight.Bold,
                 Foreground = AppBrush("AppAccentBrush", "#38BDF8"),
@@ -591,48 +576,6 @@ namespace KeyPulse
             Grid.SetRow(_containersGrid, 2);
             rootGrid.Children.Add(_containersGrid);
 
-            var footerGrid = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
-                Margin = new Thickness(0, 10, 0, 0)
-            };
-
-            var quickLabel = new TextBlock
-            {
-                Text = "Quick Presets:",
-                FontSize = 11.5,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = AppBrush("AppTextMutedBrush", "#94A3B8"),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 8, 0)
-            };
-            Grid.SetColumn(quickLabel, 0);
-            footerGrid.Children.Add(quickLabel);
-
-            var presetsPanel = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Spacing = 6,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            _presetsPanel = presetsPanel;
-            PopulateQuickPresetsBar(presetsPanel);
-            Grid.SetColumn(presetsPanel, 1);
-            footerGrid.Children.Add(presetsPanel);
-
-            var escHint = new TextBlock
-            {
-                Text = "Wheel / ↑↓ supported • Esc to close",
-                FontSize = 10.5,
-                Foreground = AppBrush("AppTextMutedBrush", "#64748B"),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            Grid.SetColumn(escHint, 2);
-            footerGrid.Children.Add(escHint);
-
-            Grid.SetRow(footerGrid, 3);
-            rootGrid.Children.Add(footerGrid);
-
             outerBorder.Child = rootGrid;
             Content = outerBorder;
         }
@@ -824,36 +767,6 @@ namespace KeyPulse
             _suppressMasterEvents = false;
         }
 
-        private void PopulateQuickPresetsBar(StackPanel presetsPanel)
-        {
-            presetsPanel.Children.Clear();
-            var cfg = ScreenBrightnessService.LoadConfig();
-            var quickProfiles = ScreenBrightnessService.GetTrayQuickActionProfiles(cfg);
-
-            foreach (var p in quickProfiles)
-            {
-                bool isCurrent = p.Id == cfg.LastCycleProfileId;
-                var btn = new Button
-                {
-                    Content = p.Name,
-                    Classes = { isCurrent ? "Primary" : "Secondary" },
-                    Padding = new Thickness(10, 4),
-                    FontSize = 11
-                };
-                ToolTip.SetTip(btn, ScreenBrightnessService.FormatProfileSummary(p, cfg));
-                btn.Click += (_, _) =>
-                {
-                    Program.PlaySound("click");
-                    for (int i = 0; i < _containers.Length; i++)
-                    {
-                        _containers[i].UserTouched = true;
-                    }
-                    ScreenBrightnessService.ApplyProfileAsync(p);
-                };
-                presetsPanel.Children.Add(btn);
-            }
-        }
-
         private async void OnOverlayOpened(object? sender, EventArgs e)
         {
             _openedUtc = DateTime.UtcNow;
@@ -893,9 +806,8 @@ namespace KeyPulse
 
                     if (_headerStatusText != null)
                     {
-                        _headerStatusText.Text = outcome.IsFallback
-                            ? "⚠️ Hardware read failed, using cached settings."
-                            : $"{connectedCount} Display{(connectedCount == 1 ? "" : "s")} Active • 250ms Hardware Limiter Ready";
+                        _headerStatusText.Text = outcome.IsFallback ? "⚠️ Hardware read failed, using cached settings." : string.Empty;
+                        _headerStatusText.IsVisible = outcome.IsFallback;
                     }
                 });
             }
@@ -918,7 +830,11 @@ namespace KeyPulse
                             if (st.SlotIndex < 0 || st.SlotIndex >= _containers.Length || _containers[st.SlotIndex] == null) continue;
                             ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
                         }
-                        if (_headerStatusText != null) _headerStatusText.Text = "⚠️ Hardware read failed, using cached settings.";
+                        if (_headerStatusText != null)
+                        {
+                            _headerStatusText.Text = "⚠️ Hardware read failed, using cached settings.";
+                            _headerStatusText.IsVisible = true;
+                        }
                     });
                 }
                 catch (Exception inner) when (!ScreenBrightnessService.IsFatalException(inner))
@@ -950,10 +866,6 @@ namespace KeyPulse
                 if (!_isUserDraggingMaster)
                 {
                     UpdateMasterBaselineFromScreens();
-                }
-                if (_presetsPanel != null)
-                {
-                    PopulateQuickPresetsBar(_presetsPanel);
                 }
             }
 
@@ -1518,34 +1430,9 @@ namespace KeyPulse
                 FontWeight = FontWeight.Medium,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            ToolTip.SetTip(lockRatioCheck, "When checked, Contrast automatically matches Brightness on this monitor. Uncheck to tune Contrast independently.");
-
-            var lockHelpBadge = new Border
-            {
-                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelBrush", "#111827"),
-                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(12),
-                Width = 24,
-                Height = 24,
-                Focusable = true,
-                VerticalAlignment = VerticalAlignment.Center,
-                Cursor = new Cursor(StandardCursorType.Help),
-                Child = new TextBlock
-                {
-                    Text = "?",
-                    FontSize = 11,
-                    FontWeight = FontWeight.Bold,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#94A3B8")
-                }
-            };
-            ToolTip.SetTip(lockHelpBadge, "Sync Ratio keeps Brightness and Contrast locked at the same level so moving Brightness adjusts both together. Uncheck to unlock independent Contrast control.");
-            Avalonia.Automation.AutomationProperties.SetName(lockHelpBadge, "Help: Sync ratio keeps Brightness and Contrast locked at the same level");
+            ToolTip.SetTip(lockRatioCheck, "On: one slider moves Brightness and Contrast together. Off: shows a separate Contrast slider.");
 
             lockRow.Children.Add(lockRatioCheck);
-            lockRow.Children.Add(lockHelpBadge);
 
             Grid.SetRow(lockRow, 3);
             mainGrid.Children.Add(lockRow);
@@ -1566,6 +1453,8 @@ namespace KeyPulse
                 ContrastValueText = contrastValueText,
                 ContrastLabelText = cLabel,
                 RightContrastColumn = rightColumn,
+                SlidersGrid = slidersGrid,
+                BrightnessLabelText = bLabel,
                 BrightnessSlider = brightnessSlider,
                 ContrastSlider = contrastSlider,
                 SlotBadge = slotBadge,
@@ -1674,33 +1563,37 @@ namespace KeyPulse
             return view;
         }
 
+        /// <summary>
+        /// One slider per screen unless the user tunes contrast separately: the contrast column is hidden (and its grid
+        /// column collapsed) while Sync ratio is on or the display has no DDC/CI contrast. Unticking Sync ratio shows it.
+        /// </summary>
         public static void UpdateContrastInteractivity(ScreenContainerView view)
         {
             bool locked = view.LockRatioCheckBox.IsChecked == true;
             bool supportsContrast = view.SupportsContrast && !view.IsInternalLcd;
+            bool showContrast = supportsContrast && !locked;
+
+            view.RightContrastColumn.IsVisible = showContrast;
+            view.ContrastSlider.IsEnabled = showContrast;
+            view.SlidersGrid.ColumnDefinitions[1].Width = showContrast ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+            view.SlidersGrid.ColumnSpacing = showContrast ? 8 : 0;
+            view.ContrastLabelText.Text = "Contrast";
+            view.LockRatioCheckBox.IsEnabled = supportsContrast;
+            view.LockRatioCheckBox.IsVisible = supportsContrast;
 
             if (!supportsContrast)
             {
-                view.ContrastSlider.IsEnabled = false;
-                view.RightContrastColumn.Opacity = 0.42;
-                view.ContrastLabelText.Text = "Contrast (N/A)";
-                view.LockRatioCheckBox.IsEnabled = false;
-                ToolTip.SetTip(view.RightContrastColumn, "Built-in laptop displays control backlight brightness only and do not support hardware DDC/CI contrast.");
+                view.BrightnessLabelText.Text = "Brightness";
             }
             else if (locked)
             {
-                view.ContrastSlider.IsEnabled = false;
-                view.RightContrastColumn.Opacity = 0.62;
-                view.ContrastLabelText.Text = "Contrast (Synced)";
-                view.LockRatioCheckBox.IsEnabled = true;
-                ToolTip.SetTip(view.RightContrastColumn, "Contrast is synced with Brightness. Uncheck 'Sync ratio' below to adjust Contrast independently.");
+                view.BrightnessLabelText.Text = "Brightness + Contrast";
+                ToolTip.SetTip(view.BrightnessSlider, "Contrast follows Brightness. Untick 'Sync ratio' to set Contrast separately.");
             }
             else
             {
-                view.ContrastSlider.IsEnabled = true;
-                view.RightContrastColumn.Opacity = 1.0;
-                view.ContrastLabelText.Text = "Contrast";
-                view.LockRatioCheckBox.IsEnabled = true;
+                view.BrightnessLabelText.Text = "Brightness";
+                ToolTip.SetTip(view.BrightnessSlider, null);
                 ToolTip.SetTip(view.RightContrastColumn, "Adjust hardware DDC/CI contrast independently (0% to 100%).");
             }
         }
