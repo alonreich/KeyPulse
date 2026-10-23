@@ -190,11 +190,25 @@ namespace KeyPulse
         public static string ConfigPath => Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json");
         public static string LkgConfigPath => Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.lkg.json");
 
+        // Shared between the UI thread (manual restore/undo) and the display-change timer thread.
+        // Accessed only through the atomic helpers below; never read or assign it directly.
         private static DesktopLayoutProfile? _lastUndoSnapshot;
         private static System.Threading.Timer? _displayChangeDebounceTimer;
         private static readonly object SyncLock = new();
 
-        public static bool HasUndo => _lastUndoSnapshot != null;
+        public static bool HasUndo => Volatile.Read(ref _lastUndoSnapshot) != null;
+
+        internal static DesktopLayoutProfile? PeekUndoSnapshot() => Volatile.Read(ref _lastUndoSnapshot);
+
+        // Last writer wins: the most recent non-undo restore owns the undo buffer.
+        internal static void PublishUndoSnapshot(DesktopLayoutProfile snapshot) => Interlocked.Exchange(ref _lastUndoSnapshot, snapshot);
+
+        // Atomically claims the snapshot so at most one undo can ever apply it.
+        internal static DesktopLayoutProfile? TakeUndoSnapshot() => Interlocked.Exchange(ref _lastUndoSnapshot, null);
+
+        // Returns a claimed snapshot after a failed undo, unless a newer restore already published one.
+        internal static bool TryReinstateUndoSnapshot(DesktopLayoutProfile snapshot) =>
+            Interlocked.CompareExchange(ref _lastUndoSnapshot, snapshot, null) == null;
 
         public static DesktopOrganizerLoadResult LoadConfigDetailed()
         {
@@ -1054,7 +1068,7 @@ namespace KeyPulse
 
                 if (!isUndoOperation && preRestoreSnapshot != null)
                 {
-                    _lastUndoSnapshot = preRestoreSnapshot;
+                    PublishUndoSnapshot(preRestoreSnapshot);
                 }
 
                 var occupiedSlots = new HashSet<(int X, int Y)>();
@@ -1285,21 +1299,39 @@ namespace KeyPulse
             }
         }
 
+        public static bool UndoLastRestore(out string report, CancellationToken cancellationToken = default)
+        {
+            var snapshot = TakeUndoSnapshot();
+            if (snapshot == null)
+            {
+                report = "No recent restore to undo.";
+                return false;
+            }
+
+            bool success = RestoreLayout(snapshot, UnsavedIconBehavior.LeaveInPlace, out report, cancellationToken, isUndoOperation: true);
+            if (!success)
+            {
+                TryReinstateUndoSnapshot(snapshot);
+            }
+
+            return success;
+        }
+
         public static async Task<(bool Success, string Report)> UndoLastRestoreDetailedAsync(CancellationToken cancellationToken = default)
         {
-            if (_lastUndoSnapshot == null)
+            var snapshot = TakeUndoSnapshot();
+            if (snapshot == null)
             {
                 return (false, "No recent restore to undo.");
             }
 
-            var snapshot = _lastUndoSnapshot;
             var (success, report) = await RestoreLayoutDetailedAsync(snapshot, UnsavedIconBehavior.LeaveInPlace, cancellationToken, isUndoOperation: true).ConfigureAwait(false);
             if (success)
             {
-                _lastUndoSnapshot = null;
                 return (true, report);
             }
 
+            TryReinstateUndoSnapshot(snapshot);
             return (false, report);
         }
 
