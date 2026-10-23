@@ -155,12 +155,69 @@ def nuke_comments(filepath, items):
         print(f"Error: {e}")
         return False
 
+def skip_literal(src, i):
+    """Return the index just past the comment/string/char literal starting at i, or None."""
+    n = len(src)
+    if src.startswith('//', i):
+        j = src.find('\n', i)
+        return n if j < 0 else j
+    if src.startswith('/*', i):
+        j = src.find('*/', i + 2)
+        return n if j < 0 else j + 2
+    if src[i] == "'":
+        j = i + 1
+        while j < n and src[j] not in "'\n":
+            j += 2 if src[j] == '\\' else 1
+        return j + 1
+    p = i
+    while p < n and src[p] in '$@': p += 1
+    if p >= n or src[p] != '"' or p - i > 3: return None
+    prefix = src[i:p]
+    q = p
+    while q < n and src[q] == '"': q += 1
+    quotes = q - p
+    interpolated = '$' in prefix
+    if quotes >= 3:
+        end = src.find('"' * quotes, q)
+        return n if end < 0 else end + quotes
+    if quotes == 2: return q
+    verbatim = '@' in prefix
+    j = p + 1
+    while j < n:
+        c = src[j]
+        if verbatim and src.startswith('""', j): j += 2; continue
+        if not verbatim and c == '\\': j += 2; continue
+        if c == '"' or (c == '\n' and not verbatim): return j + 1
+        if interpolated and c == '{':
+            if src.startswith('{{', j): j += 2; continue
+            depth, j = 1, j + 1
+            while j < n and depth:
+                end = skip_literal(src, j)
+                if end is not None: j = end; continue
+                depth += {'{': 1, '}': -1}.get(src[j], 0)
+                j += 1
+            continue
+        j += 1
+    return n
+
+def strip_literals(src):
+    out, i, n = [], 0, len(src)
+    while i < n:
+        end = skip_literal(src, i) if src[i] in '/\'"$@' else None
+        if end is None:
+            out.append(src[i])
+            i += 1
+        else:
+            i = end
+    return ''.join(out)
+
 def check_syntax(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8-sig') as f:
             source = f.read()
         if '\t' in source: return "Contains Tabs"
-        if source.count('{') != source.count('}'): return "Mismatched Braces"
+        code = strip_literals(source)
+        if code.count('{') != code.count('}'): return "Mismatched Braces"
         return None
     except: return None
 

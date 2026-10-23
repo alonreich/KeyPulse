@@ -638,6 +638,8 @@ namespace KeyPulse
             public string HardwareId { get; set; } = string.Empty;
             public string ModelName { get; set; } = string.Empty;
             public bool IsPrimary { get; set; }
+            /// <summary>Windows reports this output as a built-in (laptop / tablet) panel, the only kind \\.\LCD controls.</summary>
+            public bool IsInternalPanel { get; set; }
             public PixelRect Bounds { get; set; }
             public bool? SupportsBrightness { get; set; }
             public bool? SupportsContrast { get; set; }
@@ -646,6 +648,7 @@ namespace KeyPulse
         private static List<ConnectedMonitorDescriptor> EnumerateConnectedMonitors()
         {
             var raw = new List<ConnectedMonitorDescriptor>();
+            var internalPanels = GetInternalPanelDeviceNames();
 
             MonitorEnumProc callback = (IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData) =>
             {
@@ -690,6 +693,7 @@ namespace KeyPulse
                         HardwareId = hwId,
                         ModelName = string.IsNullOrWhiteSpace(model) ? "Display" : model,
                         IsPrimary = (mi.dwFlags & 1) != 0,
+                        IsInternalPanel = internalPanels.Contains(devName),
                         Bounds = new PixelRect(
                             mi.rcMonitor.Left,
                             mi.rcMonitor.Top,
@@ -708,6 +712,68 @@ namespace KeyPulse
                 .ThenBy(m => m.Bounds.Y)
                 .Take(MaxScreens)
                 .ToList();
+        }
+
+        private const uint DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED = 11;
+        private const uint DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED = 13;
+        private const uint DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL = 0x80000000;
+
+        /// <summary>Test seam: replaces the QueryDisplayConfig lookup of built-in panel GDI names (\\.\DISPLAYn).</summary>
+        internal static Func<HashSet<string>>? InternalPanelDeviceNamesOverrideForTesting { get; set; }
+
+        /// <summary>True for the connector types Windows uses for a built-in panel (eDP, embedded UDI, internal).</summary>
+        internal static bool IsInternalOutputTechnology(uint outputTechnology) =>
+            outputTechnology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL ||
+            outputTechnology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED ||
+            outputTechnology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED;
+
+        /// <summary>
+        /// GDI device names of the active outputs that are built-in panels. \\.\LCD only ever drives the built-in
+        /// backlight, so the LCD path is used for these monitors alone; any failure yields an empty set (no LCD writes).
+        /// </summary>
+        private static HashSet<string> GetInternalPanelDeviceNames()
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var testOverride = InternalPanelDeviceNamesOverrideForTesting;
+            if (testOverride != null) return testOverride();
+
+            try
+            {
+                if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out uint pathCount, out uint modeCount) != 0 || pathCount == 0)
+                {
+                    return names;
+                }
+
+                var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
+                var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
+                if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero) != 0)
+                {
+                    return names;
+                }
+
+                for (int i = 0; i < pathCount; i++)
+                {
+                    if (!IsInternalOutputTechnology(paths[i].targetInfo.outputTechnology)) continue;
+
+                    var source = new DISPLAYCONFIG_SOURCE_DEVICE_NAME
+                    {
+                        type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                        size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(),
+                        adapterId = paths[i].sourceInfo.adapterId,
+                        id = paths[i].sourceInfo.id
+                    };
+                    if (DisplayConfigGetDeviceInfo(ref source) == 0 && !string.IsNullOrWhiteSpace(source.viewGdiDeviceName))
+                    {
+                        names.Add(source.viewGdiDeviceName.TrimEnd('\0'));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogDdc($"[LCD] Built-in panel detection failed; laptop backlight control disabled for this scan: {ex.Message}");
+                names.Clear();
+            }
+            return names;
         }
 
         private static bool HardwareIdsMatch(string savedId, string liveId)
@@ -1371,7 +1437,7 @@ namespace KeyPulse
                 return state;
             }
 
-            if ((mon.IsPrimary || slotIndex == 0) && TryReadInternalLcdBrightness(out int lcdPercent))
+            if (mon.IsInternalPanel && TryReadInternalLcdBrightness(out int lcdPercent))
             {
                 state.IsInternalLcd = true;
                 state.SupportsBrightness = true;
@@ -1610,7 +1676,7 @@ namespace KeyPulse
                         return true;
                     }
 
-                    if ((mon.IsPrimary || slotIndex == 0) && writeBrightness && TryWriteInternalLcdBrightness(brightness))
+                    if (mon.IsInternalPanel && writeBrightness && TryWriteInternalLcdBrightness(brightness))
                     {
                         Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} TryWriteInternalLcdBrightness succeeded");
                         await Task.Delay(30).ConfigureAwait(false);
@@ -2942,6 +3008,82 @@ namespace KeyPulse
         private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
 
         private const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        private const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
+        private const uint DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LUID
+        {
+            public uint LowPart;
+            public int HighPart;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DISPLAYCONFIG_PATH_SOURCE_INFO
+        {
+            public LUID adapterId;
+            public uint id;
+            public uint modeInfoIdx;
+            public uint statusFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DISPLAYCONFIG_PATH_TARGET_INFO
+        {
+            public LUID adapterId;
+            public uint id;
+            public uint modeInfoIdx;
+            public uint outputTechnology;
+            public uint rotation;
+            public uint scaling;
+            public uint refreshRateNumerator;
+            public uint refreshRateDenominator;
+            public uint scanLineOrdering;
+            public int targetAvailable;
+            public uint statusFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DISPLAYCONFIG_PATH_INFO
+        {
+            public DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo;
+            public DISPLAYCONFIG_PATH_TARGET_INFO targetInfo;
+            public uint flags;
+        }
+
+        /// <summary>Only sized correctly (64 bytes); the mode contents are never read.</summary>
+        [StructLayout(LayoutKind.Sequential, Size = 64)]
+        private struct DISPLAYCONFIG_MODE_INFO
+        {
+            public uint infoType;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct DISPLAYCONFIG_SOURCE_DEVICE_NAME
+        {
+            public uint type;
+            public uint size;
+            public LUID adapterId;
+            public uint id;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string viewGdiDeviceName;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPathArrayElements, out uint numModeInfoArrayElements);
+
+        [DllImport("user32.dll")]
+        private static extern int QueryDisplayConfig(
+            uint flags,
+            ref uint numPathArrayElements,
+            [Out] DISPLAYCONFIG_PATH_INFO[] pathArray,
+            ref uint numModeInfoArrayElements,
+            [Out] DISPLAYCONFIG_MODE_INFO[] modeInfoArray,
+            IntPtr currentTopologyId);
+
+        [DllImport("user32.dll")]
+        private static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_SOURCE_DEVICE_NAME requestPacket);
 
         [DllImport("dxva2.dll", SetLastError = true)]
         private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, out uint pdwNumberOfPhysicalMonitors);

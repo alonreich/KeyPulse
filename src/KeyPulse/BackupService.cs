@@ -67,6 +67,21 @@ namespace KeyPulse
 
         private static readonly byte[] AssociatedData = Encoding.UTF8.GetBytes("KeyPulseBackup.v2");
 
+        /// <summary>
+        /// Hardware-control consent belongs to the person at THIS PC, never to the backup file: the restored
+        /// Screen Brightness config keeps this PC's disclaimer answer, and if that answer is "not accepted" the
+        /// feature is switched off. Returns true when the backup had the feature on and this PC must ask for
+        /// consent before it can run.
+        /// </summary>
+        public static bool PrepareScreenBrightnessForRestore(ScreenBrightnessConfig restored, bool disclaimerAcceptedOnThisPc)
+        {
+            restored.DisclaimerAccepted = disclaimerAcceptedOnThisPc;
+            if (disclaimerAcceptedOnThisPc) return false;
+            bool wasEnabled = restored.Enabled;
+            restored.Enabled = false;
+            return wasEnabled;
+        }
+
 
         /// <summary>
         /// Serializes, hashes, optionally encrypts, writes ATOMICALLY, then reads the result back

@@ -1878,10 +1878,11 @@ namespace KeyPulse
                     var previousConfig = CloneConfig(_currentConfig);
                     var previousOrganizer = DesktopOrganizerService.LoadConfig();
                     var previousBrightness = ScreenBrightnessService.LoadConfig();
+                    bool needsBrightnessConsent = false;
 
                     try
                     {
-                        var problems = ApplyBackupPayload(payload, restoreLayout, out var layoutNote);
+                        var problems = ApplyBackupPayload(payload, restoreLayout, out var layoutNote, out needsBrightnessConsent);
                         SyncAllSettingsControls();
 
                         var imported = Hotkeys.Count;
@@ -1951,6 +1952,12 @@ namespace KeyPulse
                                     : "Your previous settings are in " + rollbackPath + " - close KeyPulse and rename that file to config.json.");
                         }
                         statusTxt.Foreground = AppBrush("AppDangerBrush");
+                        needsBrightnessConsent = false;
+                    }
+
+                    if (needsBrightnessConsent && await ScreenBrightnessService.ShowDisclaimerDialogAsync(w))
+                    {
+                        SyncAllSettingsControls();
                     }
                 }
                 catch (Exception ex)

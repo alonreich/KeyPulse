@@ -510,9 +510,10 @@ namespace KeyPulse
         /// because a single key was taken made this feature useless on a new PC, which is its main
         /// use. Returns the number of shortcuts that could not be switched on here.
         /// </summary>
-        private int ApplyBackupPayload(BackupPayload payload, bool restoreLayout, out string layoutNote)
+        private int ApplyBackupPayload(BackupPayload payload, bool restoreLayout, out string layoutNote, out bool needsBrightnessConsent)
         {
             layoutNote = string.Empty;
+            needsBrightnessConsent = false;
 
             ReleaseAllRegistrations();
             Hotkeys.Clear();
@@ -576,6 +577,9 @@ namespace KeyPulse
 
             if (payload.ScreenBrightness != null)
             {
+                needsBrightnessConsent = BackupService.PrepareScreenBrightnessForRestore(
+                    payload.ScreenBrightness,
+                    ScreenBrightnessService.LoadConfig().DisclaimerAccepted);
                 ScreenBrightnessService.SaveConfig(payload.ScreenBrightness);
                 ScreenBrightnessService.NotifyStateChanged();
             }
