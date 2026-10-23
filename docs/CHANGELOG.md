@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.23.1922] - 2026-10-23
+
 ### Changed
 - Brightness slider: extra buttons moved behind one ⚙ button (separate contrast, identify screens, presets & setup).
 - New "⌨ Key" button on each screen in the full Brightness window: give one screen its own shortcut that jumps only that screen to the brightness and contrast you pick. "All screens" keeps the new gap.
@@ -265,19 +267,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
 
-## [v2026.10.23.1540] - 2026-10-23
+## [v2026.10.23.1922] - 2026-10-23
 
-### Safety
-- **Hardware consent stays with each PC**: Restoring a backup on another PC no longer switches on monitor brightness/contrast control by itself. If this PC never accepted the hardware disclaimer, Screen Brightness is restored switched off and the disclaimer is shown right after the restore.
-- **Laptop screen no longer changed by mistake**: When an external main monitor refuses a brightness command, KeyPulse no longer adjusts the laptop's built-in screen (and its power-plan brightness) instead. The laptop backlight is only used for an actual built-in panel.
+### Changed
+- Brightness slider: extra buttons moved behind one ⚙ button (separate contrast, identify screens, presets & setup).
+- New "⌨ Key" button on each screen in the full Brightness window: give one screen its own shortcut that jumps only that screen to the brightness and contrast you pick. "All screens" keeps the new gap.
+- Tray menu is flat: "Brightness slider" with your presets right under it.
+- If another app is using one of your brightness shortcuts, the brightness windows now say which one. It clears when KeyPulse gets the key.
+- Shortcut list: each row has just On/Off and ▶ Run. Click a row to edit it; Duplicate and Delete are in the editor. Status is a coloured dot (hover for details).
+- Settings: one "Run as admin" switch. The "Displays & Icons" tab is now two tabs, "Brightness" and "Desktop icons".
+- First time you open the brightness slider, a short tips card shows the brightness keys. Click "Got it" and it won't come back.
+- The Brightness/Contrast Slider is simpler: no preset buttons (use the tray menu), no hint line, no status text unless something is wrong.
+- The master bar is now just labelled "All screens".
+- Each screen shows one slider for brightness and contrast together. Want a separate Contrast slider? Slider: ⚙ > "Separate contrast sliders". Full window: untick "Sync ratio".
 
 ### Fixed
-- **Uninstall leaves nothing behind**: Uninstalling now also removes the Screen Brightness and backup-settings safety copies created by a "Wipe Settings" install.
-- **No more stalls while holding a hotkey**: Click sounds now play without tying up background threads, so holding a shortcut no longer slows timers or other work.
-- **Smoother brightness changes with several monitors**: Waiting for the monitor connection no longer ties up background threads, so brightness changes and the rest of the app stay responsive.
-- **Desktop Organizer undo is reliable**: Undo can no longer apply the same layout twice or lose a layout when a display change happens at the same moment.
-- **Desktop Organizer respects the active settings folder**: Layouts are always saved to and loaded from the current settings folder.
-- **Screen Brightness Atomic Persistence & Non-Truncating LKG Backup**: Replaced ad-hoc temporary file moves and non-atomic `File.Copy` overwrites in `ScreenBrightnessService.SaveConfigInternal` with unified `AtomicFileWriter.WriteAtomic`. Added deterministic `try...finally` temporary file cleanup to prevent orphaned `.tmp` file leaks, eliminated 0-byte truncation risks on `screen_brightness.lkg.json` during sudden power loss, and retained transient lock retry backoff with structured `LogDdc` diagnostics.
+- Brightness sliders and shortcuts stopped working whenever no other brightness app (such as Twinkle Tray) was running. They now work on their own.
+- The default brighten shortcut Ctrl+Alt+= now works. It was never being recognised before.
+- Brightness shortcuts that another app was using when KeyPulse started now start working automatically within about 10 seconds of that app releasing them.
 
 ## [v2026.10.20.1850] - 2026-10-20
 
