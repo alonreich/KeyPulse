@@ -1890,9 +1890,76 @@ class Program
         }
     }
 
+    [DllImport("winmm.dll", EntryPoint = "PlaySoundW", SetLastError = false)]
+    private static extern bool PlaySoundNative(IntPtr pszSound, IntPtr hmod, uint fdwSound);
+
+    internal const uint SND_ASYNC = 0x0001;
+    internal const uint SND_NODEFAULT = 0x0002;
+    internal const uint SND_MEMORY = 0x0004;
+    internal const uint SoundPlaybackFlags = SND_ASYNC | SND_NODEFAULT | SND_MEMORY;
+
+    /// <summary>TASK 9: repeated triggers of the same sound inside this window are dropped.</summary>
+    internal const int SoundThrottleWindowMs = 50;
+
+    private static readonly byte[] MissingSoundSentinel = Array.Empty<byte>();
+
     /// <summary>
-    /// ISSUE_19: the old version disposed the player on the same line it started playback, so the
-    /// sound was cut off or never heard. PlaySync on a pool thread plays the clip to the end.
+    /// TASK 9: WAV bytes read once from the manifest. Arrays live on the pinned object heap because
+    /// SND_ASYNC | SND_MEMORY keeps reading the buffer after PlaySound returns, so it must never move
+    /// and is never freed. Missing assets are cached as <see cref="MissingSoundSentinel"/>.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _soundCache = new(StringComparer.Ordinal);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _soundLastPlayedMs = new(StringComparer.Ordinal);
+
+    /// <summary>Test seam: replaces the winmm call. Receives the cached buffer and the flags.</summary>
+    internal static Func<byte[], uint, bool>? PlaySoundNativeOverrideForTesting;
+    internal static Func<long>? SoundClockOverrideForTesting;
+    internal static int SoundCacheCountForTesting => _soundCache.Count;
+
+    internal static void ResetSoundStateForTesting()
+    {
+        _soundCache.Clear();
+        _soundLastPlayedMs.Clear();
+    }
+
+    internal static byte[]? GetCachedSoundForTesting(string soundName)
+        => _soundCache.TryGetValue(soundName, out var b) ? b : null;
+
+    private static byte[] LoadSoundBuffer(string soundName)
+    {
+        using var stream = typeof(Program).Assembly.GetManifestResourceStream($"KeyPulse.Assets.{soundName}.wav");
+        if (stream == null)
+        {
+            LogDebug($"Sound asset not embedded: {soundName}.wav");
+            return MissingSoundSentinel;
+        }
+
+        var buffer = GC.AllocateUninitializedArray<byte>(checked((int)stream.Length), pinned: true);
+        stream.ReadExactly(buffer);
+        return buffer;
+    }
+
+    /// <summary>Atomically claims a playback slot; false when the same sound fired under 50 ms ago.</summary>
+    private static bool TryClaimSoundSlot(string soundName)
+    {
+        long now = SoundClockOverrideForTesting?.Invoke() ?? Environment.TickCount64;
+        while (true)
+        {
+            if (!_soundLastPlayedMs.TryGetValue(soundName, out var last))
+            {
+                if (_soundLastPlayedMs.TryAdd(soundName, now)) return true;
+                continue;
+            }
+            if (now - last < SoundThrottleWindowMs) return false;
+            if (_soundLastPlayedMs.TryUpdate(soundName, now, last)) return true;
+        }
+    }
+
+    /// <summary>
+    /// ISSUE_19 / TASK 9: PlaySync on a pool thread blocked a worker for the whole clip, so held-down
+    /// hotkeys starved the ThreadPool. The clip is now cached in pinned memory and handed to winmm
+    /// with SND_ASYNC | SND_MEMORY: the multimedia subsystem plays it to the end without occupying
+    /// any CLR thread, and the 50 ms per-sound throttle drops redundant re-triggers.
     /// </summary>
     public static void PlaySound(string soundName)
     {
@@ -1900,26 +1967,19 @@ class Program
 
         try
         {
-            var asm = typeof(Program).Assembly;
-            var stream = asm.GetManifestResourceStream($"KeyPulse.Assets.{soundName}.wav");
-            if (stream == null)
+            var buffer = _soundCache.GetOrAdd(soundName, LoadSoundBuffer);
+            if (buffer.Length == 0) return;
+            if (!TryClaimSoundSlot(soundName)) return;
+
+            var overrideCall = PlaySoundNativeOverrideForTesting;
+            if (overrideCall != null)
             {
-                LogDebug($"Sound asset not embedded: {soundName}.wav");
+                overrideCall(buffer, SoundPlaybackFlags);
                 return;
             }
 
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    using (stream)
-                    using (var player = new System.Media.SoundPlayer(stream))
-                    {
-                        player.PlaySync();
-                    }
-                }
-                catch { }
-            });
+            // A false return means no audio device or a muted/unavailable endpoint: stay silent.
+            PlaySoundNative(Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0), IntPtr.Zero, SoundPlaybackFlags);
         }
         catch { }
     }
