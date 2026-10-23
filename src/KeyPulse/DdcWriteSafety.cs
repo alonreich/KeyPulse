@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 
 namespace KeyPulse
 {
@@ -136,6 +137,46 @@ namespace KeyPulse
             if (writeHighLevel(target)) return DdcWriteOutcome.Written;
 
             pause(CommandSpacingMs);
+            return writeVcp(target) ? DdcWriteOutcome.Written : DdcWriteOutcome.Failed;
+        }
+
+        /// <summary>
+        /// <see cref="ReadFeature"/> with a non-blocking pause, for the asynchronous hardware write pipeline.
+        /// </summary>
+        public static async Task<DdcFeatureReading> ReadFeatureAsync(
+            Func<DdcFeatureReading> readHighLevel,
+            Func<DdcFeatureReading> readVcp,
+            Func<int, Task> pause)
+        {
+            var r = readHighLevel();
+            if (IsValid(r)) return r;
+            await pause(CommandSpacingMs).ConfigureAwait(false);
+            r = readVcp();
+            return IsValid(r) ? r : default;
+        }
+
+        /// <summary>
+        /// <see cref="WriteFeature"/> with non-blocking pauses: identical read-before-write, confirmed-range, skip-unchanged
+        /// and bounded-retry policy, but the spacing between commands never parks a ThreadPool thread.
+        /// </summary>
+        public static async Task<DdcWriteOutcome> WriteFeatureAsync(
+            DdcFeature feature,
+            int percent,
+            Func<Task<DdcFeatureReading>> read,
+            Func<uint, bool> writeHighLevel,
+            Func<uint, bool> writeVcp,
+            Func<int, Task> pause)
+        {
+            var reading = await read().ConfigureAwait(false);
+            if (!reading.Ok) return DdcWriteOutcome.UnknownRange;
+
+            uint target = ToRaw(feature, percent, reading.Min, reading.Max);
+            if (reading.Current == target) return DdcWriteOutcome.Unchanged;
+
+            await pause(CommandSpacingMs).ConfigureAwait(false);
+            if (writeHighLevel(target)) return DdcWriteOutcome.Written;
+
+            await pause(CommandSpacingMs).ConfigureAwait(false);
             return writeVcp(target) ? DdcWriteOutcome.Written : DdcWriteOutcome.Failed;
         }
 

@@ -77,7 +77,9 @@ namespace KeyPulse
         }
 
         private static readonly object CycleLock = new();
-        private static readonly object HardwareWriteLock = new();
+        // Serialises the per-slot write pipelines without parking ThreadPool threads (a Monitor cannot span an await).
+        private static readonly SemaphoreSlim HardwareWriteGate = new(1, 1);
+        private const int BusLockTimeoutMs = 5000;
         private static CancellationTokenSource? _cycleCts;
         private static bool _hasStartedCycleInSession;
         private static DateTime _lastCycleRequestUtc = DateTime.MinValue;
@@ -99,10 +101,27 @@ namespace KeyPulse
         private static readonly ConcurrentDictionary<int, ScreenWriteThrottle> Throttles = new();
 
         /// <summary>
-        /// Test seam: replaces the physical write inside <see cref="WriteSingleScreenHardwareWithRetry"/>
+        /// Test seam: replaces the physical write inside <see cref="WriteSingleScreenHardwareWithRetryAsync"/>
         /// (slot, brightness, contrast, writeBrightness, writeContrast) -> success.
         /// </summary>
         internal static Func<int, int, int, bool, bool, bool>? HardwareWriteOverrideForTesting { get; set; }
+
+        /// <summary>
+        /// Test seam: replaces only the native DDC/CI commands inside <see cref="TryWriteDdcMonitorAsync"/>
+        /// (hMonitor, brightness, contrast, writeBrightness, writeContrast) -> success. BusLock arbitration and the
+        /// trailing VESA spacing still run for real around it.
+        /// </summary>
+        internal static Func<IntPtr, int, int, bool, bool, bool>? DdcBusWriteOverrideForTesting { get; set; }
+
+        internal static Task<bool> TryWriteDdcMonitorForTestingAsync(IntPtr hMonitor, int brightness, int contrast, bool writeBrightness, bool writeContrast) =>
+            TryWriteDdcMonitorAsync(hMonitor, brightness, contrast, writeBrightness, writeContrast);
+
+        internal static Task<bool> WriteSingleScreenHardwareWithRetryForTestingAsync(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast) =>
+            WriteSingleScreenHardwareWithRetryAsync(slotIndex, brightness, contrast, writeBrightness, writeContrast);
+
+        internal static SemaphoreSlim BusLockForTesting => BusLock;
+
+        internal static int VesaInterCommandDelayMsForTesting => VesaInterCommandDelayMs;
 
         internal static void ResetWriteSchedulerForTesting() => Throttles.Clear();
 
@@ -113,6 +132,13 @@ namespace KeyPulse
             // Fake physical-monitor handles in tests never reach a real I2C bus.
             if (PhysicalMonitorsProviderForTesting != null) return;
             Thread.Sleep(ms);
+        }
+
+        /// <summary>Non-blocking <see cref="DdcPause"/> for the asynchronous hardware write pipeline.</summary>
+        private static Task DdcPauseAsync(int ms)
+        {
+            if (PhysicalMonitorsProviderForTesting != null) return Task.CompletedTask;
+            return Task.Delay(ms);
         }
 
         public static event Action? StateChanged;
@@ -1429,7 +1455,7 @@ namespace KeyPulse
             Program.LogDebug($"[ScreenBrightness] QueueThrottledHardwareWrite slot={slotIndex} b={brightness} c={contrast} decision={decision}");
             if (decision == DdcScheduleDecision.WriteNow)
             {
-                _ = Task.Run(() => ExecutePendingWriteForSlot(slotIndex, throttle));
+                _ = Task.Run(() => ExecutePendingWriteForSlotAsync(slotIndex, throttle));
             }
             else
             {
@@ -1454,10 +1480,10 @@ namespace KeyPulse
                 if (wait <= 0) break;
                 await Task.Delay(wait).ConfigureAwait(false);
             }
-            ExecutePendingWriteForSlot(slotIndex, throttle);
+            await ExecutePendingWriteForSlotAsync(slotIndex, throttle).ConfigureAwait(false);
         }
 
-        private static void ExecutePendingWriteForSlot(int slotIndex, ScreenWriteThrottle throttle)
+        private static async Task ExecutePendingWriteForSlotAsync(int slotIndex, ScreenWriteThrottle throttle)
         {
             int targetB;
             int targetC;
@@ -1475,7 +1501,7 @@ namespace KeyPulse
 
                 if (targetB == prevB && targetC == prevC)
                 {
-                    Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} targets unchanged ({targetB}/{targetC})");
+                    Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlotAsync slot={slotIndex} targets unchanged ({targetB}/{targetC})");
                     _ = Task.Run(() =>
                     {
                         var cfg = LoadConfig();
@@ -1491,9 +1517,9 @@ namespace KeyPulse
             bool changeB = targetB != prevB && targetB >= 0;
             bool changeC = targetC != prevC && targetC >= 0;
 
-            Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} writing targetB={targetB} targetC={targetC} changeB={changeB} changeC={changeC}");
-            bool written = WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, changeB, changeC);
-            Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlot slot={slotIndex} write result={written}");
+            Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlotAsync slot={slotIndex} writing targetB={targetB} targetC={targetC} changeB={changeB} changeC={changeC}");
+            bool written = await WriteSingleScreenHardwareWithRetryAsync(slotIndex, targetB, targetC, changeB, changeC).ConfigureAwait(false);
+            Program.LogDebug($"[ScreenBrightness] ExecutePendingWriteForSlotAsync slot={slotIndex} write result={written}");
 
             if (written)
             {
@@ -1541,9 +1567,10 @@ namespace KeyPulse
             }
         }
 
-        private static bool WriteSingleScreenHardwareWithRetry(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast)
+        private static async Task<bool> WriteSingleScreenHardwareWithRetryAsync(int slotIndex, int brightness, int contrast, bool writeBrightness, bool writeContrast)
         {
-            lock (HardwareWriteLock)
+            await HardwareWriteGate.WaitAsync().ConfigureAwait(false);
+            try
             {
                 var testWriter = HardwareWriteOverrideForTesting;
                 if (testWriter != null)
@@ -1562,11 +1589,11 @@ namespace KeyPulse
                     var bound = BindMonitorsToSlots(cfg);
                     if (!bound.TryGetValue(slotIndex, out var mon))
                     {
-                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} not found in bound monitors (bound count={bound.Count})");
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} not found in bound monitors (bound count={bound.Count})");
                         return false;
                     }
 
-                    Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} hMon={mon.HMonitor} isPrimary={mon.IsPrimary} model={mon.ModelName}");
+                    Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} hMon={mon.HMonitor} isPrimary={mon.IsPrimary} model={mon.ModelName}");
 
                     bool canWriteB = writeBrightness && (mon.SupportsBrightness ?? true);
                     bool canWriteC = writeContrast && (mon.SupportsContrast ?? true);
@@ -1576,17 +1603,17 @@ namespace KeyPulse
                         return true;
                     }
 
-                    if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, canWriteB, canWriteC))
+                    if (await TryWriteDdcMonitorAsync(mon.HMonitor, brightness, contrast, canWriteB, canWriteC).ConfigureAwait(false))
                     {
-                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} TryWriteDdcMonitor succeeded");
-                        Thread.Sleep(30);
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} TryWriteDdcMonitorAsync succeeded");
+                        await Task.Delay(30).ConfigureAwait(false);
                         return true;
                     }
 
                     if ((mon.IsPrimary || slotIndex == 0) && writeBrightness && TryWriteInternalLcdBrightness(brightness))
                     {
-                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} TryWriteInternalLcdBrightness succeeded");
-                        Thread.Sleep(30);
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} TryWriteInternalLcdBrightness succeeded");
+                        await Task.Delay(30).ConfigureAwait(false);
                         return true;
                     }
 
@@ -1596,17 +1623,21 @@ namespace KeyPulse
                     var refreshed = BindMonitorsToSlots(cfg);
                     if (refreshed.TryGetValue(slotIndex, out var freshMon) && freshMon.HMonitor != mon.HMonitor)
                     {
-                        DdcPause(DdcWriteSafety.CommandSpacingMs);
-                        bool freshOk = TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
-                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} retry freshMon hMon={freshMon.HMonitor} result={freshOk}");
+                        await DdcPauseAsync(DdcWriteSafety.CommandSpacingMs).ConfigureAwait(false);
+                        bool freshOk = await TryWriteDdcMonitorAsync(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast).ConfigureAwait(false);
+                        Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} retry freshMon hMon={freshMon.HMonitor} result={freshOk}");
                         return freshOk;
                     }
                 }
                 catch (Exception ex)
                 {
-                    Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} exception: {ex}");
+                    Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetryAsync slot={slotIndex} exception: {ex}");
                 }
                 return false;
+            }
+            finally
+            {
+                HardwareWriteGate.Release();
             }
         }
 
@@ -1807,7 +1838,7 @@ namespace KeyPulse
                     {
                         await Task.Delay(cycleApplyDelayMs, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested) return;
-                        ApplyProfileToHardwareDeltaOnly(capturedProfile, token);
+                        await ApplyProfileToHardwareDeltaOnlyAsync(capturedProfile, token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -1841,13 +1872,13 @@ namespace KeyPulse
 
             NotifyStateChanged();
 
-            _ = Task.Run(() =>
+            _ = Task.Run(async () =>
             {
                 try
                 {
                     if (!token.IsCancellationRequested)
                     {
-                        ApplyProfileToHardwareDeltaOnly(profile, token);
+                        await ApplyProfileToHardwareDeltaOnlyAsync(profile, token).ConfigureAwait(false);
                     }
                 }
                 catch
@@ -2304,7 +2335,7 @@ namespace KeyPulse
             }
         }
 
-        private static void ApplyProfileToHardwareDeltaOnly(ScreenBrightnessProfile profile, CancellationToken token)
+        private static async Task ApplyProfileToHardwareDeltaOnlyAsync(ScreenBrightnessProfile profile, CancellationToken token)
         {
             var cfg = LoadConfig();
             var bound = BindMonitorsToSlots(cfg);
@@ -2329,7 +2360,7 @@ namespace KeyPulse
                     throttle.LastWriteUtc = DateTime.UtcNow;
                 }
 
-                if (WriteSingleScreenHardwareWithRetry(slotIndex, targetB, targetC, writeBrightness: true, writeContrast: true))
+                if (await WriteSingleScreenHardwareWithRetryAsync(slotIndex, targetB, targetC, writeBrightness: true, writeContrast: true).ConfigureAwait(false))
                 {
                     lock (throttle.Sync)
                     {
@@ -2339,7 +2370,7 @@ namespace KeyPulse
                 }
 
                 if (token.IsCancellationRequested) return;
-                Thread.Sleep(30);
+                await Task.Delay(30).ConfigureAwait(false);
             }
         }
 
@@ -2515,10 +2546,51 @@ namespace KeyPulse
             }
         }
 
-        private static bool TryWriteDdcMonitor(IntPtr hMonitor, int brightnessPercent, int contrastPercent, bool writeBrightness, bool writeContrast)
+        /// <summary>
+        /// Writes one monitor while holding exclusive I2C bus access. Bus arbitration is fully asynchronous: a slot
+        /// waiting for <see cref="BusLock"/> or for the VESA inter-command spacing yields its ThreadPool thread.
+        /// The trailing spacing runs before the lock is released so the next bus user always gets a quiet bus.
+        /// </summary>
+        private static async Task<bool> TryWriteDdcMonitorAsync(IntPtr hMonitor, int brightnessPercent, int contrastPercent, bool writeBrightness, bool writeContrast)
         {
             if (hMonitor == IntPtr.Zero || (!writeBrightness && !writeContrast)) return false;
 
+            if (!await BusLock.WaitAsync(BusLockTimeoutMs).ConfigureAwait(false))
+            {
+                LogDdc($"[DDC] Timed out ({BusLockTimeoutMs}ms) waiting for BusLock to write hMon={hMonitor}; write skipped.");
+                return false;
+            }
+
+            try
+            {
+                var busWriter = DdcBusWriteOverrideForTesting;
+                if (busWriter != null)
+                {
+                    return busWriter(hMonitor, brightnessPercent, contrastPercent, writeBrightness, writeContrast);
+                }
+                return await WriteDdcMonitorOnBusAsync(hMonitor, brightnessPercent, contrastPercent, writeBrightness, writeContrast).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug($"[DDC] TryWriteDdcMonitorAsync exception on hMon={hMonitor}: {ex}");
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    await DdcPauseAsync(VesaInterCommandDelayMs).ConfigureAwait(false);
+                }
+                finally
+                {
+                    BusLock.Release();
+                }
+            }
+        }
+
+        /// <summary>Native DDC/CI command sequence; the caller must hold <see cref="BusLock"/>.</summary>
+        private static async Task<bool> WriteDdcMonitorOnBusAsync(IntPtr hMonitor, int brightnessPercent, int contrastPercent, bool writeBrightness, bool writeContrast)
+        {
             if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
             {
                 Program.LogDebug($"[DDC] GetNumberOfPhysicalMonitorsFromHMONITOR failed or 0 for hMon={hMonitor}");
@@ -2546,13 +2618,13 @@ namespace KeyPulse
 
                     if (writeBrightness)
                     {
-                        var outcome = DdcWriteSafety.WriteFeature(
+                        var outcome = await DdcWriteSafety.WriteFeatureAsync(
                             DdcFeature.Brightness,
                             brightnessPercent,
-                            () => ReadDdcFeature(hPhysical, DdcFeature.Brightness),
+                            () => ReadDdcFeatureAsync(hPhysical, DdcFeature.Brightness),
                             v => SetMonitorBrightness(hPhysical, v),
                             v => SetVCPFeature(hPhysical, 0x10, v),
-                            DdcPause);
+                            DdcPauseAsync).ConfigureAwait(false);
                         wroteB = DdcWriteSafety.IsSuccess(outcome);
                         Program.LogDebug($"[DDC] Brightness write hPhysical={hPhysical} target={brightnessPercent}% -> {outcome} (win32Err={(wroteB ? 0 : Marshal.GetLastWin32Error())})");
                     }
@@ -2561,16 +2633,16 @@ namespace KeyPulse
                     {
                         if (writeBrightness)
                         {
-                            DdcPause(DdcWriteSafety.CommandSpacingMs);
+                            await DdcPauseAsync(DdcWriteSafety.CommandSpacingMs).ConfigureAwait(false);
                         }
 
-                        var outcome = DdcWriteSafety.WriteFeature(
+                        var outcome = await DdcWriteSafety.WriteFeatureAsync(
                             DdcFeature.Contrast,
                             contrastPercent,
-                            () => ReadDdcFeature(hPhysical, DdcFeature.Contrast),
+                            () => ReadDdcFeatureAsync(hPhysical, DdcFeature.Contrast),
                             v => SetMonitorContrast(hPhysical, v),
                             v => SetVCPFeature(hPhysical, 0x12, v),
-                            DdcPause);
+                            DdcPauseAsync).ConfigureAwait(false);
                         wroteC = DdcWriteSafety.IsSuccess(outcome);
                         Program.LogDebug($"[DDC] Contrast write hPhysical={hPhysical} target={contrastPercent}% -> {outcome} (win32Err={(wroteC ? 0 : Marshal.GetLastWin32Error())})");
                     }
@@ -2585,12 +2657,12 @@ namespace KeyPulse
                     }
                 }
 
-                Program.LogDebug($"[DDC] TryWriteDdcMonitor hMon={hMonitor} count={count} writeB={writeBrightness}({brightnessPercent}%) writeC={writeContrast}({contrastPercent}%) -> anySucceeded={anySucceeded}");
+                Program.LogDebug($"[DDC] TryWriteDdcMonitorAsync hMon={hMonitor} count={count} writeB={writeBrightness}({brightnessPercent}%) writeC={writeContrast}({contrastPercent}%) -> anySucceeded={anySucceeded}");
                 return anySucceeded;
             }
             catch (Exception ex)
             {
-                Program.LogDebug($"[DDC] TryWriteDdcMonitor exception on hMon={hMonitor}: {ex}");
+                Program.LogDebug($"[DDC] TryWriteDdcMonitorAsync exception on hMon={hMonitor}: {ex}");
                 return false;
             }
             finally
@@ -2622,6 +2694,33 @@ namespace KeyPulse
                         return new DdcFeatureReading(ok, cur, 0, mx);
                     },
                     DdcPause);
+            }
+            catch
+            {
+                return default;
+            }
+        }
+
+        /// <summary><see cref="ReadDdcFeature"/> with a non-blocking fallback pause, for the asynchronous write pipeline.</summary>
+        private static async Task<DdcFeatureReading> ReadDdcFeatureAsync(IntPtr hPhysical, DdcFeature feature)
+        {
+            try
+            {
+                return await DdcWriteSafety.ReadFeatureAsync(
+                    () =>
+                    {
+                        uint mn, cur, mx;
+                        bool ok = feature == DdcFeature.Brightness
+                            ? GetMonitorBrightness(hPhysical, out mn, out cur, out mx)
+                            : GetMonitorContrast(hPhysical, out mn, out cur, out mx);
+                        return new DdcFeatureReading(ok, cur, mn, mx);
+                    },
+                    () =>
+                    {
+                        bool ok = GetVCPFeatureAndVCPFeatureReply(hPhysical, feature == DdcFeature.Brightness ? (byte)0x10 : (byte)0x12, out _, out uint cur, out uint mx);
+                        return new DdcFeatureReading(ok, cur, 0, mx);
+                    },
+                    DdcPauseAsync).ConfigureAwait(false);
             }
             catch
             {
