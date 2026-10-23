@@ -59,6 +59,10 @@ namespace KeyPulse
             BuildUi();
 
             PointerPressed += OnWindowPointerPressed;
+            AddHandler(PointerPressedEvent, OnListInteractionPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+            AddHandler(PointerReleasedEvent, (_, _) => OnListInteractionEnded(clearPressedSlider: true), RoutingStrategies.Tunnel, handledEventsToo: true);
+            AddHandler(LostFocusEvent, (_, _) => OnListInteractionEnded(clearPressedSlider: false), RoutingStrategies.Bubble, handledEventsToo: true);
+            Deactivated += (_, _) => OnListInteractionEnded(clearPressedSlider: true);
             KeyDown += OnWindowKeyDown;
             Opened += OnWindowOpened;
             Closing += (_, _) =>
@@ -180,8 +184,14 @@ namespace KeyPulse
 
         public static void OpenWindow(Window? owner = null)
         {
-            Dispatcher.UIThread.Post(() =>
+            Dispatcher.UIThread.Post(async () =>
             {
+                if (!ScreenBrightnessService.IsFeatureActive)
+                {
+                    bool accepted = await ScreenBrightnessService.ShowDisclaimerDialogAsync(owner);
+                    if (!accepted) return;
+                }
+
                 if (_instance != null)
                 {
                     if (_instance.WindowState == WindowState.Minimized)
@@ -1394,12 +1404,28 @@ namespace KeyPulse
             return border;
         }
 
+        private string? _directHotkeysSignature;
+        private bool _directHotkeysRebuildPending;
+
         private void RenderDirectHotkeysList()
         {
             if (_directHotkeysStack == null) return;
-            _directHotkeysStack.Children.Clear();
 
             var cfg = ScreenBrightnessService.LoadConfig();
+            string signature = ScreenBrightnessListReconciler.ComputeDirectHotkeysSignature(cfg);
+            switch (ScreenBrightnessListReconciler.DecideDirectHotkeys(_directHotkeysSignature, signature, IsUserInteractingWithin(_directHotkeysStack)))
+            {
+                case ListReconcileAction.None:
+                    _directHotkeysRebuildPending = false;
+                    return;
+                case ListReconcileAction.DeferRebuild:
+                    _directHotkeysRebuildPending = true;
+                    return;
+            }
+
+            _directHotkeysRebuildPending = false;
+            _directHotkeysSignature = signature;
+            _directHotkeysStack.Children.Clear();
             if (cfg.DirectHotkeys == null || cfg.DirectHotkeys.Count == 0)
             {
                 var emptyBlock = new TextBlock
@@ -1417,6 +1443,33 @@ namespace KeyPulse
             {
                 var dh = cfg.DirectHotkeys[idx];
                 _directHotkeysStack.Children.Add(CreateDirectHotkeyRow(dh, cfg, idx));
+            }
+        }
+
+        /// <summary>
+        /// Writes a row's instant-hotkey fields into the CURRENT config (matched by Id) instead of saving the row's
+        /// possibly stale snapshot, then records the new list signature so the edit itself never triggers a rebuild.
+        /// </summary>
+        private void PersistDirectHotkey(ScreenDirectHotkey dh)
+        {
+            var cfg = ScreenBrightnessService.LoadConfig();
+            var live = cfg.DirectHotkeys.FirstOrDefault(d => d.Id == dh.Id);
+            if (live == null) return;
+            live.TargetSlotIndex = dh.TargetSlotIndex;
+            live.Brightness = dh.Brightness;
+            live.Contrast = dh.Contrast;
+            live.LockRatio = dh.LockRatio;
+            live.Hotkey = dh.Hotkey;
+            ScreenBrightnessService.SaveConfig(cfg);
+            _directHotkeysSignature = ScreenBrightnessListReconciler.ComputeDirectHotkeysSignature(ScreenBrightnessService.LoadConfig());
+        }
+
+        private static void RemoveDirectHotkey(string id)
+        {
+            var cfg = ScreenBrightnessService.LoadConfig();
+            if (cfg.DirectHotkeys.RemoveAll(d => d.Id == id) > 0)
+            {
+                ScreenBrightnessService.SaveConfig(cfg);
             }
         }
 
@@ -1476,7 +1529,7 @@ namespace KeyPulse
             targetCombo.SelectionChanged += (_, _) =>
             {
                 dh.TargetSlotIndex = targetCombo.SelectedIndex == 0 ? -1 : targetCombo.SelectedIndex - 1;
-                ScreenBrightnessService.SaveConfig(cfg);
+                PersistDirectHotkey(dh);
             };
             targetStack.Children.Add(targetCombo);
             Grid.SetColumn(targetStack, 0);
@@ -1575,7 +1628,7 @@ namespace KeyPulse
                     cSlider.Value = val;
                     cVal.Text = $"{val}%";
                 }
-                ScreenBrightnessService.SaveConfig(cfg);
+                PersistDirectHotkey(dh);
             };
             cSlider.PropertyChanged += (_, pe) =>
             {
@@ -1583,7 +1636,7 @@ namespace KeyPulse
                 int val = (int)Math.Round(cSlider.Value);
                 dh.Contrast = val;
                 cVal.Text = $"{val}%";
-                ScreenBrightnessService.SaveConfig(cfg);
+                PersistDirectHotkey(dh);
             };
             lockChk.IsCheckedChanged += (_, _) =>
             {
@@ -1597,7 +1650,7 @@ namespace KeyPulse
                     cSlider.Value = dh.Brightness;
                     cVal.Text = $"{dh.Brightness}%";
                 }
-                ScreenBrightnessService.SaveConfig(cfg);
+                PersistDirectHotkey(dh);
             };
             cStack.Children.Add(lockChk);
             cRow.Children.Add(cSlider);
@@ -1635,7 +1688,7 @@ namespace KeyPulse
             AttachHotkeyRecorder(hkBox, combo =>
             {
                 dh.Hotkey = combo;
-                ScreenBrightnessService.SaveConfig(cfg);
+                PersistDirectHotkey(dh);
                 ScreenBrightnessService.RegisterBrightnessHotkeys();
                 SetStatus(string.IsNullOrWhiteSpace(combo)
                     ? "Cleared shortcut for instant preset."
@@ -1654,7 +1707,7 @@ namespace KeyPulse
             {
                 hkBox.Text = string.Empty;
                 dh.Hotkey = string.Empty;
-                ScreenBrightnessService.SaveConfig(cfg);
+                PersistDirectHotkey(dh);
                 ScreenBrightnessService.RegisterBrightnessHotkeys();
                 SetStatus("Cleared instant shortcut.", true);
             };
@@ -1694,8 +1747,7 @@ namespace KeyPulse
             delBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                cfg.DirectHotkeys.Remove(dh);
-                ScreenBrightnessService.SaveConfig(cfg);
+                RemoveDirectHotkey(dh.Id);
                 ScreenBrightnessService.RegisterBrightnessHotkeys();
                 RenderDirectHotkeysList();
                 SetStatus("Deleted instant hotkey.", true);
@@ -1856,38 +1908,230 @@ namespace KeyPulse
             SetStatus($"Added preset \"{newProfile.Name}\".", true);
         }
 
+        /// <summary>
+        /// Controls of one rendered preset card, kept so state changes can update it in place instead of rebuilding.
+        /// </summary>
+        private sealed class ProfileRowHandle
+        {
+            public ProfileRowView View = null!;
+            public Border Card = null!;
+            public TextBox NameBox = null!;
+            public Border StepBadge = null!;
+            public TextBlock StepBadgeText = null!;
+            public Border ActiveBadge = null!;
+            public CheckBox CycleChk = null!;
+            public CheckBox TrayChk = null!;
+            public TextBox HotkeyBox = null!;
+            public Button DeleteBtn = null!;
+            public readonly List<ProfileTargetHandle> Targets = new();
+        }
+
+        private sealed class ProfileTargetHandle
+        {
+            public int SlotIndex;
+            public CheckBox EnableChk = null!;
+            public Slider BrightnessSlider = null!;
+            public TextBlock BrightnessText = null!;
+            public Slider? ContrastSlider;
+            public TextBlock? ContrastText;
+        }
+
+        private List<ProfileRowHandle>? _profileRows;
+        private bool _profilesRebuildPending;
+        private bool _suppressProfileRowEvents;
+        private Slider? _pressedSlider;
+
         private void RenderProfilesList()
         {
             if (_profilesStack == null) return;
-            _profilesStack.Children.Clear();
 
             var cfg = ScreenBrightnessService.LoadConfig();
-            var orderedCycle = ScreenBrightnessService.GetOrderedCycleProfiles(cfg);
+            var orderedCycleIds = ScreenBrightnessService.GetOrderedCycleProfiles(cfg).Select(p => p.Id).ToList();
+            var connectedSlots = ScreenBrightnessService.GetConnectedSlotIndices(cfg);
+            var views = ScreenBrightnessListReconciler.BuildProfileRows(cfg, orderedCycleIds, connectedSlots);
+            var current = _profileRows?.Select(r => r.View).ToList();
 
-            var sorted = cfg.Profiles
-                .OrderBy(p => p.Targets.FirstOrDefault(t => t.SlotIndex == 0)?.Brightness ?? 50)
-                .ThenBy(p => p.Targets.Average(t => t.Brightness))
-                .ToList();
-
-            foreach (var profile in sorted)
+            switch (ScreenBrightnessListReconciler.DecideProfiles(current, views, IsUserInteractingWithin(_profilesStack)))
             {
-                int cycleRank = profile.IncludeInCycle ? orderedCycle.FindIndex(x => x.Id == profile.Id) + 1 : 0;
-                _profilesStack.Children.Add(CreateProfileRow(profile, cfg, cycleRank, orderedCycle.Count));
+                case ListReconcileAction.None:
+                    _profilesRebuildPending = false;
+                    return;
+                case ListReconcileAction.DeferRebuild:
+                    _profilesRebuildPending = true;
+                    return;
+                case ListReconcileAction.UpdateInPlace:
+                    _profilesRebuildPending = false;
+                    for (int i = 0; i < views.Count; i++)
+                    {
+                        ApplyProfileRowView(_profileRows![i], views[i]);
+                    }
+                    return;
+            }
+
+            _profilesRebuildPending = false;
+            _profilesStack.Children.Clear();
+            var rows = new List<ProfileRowHandle>(views.Count);
+            foreach (var view in views)
+            {
+                var row = CreateProfileRow(view);
+                rows.Add(row);
+                _profilesStack.Children.Add(row.Card);
+            }
+            _profileRows = rows;
+        }
+
+        /// <summary>
+        /// True while the user is typing in a text box or dragging a slider inside <paramref name="container"/>;
+        /// rebuilding then would destroy their focus or drag, so structural rebuilds wait.
+        /// </summary>
+        private bool IsUserInteractingWithin(Control? container)
+        {
+            if (container == null) return false;
+            if (_pressedSlider != null && ScreenBrightnessOverlayWindow.IsVisualInside(_pressedSlider, container)) return true;
+            var focused = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement() as Visual;
+            return focused is TextBox && ScreenBrightnessOverlayWindow.IsVisualInside(focused, container);
+        }
+
+        private void OnListInteractionPointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            for (var v = e.Source as Visual; v != null; v = v.Parent as Visual)
+            {
+                if (v is Slider s)
+                {
+                    _pressedSlider = s;
+                    return;
+                }
             }
         }
 
-        private Border CreateProfileRow(ScreenBrightnessProfile profile, ScreenBrightnessConfig cfg, int cycleStepIndex, int totalCycleSteps)
+        /// <summary>Runs a rebuild that was deferred while the user typed or dragged, once that interaction ends.</summary>
+        private void OnListInteractionEnded(bool clearPressedSlider)
         {
-            bool isActive = profile.Id == cfg.LastCycleProfileId;
+            if (clearPressedSlider)
+            {
+                _pressedSlider = null;
+            }
+            if (!_profilesRebuildPending && !_directHotkeysRebuildPending) return;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_profilesRebuildPending && !IsUserInteractingWithin(_profilesStack)) RenderProfilesList();
+                if (_directHotkeysRebuildPending && !IsUserInteractingWithin(_directHotkeysStack)) RenderDirectHotkeysList();
+            });
+        }
+
+        /// <summary>
+        /// Applies a change to the CURRENT config (fresh snapshot, preset found by Id) and saves it, so a card that has
+        /// lived through many in-place updates never writes back a stale snapshot. Returns false if the preset is gone
+        /// or <paramref name="mutate"/> rejected the change.
+        /// </summary>
+        private static bool MutateProfile(string profileId, Func<ScreenBrightnessConfig, ScreenBrightnessProfile, bool> mutate)
+        {
+            var cfg = ScreenBrightnessService.LoadConfig();
+            var profile = cfg.Profiles.FirstOrDefault(p => p.Id == profileId);
+            if (profile == null || !mutate(cfg, profile)) return false;
+            ScreenBrightnessService.SaveConfig(cfg);
+            return true;
+        }
+
+        private static ScreenCycleEntry GetOrAddTarget(ScreenBrightnessProfile profile, int slotIndex)
+        {
+            var t = profile.Targets.FirstOrDefault(x => x.SlotIndex == slotIndex);
+            if (t == null)
+            {
+                t = new ScreenCycleEntry { SlotIndex = slotIndex, Brightness = 50, Contrast = 50, Enabled = true };
+                profile.Targets.Add(t);
+            }
+            return t;
+        }
+
+        private static void ApplyCardActiveStyle(Border card, bool isActive)
+        {
+            card.Background = ScreenBrightnessOverlayWindow.AppBrush(isActive ? "AppSelectedBrush" : "AppPanelRaisedBrush", isActive ? "#1E3A8A" : "#1E293B");
+            card.BorderBrush = ScreenBrightnessOverlayWindow.AppBrush(isActive ? "AppAccentBrush" : "AppBorderBrush", isActive ? "#38BDF8" : "#334155");
+            card.BorderThickness = new Thickness(isActive ? 1.5 : 1);
+        }
+
+        private static void ApplyStepBadgeStyle(Border badge, TextBlock badgeText, ProfileRowView view)
+        {
+            badge.Background = view.IncludeInCycle
+                ? ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#0369A1")
+                : ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155");
+            badgeText.Text = view.BadgeText;
+        }
+
+        private static void ApplyTargetEnabledVisuals(ProfileTargetHandle t, bool enabled, int brightness, int contrast)
+        {
+            t.BrightnessSlider.IsEnabled = enabled;
+            t.BrightnessSlider.Opacity = enabled ? 1.0 : 0.35;
+            t.BrightnessText.Opacity = enabled ? 1.0 : 0.35;
+            t.BrightnessText.Text = enabled ? $"{brightness}%" : "Untouched";
+            if (t.ContrastSlider != null && t.ContrastText != null)
+            {
+                t.ContrastSlider.IsEnabled = enabled;
+                t.ContrastSlider.Opacity = enabled ? 1.0 : 0.35;
+                t.ContrastText.Opacity = enabled ? 1.0 : 0.35;
+                t.ContrastText.Text = enabled ? $"{contrast}%" : "Untouched";
+            }
+        }
+
+        /// <summary>
+        /// Updates an existing card's dynamic parts (active highlight, cycle badge, toggles, values) without recreating it.
+        /// Text boxes the user is typing in and sliders the user is dragging are left untouched.
+        /// </summary>
+        private void ApplyProfileRowView(ProfileRowHandle row, ProfileRowView view)
+        {
+            var old = row.View;
+            row.View = view;
+            _suppressProfileRowEvents = true;
+            try
+            {
+                if (old.IsActive != view.IsActive)
+                {
+                    ApplyCardActiveStyle(row.Card, view.IsActive);
+                    row.ActiveBadge.IsVisible = view.IsActive;
+                }
+                if (old.IncludeInCycle != view.IncludeInCycle || old.BadgeText != view.BadgeText)
+                {
+                    ApplyStepBadgeStyle(row.StepBadge, row.StepBadgeText, view);
+                }
+                if (!row.NameBox.IsFocused && row.NameBox.Text != view.Name) row.NameBox.Text = view.Name;
+                if (!row.HotkeyBox.IsFocused && row.HotkeyBox.Text != view.Hotkey) row.HotkeyBox.Text = view.Hotkey;
+                if (row.CycleChk.IsChecked != view.IncludeInCycle) row.CycleChk.IsChecked = view.IncludeInCycle;
+                if (row.TrayChk.IsChecked != view.ShowInTrayQuickActions) row.TrayChk.IsChecked = view.ShowInTrayQuickActions;
+                if (row.DeleteBtn.IsEnabled != view.CanDelete) row.DeleteBtn.IsEnabled = view.CanDelete;
+
+                for (int i = 0; i < row.Targets.Count && i < view.Targets.Count; i++)
+                {
+                    var t = row.Targets[i];
+                    var tv = view.Targets[i];
+                    bool dragging = ReferenceEquals(_pressedSlider, t.BrightnessSlider) || ReferenceEquals(_pressedSlider, t.ContrastSlider);
+                    if (t.EnableChk.IsChecked != tv.Enabled) t.EnableChk.IsChecked = tv.Enabled;
+                    if (!dragging)
+                    {
+                        if ((int)Math.Round(t.BrightnessSlider.Value) != tv.Brightness) t.BrightnessSlider.Value = tv.Brightness;
+                        if (t.ContrastSlider != null && (int)Math.Round(t.ContrastSlider.Value) != tv.Contrast) t.ContrastSlider.Value = tv.Contrast;
+                        ApplyTargetEnabledVisuals(t, tv.Enabled, tv.Brightness, tv.Contrast);
+                    }
+                }
+            }
+            finally
+            {
+                _suppressProfileRowEvents = false;
+            }
+        }
+
+        private ProfileRowHandle CreateProfileRow(ProfileRowView view)
+        {
+            string profileId = view.Id;
+            var row = new ProfileRowHandle { View = view };
 
             var card = new Border
             {
-                Background = ScreenBrightnessOverlayWindow.AppBrush(isActive ? "AppSelectedBrush" : "AppPanelRaisedBrush", isActive ? "#1E3A8A" : "#1E293B"),
-                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush(isActive ? "AppAccentBrush" : "AppBorderBrush", isActive ? "#38BDF8" : "#334155"),
-                BorderThickness = new Thickness(isActive ? 1.5 : 1),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(14, 12)
             };
+            ApplyCardActiveStyle(card, view.IsActive);
+            row.Card = card;
 
             var rowStack = new StackPanel { Spacing = 9 };
 
@@ -1907,18 +2151,22 @@ namespace KeyPulse
 
             var nameBox = new TextBox
             {
-                Text = profile.Name,
+                Text = view.Name,
                 MaxLength = 32,
                 PlaceholderText = "Preset name (max 32 chars)",
                 VerticalAlignment = VerticalAlignment.Center,
                 Width = 180
             };
             ToolTip.SetTip(nameBox, "Enter a unique preset name up to 32 characters.");
+            row.NameBox = nameBox;
 
             void CommitPresetName()
             {
                 string trimmed = (nameBox.Text ?? string.Empty).Trim();
                 if (trimmed.Length > 32) trimmed = trimmed.Substring(0, 32).Trim();
+                var cfg = ScreenBrightnessService.LoadConfig();
+                var profile = cfg.Profiles.FirstOrDefault(p => p.Id == profileId);
+                if (profile == null) return;
                 if (string.IsNullOrWhiteSpace(trimmed))
                 {
                     nameBox.Text = profile.Name;
@@ -1952,46 +2200,41 @@ namespace KeyPulse
             };
             identityStack.Children.Add(nameBox);
 
-            var badgeText = profile.IncludeInCycle
-                ? (cycleStepIndex == 1 ? $"CYCLE STEP 1/{totalCycleSteps} (LOWEST • FIRST)" : $"CYCLE STEP {cycleStepIndex}/{totalCycleSteps}")
-                : "NOT IN CYCLE";
-
+            var stepBadgeText = new TextBlock
+            {
+                FontSize = 10,
+                FontWeight = FontWeight.Bold,
+                Foreground = Brushes.White
+            };
             var stepBadge = new Border
             {
-                Background = profile.IncludeInCycle
-                    ? ScreenBrightnessOverlayWindow.AppBrush("AppAccentBrush", "#0369A1")
-                    : ScreenBrightnessOverlayWindow.AppBrush("AppBorderBrush", "#334155"),
                 CornerRadius = new CornerRadius(6),
                 Padding = new Thickness(8, 4),
                 VerticalAlignment = VerticalAlignment.Center,
+                Child = stepBadgeText
+            };
+            ApplyStepBadgeStyle(stepBadge, stepBadgeText, view);
+            row.StepBadge = stepBadge;
+            row.StepBadgeText = stepBadgeText;
+            identityStack.Children.Add(stepBadge);
+
+            var activeBadge = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppSuccessBrush", "#10B981"),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(8, 4),
+                VerticalAlignment = VerticalAlignment.Center,
+                IsVisible = view.IsActive,
                 Child = new TextBlock
                 {
-                    Text = badgeText,
+                    Text = "ACTIVE",
                     FontSize = 10,
                     FontWeight = FontWeight.Bold,
                     Foreground = Brushes.White
                 }
             };
-            identityStack.Children.Add(stepBadge);
-
-            if (isActive)
-            {
-                var activeBadge = new Border
-                {
-                    Background = ScreenBrightnessOverlayWindow.AppBrush("AppSuccessBrush", "#10B981"),
-                    CornerRadius = new CornerRadius(6),
-                    Padding = new Thickness(8, 4),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Child = new TextBlock
-                    {
-                        Text = "ACTIVE",
-                        FontSize = 10,
-                        FontWeight = FontWeight.Bold,
-                        Foreground = Brushes.White
-                    }
-                };
-                identityStack.Children.Add(activeBadge);
-            }
+            row.ActiveBadge = activeBadge;
+            identityStack.Children.Add(activeBadge);
 
             Grid.SetColumn(identityStack, 0);
             cardHeaderGrid.Children.Add(identityStack);
@@ -2014,6 +2257,8 @@ namespace KeyPulse
             ToolTip.SetTip(applyBtn, "Apply this preset's brightness and contrast levels to your displays right now.");
             applyBtn.Click += (_, _) =>
             {
+                var profile = ScreenBrightnessService.LoadConfig().Profiles.FirstOrDefault(p => p.Id == profileId);
+                if (profile == null) return;
                 Program.PlaySound("click");
                 for (int i = 0; i < _containers.Length; i++) _containers[i].UserTouched = true;
                 ScreenBrightnessService.ApplyProfileAsync(profile);
@@ -2033,21 +2278,22 @@ namespace KeyPulse
             captureBtn.Click += (_, _) =>
             {
                 Program.PlaySound("click");
-                for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
+                string name = string.Empty;
+                bool saved = MutateProfile(profileId, (_, profile) =>
                 {
-                    var t = profile.Targets.FirstOrDefault(x => x.SlotIndex == i);
-                    if (t == null)
+                    for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
                     {
-                        t = new ScreenCycleEntry { SlotIndex = i, Enabled = true };
-                        profile.Targets.Add(t);
+                        var t = GetOrAddTarget(profile, i);
+                        t.Brightness = (int)Math.Round(_containers[i].BrightnessSlider.Value);
+                        t.Contrast = (int)Math.Round(_containers[i].ContrastSlider.Value);
                     }
-                    t.Brightness = (int)Math.Round(_containers[i].BrightnessSlider.Value);
-                    t.Contrast = (int)Math.Round(_containers[i].ContrastSlider.Value);
-                }
-                ScreenBrightnessService.SaveConfig(cfg);
+                    name = profile.Name;
+                    return true;
+                });
+                if (!saved) return;
                 ScreenBrightnessService.NotifyStateChanged();
                 RenderProfilesList();
-                SetStatus($"Updated \"{profile.Name}\" with current slider levels.", true);
+                SetStatus($"Updated \"{name}\" with current slider levels.", true);
             };
             actionBtns.Children.Add(captureBtn);
 
@@ -2057,26 +2303,30 @@ namespace KeyPulse
                 Classes = { "Danger" },
                 Padding = new Thickness(9, 5),
                 FontSize = 11.5,
-                IsEnabled = cfg.Profiles.Count > 1
+                IsEnabled = view.CanDelete
             };
             ToolTip.SetTip(deleteBtn, "Delete this brightness preset.");
             deleteBtn.Click += async (_, _) =>
             {
-                if (cfg.Profiles.Count <= 1) return;
+                var before = ScreenBrightnessService.LoadConfig();
+                var target = before.Profiles.FirstOrDefault(p => p.Id == profileId);
+                if (target == null || before.Profiles.Count <= 1) return;
                 Program.PlaySound("click");
                 bool confirmed = await ConfirmActionAsync(
                     "Delete Brightness Preset",
-                    $"Are you sure you want to delete the brightness preset \"{profile.Name}\"?\n\nThis cannot be undone.",
+                    $"Are you sure you want to delete the brightness preset \"{target.Name}\"?\n\nThis cannot be undone.",
                     "Delete Preset");
                 if (!confirmed) return;
 
                 Program.PlaySound("close");
-                cfg.Profiles.Remove(profile);
-                ScreenBrightnessService.SaveConfig(cfg);
+                string name = target.Name;
+                bool removed = MutateProfile(profileId, (cfg, profile) => cfg.Profiles.Count > 1 && cfg.Profiles.Remove(profile));
+                if (!removed) return;
                 ScreenBrightnessService.NotifyStateChanged();
                 RenderProfilesList();
-                SetStatus($"Removed preset \"{profile.Name}\".", true);
+                SetStatus($"Removed preset \"{name}\".", true);
             };
+            row.DeleteBtn = deleteBtn;
             actionBtns.Children.Add(deleteBtn);
 
             Grid.SetColumn(actionBtns, 1);
@@ -2100,17 +2350,23 @@ namespace KeyPulse
             var cycleChk = new CheckBox
             {
                 Content = "Include in shortcut cycle",
-                IsChecked = profile.IncludeInCycle,
+                IsChecked = view.IncludeInCycle,
                 FontSize = 11.5
             };
             ToolTip.SetTip(cycleChk, "Include this preset when pressing your 'Cycle Screen Brightness' shortcut key.");
             cycleChk.IsCheckedChanged += (_, _) =>
             {
-                profile.IncludeInCycle = cycleChk.IsChecked == true;
-                ScreenBrightnessService.SaveConfig(cfg);
+                if (_suppressProfileRowEvents) return;
+                bool include = cycleChk.IsChecked == true;
+                MutateProfile(profileId, (_, profile) =>
+                {
+                    profile.IncludeInCycle = include;
+                    return true;
+                });
                 ScreenBrightnessService.NotifyStateChanged();
                 RenderProfilesList();
             };
+            row.CycleChk = cycleChk;
             cycleGroup.Children.Add(cycleChk);
             cycleGroup.Children.Add(CreateHelpBadge("When checked, pressing your Cycle Brightness shortcut key steps through this preset in lowest-to-highest order."));
             togglesRow.Children.Add(cycleGroup);
@@ -2124,30 +2380,40 @@ namespace KeyPulse
             var trayChk = new CheckBox
             {
                 Content = "Pin to tray menu (Max 3)",
-                IsChecked = profile.ShowInTrayQuickActions,
+                IsChecked = view.ShowInTrayQuickActions,
                 FontSize = 11.5
             };
             ToolTip.SetTip(trayChk, "Show this preset in the KeyPulse System Tray menu and Quick Sliders popup (up to 3 presets).");
             trayChk.IsCheckedChanged += (_, _) =>
             {
-                if (trayChk.IsChecked == true)
+                if (_suppressProfileRowEvents) return;
+                bool pin = trayChk.IsChecked == true;
+                bool overLimit = false;
+                MutateProfile(profileId, (cfg, profile) =>
                 {
-                    int currentPinned = cfg.Profiles.Count(p => p.ShowInTrayQuickActions && p.Id != profile.Id);
-                    if (currentPinned >= ScreenBrightnessService.MaxTrayQuickActions)
+                    if (pin)
                     {
-                        trayChk.IsChecked = false;
-                        SetStatus("Maximum 3 presets can be pinned to the System Tray Quick Actions submenu.", false);
-                        return;
+                        int currentPinned = cfg.Profiles.Count(p => p.ShowInTrayQuickActions && p.Id != profile.Id);
+                        if (currentPinned >= ScreenBrightnessService.MaxTrayQuickActions)
+                        {
+                            overLimit = true;
+                            return false;
+                        }
                     }
-                    profile.ShowInTrayQuickActions = true;
-                }
-                else
+                    profile.ShowInTrayQuickActions = pin;
+                    return true;
+                });
+                if (overLimit)
                 {
-                    profile.ShowInTrayQuickActions = false;
+                    _suppressProfileRowEvents = true;
+                    try { trayChk.IsChecked = false; }
+                    finally { _suppressProfileRowEvents = false; }
+                    SetStatus("Maximum 3 presets can be pinned to the System Tray Quick Actions submenu.", false);
+                    return;
                 }
-                ScreenBrightnessService.SaveConfig(cfg);
                 ScreenBrightnessService.NotifyStateChanged();
             };
+            row.TrayChk = trayChk;
             trayGroup.Children.Add(trayChk);
             trayGroup.Children.Add(CreateHelpBadge("Pins this preset as a one-click button inside the System Tray icon menu and Quick Sliders popup (maximum 3 pinned presets)."));
             togglesRow.Children.Add(trayGroup);
@@ -2169,7 +2435,7 @@ namespace KeyPulse
             });
             var hotkeyBox = new TextBox
             {
-                Text = profile.Hotkey,
+                Text = view.Hotkey,
                 PlaceholderText = "e.g. Ctrl+Alt+Divide",
                 Width = 150,
                 FontSize = 11.5,
@@ -2177,11 +2443,17 @@ namespace KeyPulse
             };
             AttachHotkeyRecorder(hotkeyBox, combo =>
             {
-                profile.Hotkey = combo;
-                ScreenBrightnessService.SaveConfig(cfg);
+                string name = string.Empty;
+                MutateProfile(profileId, (_, profile) =>
+                {
+                    profile.Hotkey = combo;
+                    name = profile.Name;
+                    return true;
+                });
                 ScreenBrightnessService.RegisterBrightnessHotkeys();
-                SetStatus(string.IsNullOrWhiteSpace(combo) ? $"Cleared shortcut for \"{profile.Name}\"." : $"Assigned {combo} to \"{profile.Name}\".", true);
+                SetStatus(string.IsNullOrWhiteSpace(combo) ? $"Cleared shortcut for \"{name}\"." : $"Assigned {combo} to \"{name}\".", true);
             });
+            row.HotkeyBox = hotkeyBox;
             var hotkeyClearBtn = new Button
             {
                 Content = "✕",
@@ -2194,10 +2466,15 @@ namespace KeyPulse
             hotkeyClearBtn.Click += (_, _) =>
             {
                 hotkeyBox.Text = string.Empty;
-                profile.Hotkey = string.Empty;
-                ScreenBrightnessService.SaveConfig(cfg);
+                string name = string.Empty;
+                MutateProfile(profileId, (_, profile) =>
+                {
+                    profile.Hotkey = string.Empty;
+                    name = profile.Name;
+                    return true;
+                });
                 ScreenBrightnessService.RegisterBrightnessHotkeys();
-                SetStatus($"Cleared shortcut for \"{profile.Name}\".", true);
+                SetStatus($"Cleared shortcut for \"{name}\".", true);
             };
             hotkeyGroup.Children.Add(hotkeyBox);
             hotkeyGroup.Children.Add(hotkeyClearBtn);
@@ -2205,31 +2482,19 @@ namespace KeyPulse
 
             rowStack.Children.Add(togglesRow);
 
-            var connectedSlots = ScreenBrightnessService.GetConnectedSlotIndices(cfg);
-            if (connectedSlots.Count == 0) connectedSlots.Add(0);
-
             var targetsGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions(string.Join(",", Enumerable.Repeat("*", connectedSlots.Count))),
+                ColumnDefinitions = new ColumnDefinitions(string.Join(",", Enumerable.Repeat("*", view.Targets.Count))),
                 ColumnSpacing = 12
             };
 
-            for (int colIdx = 0; colIdx < connectedSlots.Count; colIdx++)
+            for (int colIdx = 0; colIdx < view.Targets.Count; colIdx++)
             {
-                int slotIdx = connectedSlots[colIdx];
-                var screenCfg = cfg.Screens.First(s => s.SlotIndex == slotIdx);
-                var target = profile.Targets.FirstOrDefault(t => t.SlotIndex == slotIdx);
-                if (target == null)
-                {
-                    target = new ScreenCycleEntry { SlotIndex = slotIdx, Brightness = 50, Contrast = 50, Enabled = true };
-                    profile.Targets.Add(target);
-                }
-                string slotTitle = ScreenBrightnessService.DefaultSlotName(slotIdx);
-                if (!string.IsNullOrWhiteSpace(screenCfg.CustomNickname) &&
-                    !string.Equals(screenCfg.CustomNickname, slotTitle, StringComparison.OrdinalIgnoreCase))
-                {
-                    slotTitle = screenCfg.CustomNickname;
-                }
+                var tv = view.Targets[colIdx];
+                int slotIdx = tv.SlotIndex;
+                string slotTitle = tv.SlotTitle;
+                bool lockRatio = tv.LockRatio;
+                var th = new ProfileTargetHandle { SlotIndex = slotIdx };
 
                 var slotStack = new StackPanel
                 {
@@ -2246,8 +2511,8 @@ namespace KeyPulse
 
                 var enableChk = new CheckBox
                 {
-                    Content = screenCfg.LockRatio ? $"{slotTitle}:" : $"{slotTitle} (Bri):",
-                    IsChecked = target.Enabled,
+                    Content = lockRatio ? $"{slotTitle}:" : $"{slotTitle} (Bri):",
+                    IsChecked = tv.Enabled,
                     FontSize = 11.5,
                     FontWeight = FontWeight.SemiBold,
                     VerticalAlignment = VerticalAlignment.Center
@@ -2258,45 +2523,51 @@ namespace KeyPulse
                 {
                     Minimum = 0,
                     Maximum = 100,
-                    Value = target.Brightness,
+                    Value = tv.Brightness,
                     Width = 105,
-                    IsEnabled = target.Enabled,
-                    Opacity = target.Enabled ? 1.0 : 0.35,
                     VerticalAlignment = VerticalAlignment.Center
                 };
-                ToolTip.SetTip(bSlider, screenCfg.LockRatio
+                ToolTip.SetTip(bSlider, lockRatio
                     ? $"Target Brightness & Contrast for {slotTitle} when this preset is applied."
                     : $"Target Brightness for {slotTitle} when this preset is applied.");
 
                 var bValText = new TextBlock
                 {
-                    Text = target.Enabled ? $"{target.Brightness}%" : "Untouched",
                     FontSize = 11.5,
                     FontWeight = FontWeight.Bold,
                     MinWidth = 36,
-                    Opacity = target.Enabled ? 1.0 : 0.35,
                     Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
                     VerticalAlignment = VerticalAlignment.Center
                 };
+                th.EnableChk = enableChk;
+                th.BrightnessSlider = bSlider;
+                th.BrightnessText = bValText;
 
-                Slider? cSlider = null;
-                TextBlock? cValText = null;
+                // Slider values are persisted on pointer release (and per tick for keyboard / wheel changes) against the current config.
+                void PersistSliderValues()
+                {
+                    int b = (int)Math.Round(bSlider.Value);
+                    int? c = th.ContrastSlider != null ? (int)Math.Round(th.ContrastSlider.Value) : null;
+                    MutateProfile(profileId, (_, profile) =>
+                    {
+                        var t = GetOrAddTarget(profile, slotIdx);
+                        t.Brightness = b;
+                        if (lockRatio) t.Contrast = b;
+                        else if (c.HasValue) t.Contrast = c.Value;
+                        return true;
+                    });
+                }
 
                 enableChk.IsCheckedChanged += (_, _) =>
                 {
-                    target.Enabled = enableChk.IsChecked == true;
-                    bSlider.IsEnabled = target.Enabled;
-                    bSlider.Opacity = target.Enabled ? 1.0 : 0.35;
-                    bValText.Opacity = target.Enabled ? 1.0 : 0.35;
-                    bValText.Text = target.Enabled ? $"{target.Brightness}%" : "Untouched";
-                    if (cSlider != null && cValText != null)
+                    if (_suppressProfileRowEvents) return;
+                    bool enabled = enableChk.IsChecked == true;
+                    ApplyTargetEnabledVisuals(th, enabled, (int)Math.Round(bSlider.Value), th.ContrastSlider != null ? (int)Math.Round(th.ContrastSlider.Value) : 0);
+                    MutateProfile(profileId, (_, profile) =>
                     {
-                        cSlider.IsEnabled = target.Enabled;
-                        cSlider.Opacity = target.Enabled ? 1.0 : 0.35;
-                        cValText.Opacity = target.Enabled ? 1.0 : 0.35;
-                        cValText.Text = target.Enabled ? $"{target.Contrast}%" : "Untouched";
-                    }
-                    ScreenBrightnessService.SaveConfig(cfg);
+                        GetOrAddTarget(profile, slotIdx).Enabled = enabled;
+                        return true;
+                    });
                     ScreenBrightnessService.NotifyStateChanged();
                 };
 
@@ -2304,29 +2575,20 @@ namespace KeyPulse
                 {
                     if (pe.Property != RangeBase.ValueProperty) return;
                     int val = (int)Math.Round(bSlider.Value);
-                    target.Brightness = val;
-                    if (screenCfg.LockRatio)
-                    {
-                        target.Contrast = val;
-                    }
                     bValText.Text = $"{val}%";
+                    if (_suppressProfileRowEvents || ReferenceEquals(_pressedSlider, bSlider)) return;
+                    PersistSliderValues();
                 };
 
-                bSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) =>
-                {
-                    ScreenBrightnessService.SaveConfig(cfg);
-                }, RoutingStrategies.Tunnel);
-                bSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) =>
-                {
-                    ScreenBrightnessService.SaveConfig(cfg);
-                }, RoutingStrategies.Tunnel);
+                bSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => PersistSliderValues(), RoutingStrategies.Tunnel);
+                bSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => PersistSliderValues(), RoutingStrategies.Tunnel);
 
                 bRow.Children.Add(enableChk);
                 bRow.Children.Add(bSlider);
                 bRow.Children.Add(bValText);
                 slotStack.Children.Add(bRow);
 
-                if (!screenCfg.LockRatio)
+                if (!lockRatio)
                 {
                     var cRow = new StackPanel
                     {
@@ -2344,50 +2606,46 @@ namespace KeyPulse
                         VerticalAlignment = VerticalAlignment.Center
                     });
 
-                    cSlider = new Slider
+                    var cSlider = new Slider
                     {
                         Minimum = 0,
                         Maximum = 100,
-                        Value = target.Contrast,
+                        Value = tv.Contrast,
                         Width = 105,
-                        IsEnabled = target.Enabled,
-                        Opacity = target.Enabled ? 1.0 : 0.35,
                         VerticalAlignment = VerticalAlignment.Center
                     };
                     ToolTip.SetTip(cSlider, $"Target Contrast for {slotTitle} when this preset is applied (independent because Sync ratio is off).");
 
-                    cValText = new TextBlock
+                    var cValText = new TextBlock
                     {
-                        Text = target.Enabled ? $"{target.Contrast}%" : "Untouched",
                         FontSize = 11.5,
                         FontWeight = FontWeight.Bold,
                         MinWidth = 36,
-                        Opacity = target.Enabled ? 1.0 : 0.35,
                         Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC"),
                         VerticalAlignment = VerticalAlignment.Center
                     };
+                    th.ContrastSlider = cSlider;
+                    th.ContrastText = cValText;
 
                     cSlider.PropertyChanged += (_, pe) =>
                     {
                         if (pe.Property != RangeBase.ValueProperty) return;
                         int val = (int)Math.Round(cSlider.Value);
-                        target.Contrast = val;
                         cValText.Text = $"{val}%";
+                        if (_suppressProfileRowEvents || ReferenceEquals(_pressedSlider, cSlider)) return;
+                        PersistSliderValues();
                     };
 
-                    cSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) =>
-                    {
-                        ScreenBrightnessService.SaveConfig(cfg);
-                    }, RoutingStrategies.Tunnel);
-                    cSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) =>
-                    {
-                        ScreenBrightnessService.SaveConfig(cfg);
-                    }, RoutingStrategies.Tunnel);
+                    cSlider.AddHandler(InputElement.PointerReleasedEvent, (_, _) => PersistSliderValues(), RoutingStrategies.Tunnel);
+                    cSlider.AddHandler(InputElement.PointerCaptureLostEvent, (_, _) => PersistSliderValues(), RoutingStrategies.Tunnel);
 
                     cRow.Children.Add(cSlider);
                     cRow.Children.Add(cValText);
                     slotStack.Children.Add(cRow);
                 }
+
+                ApplyTargetEnabledVisuals(th, tv.Enabled, tv.Brightness, tv.Contrast);
+                row.Targets.Add(th);
 
                 Grid.SetColumn(slotStack, colIdx);
                 targetsGrid.Children.Add(slotStack);
@@ -2395,7 +2653,7 @@ namespace KeyPulse
 
             rowStack.Children.Add(targetsGrid);
             card.Child = rowStack;
-            return card;
+            return row;
         }
 
         private void UpdateVisibleScreenContainers(IReadOnlyList<ScreenLiveState> states)
@@ -2566,7 +2824,14 @@ namespace KeyPulse
 
         private async void OnWindowOpened(object? sender, EventArgs e)
         {
-            await RefreshHardwareAsync();
+            try
+            {
+                await RefreshHardwareAsync();
+            }
+            catch (Exception ex) when (!ScreenBrightnessService.IsFatalException(ex))
+            {
+                Program.LogDebug($"[ScreenBrightnessWindow] OnWindowOpened failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         private async Task RefreshHardwareAsync()
@@ -2579,8 +2844,9 @@ namespace KeyPulse
             SetStatus("Reading live monitor brightness & contrast...", true);
             try
             {
-                var liveStates = await ScreenBrightnessService.ReadAllScreensLiveAsync(token);
+                var outcome = await ScreenBrightnessService.ReadAllScreensLiveOrCachedAsync(token);
                 if (token.IsCancellationRequested) return;
+                var liveStates = outcome.States;
 
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
@@ -2589,15 +2855,42 @@ namespace KeyPulse
                     foreach (var st in liveStates)
                     {
                         if (st.IsConnected) connected++;
+                        if (st.SlotIndex < 0 || st.SlotIndex >= _containers.Length || _containers[st.SlotIndex] == null) continue;
                         ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
                     }
                     RenderProfilesList();
                     RenderDirectHotkeysList();
-                    SetStatus($"Live hardware read complete ({connected} display{(connected == 1 ? "" : "s")} connected).", true);
+                    if (outcome.IsFallback)
+                        SetStatus("⚠️ Hardware read failed, using cached settings.", false);
+                    else
+                        SetStatus($"Live hardware read complete ({connected} display{(connected == 1 ? "" : "s")} connected).", true);
                 });
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex) when (!ScreenBrightnessService.IsFatalException(ex))
+            {
+                Program.LogDebug($"[ScreenBrightnessWindow] RefreshHardwareAsync failed: {ex.GetType().Name}: {ex.Message}");
+                if (token.IsCancellationRequested) return;
+                try
+                {
+                    await Dispatcher.UIThread.InvokeAsync(() =>
+                    {
+                        var cached = ScreenBrightnessService.GetCachedStatesSafe();
+                        UpdateVisibleScreenContainers(cached);
+                        foreach (var st in cached)
+                        {
+                            if (st.SlotIndex < 0 || st.SlotIndex >= _containers.Length || _containers[st.SlotIndex] == null) continue;
+                            ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
+                        }
+                        SetStatus("⚠️ Hardware read failed, using cached settings.", false);
+                    });
+                }
+                catch (Exception inner) when (!ScreenBrightnessService.IsFatalException(inner))
+                {
+                    Program.LogDebug($"[ScreenBrightnessWindow] Cached fallback render failed: {inner.GetType().Name}: {inner.Message}");
+                }
             }
         }
 
@@ -2605,6 +2898,12 @@ namespace KeyPulse
         {
             void Update()
             {
+                if (!ScreenBrightnessService.IsFeatureActive)
+                {
+                    Close();
+                    return;
+                }
+
                 var cfg = ScreenBrightnessService.LoadConfig();
                 if (_globalLockCheck != null && _globalLockCheck.IsChecked != cfg.GlobalLockBrightnessContrast)
                 {

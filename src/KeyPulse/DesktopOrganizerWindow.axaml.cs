@@ -579,15 +579,14 @@ namespace KeyPulse
                 bool ok = false;
                 string report = string.Empty;
 
-                await Task.Run(() =>
+                var (restoreOk, restoreReport) = await DesktopOrganizerService.RestoreLayoutDetailedAsync(profile, _config.NewIconBehavior);
+                ok = restoreOk;
+                report = restoreReport;
+                if (ok && !_loadResult.IsReadOnly)
                 {
-                    ok = DesktopOrganizerService.RestoreLayout(profile, _config.NewIconBehavior, out report);
-                    if (ok && !_loadResult.IsReadOnly)
-                    {
-                        _config.ActiveProfileId = profile.Id;
-                        DesktopOrganizerService.SaveConfig(_config, out _);
-                    }
-                });
+                    _config.ActiveProfileId = profile.Id;
+                    DesktopOrganizerService.SaveConfig(_config, out _);
+                }
 
                 _isBusy = false;
                 restoreBtn.IsEnabled = true;
@@ -655,21 +654,19 @@ namespace KeyPulse
                 bool saved = false;
                 string err = string.Empty;
 
-                await Task.Run(() =>
+                var (updated, capErr) = await DesktopOrganizerService.CaptureCurrentLayoutDetailedAsync(profile.Name);
+                err = capErr;
+                if (updated != null)
                 {
-                    var updated = DesktopOrganizerService.CaptureCurrentLayout(profile.Name, out err);
-                    if (updated != null)
-                    {
-                        profile.Icons = updated.Icons;
-                        profile.Monitors = updated.Monitors;
-                        profile.DisplayCount = updated.DisplayCount;
-                        profile.IconSpacingX = updated.IconSpacingX;
-                        profile.IconSpacingY = updated.IconSpacingY;
-                        profile.CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
-                        _config.ActiveProfileId = profile.Id;
-                        saved = DesktopOrganizerService.SaveConfig(_config, out err);
-                    }
-                });
+                    profile.Icons = updated.Icons;
+                    profile.Monitors = updated.Monitors;
+                    profile.DisplayCount = updated.DisplayCount;
+                    profile.IconSpacingX = updated.IconSpacingX;
+                    profile.IconSpacingY = updated.IconSpacingY;
+                    profile.CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+                    _config.ActiveProfileId = profile.Id;
+                    saved = DesktopOrganizerService.SaveConfig(_config, out err);
+                }
 
                 _isBusy = false;
                 updateBtn.IsEnabled = true;
@@ -888,20 +885,19 @@ namespace KeyPulse
             bool saved = false;
             string error = string.Empty;
 
-            await Task.Run(() =>
+            var (capturedProfile, capErr) = await DesktopOrganizerService.CaptureCurrentLayoutDetailedAsync(name);
+            profile = capturedProfile;
+            error = capErr;
+            if (profile != null)
             {
-                profile = DesktopOrganizerService.CaptureCurrentLayout(name, out error);
-                if (profile != null)
+                _config.Profiles.Add(profile);
+                _config.ActiveProfileId = profile.Id;
+                saved = DesktopOrganizerService.SaveConfig(_config, out error);
+                if (!saved)
                 {
-                    _config.Profiles.Add(profile);
-                    _config.ActiveProfileId = profile.Id;
-                    saved = DesktopOrganizerService.SaveConfig(_config, out error);
-                    if (!saved)
-                    {
-                        _config.Profiles.Remove(profile);
-                    }
+                    _config.Profiles.Remove(profile);
                 }
-            });
+            }
 
             _isBusy = false;
             if (saveBtn != null)
@@ -935,10 +931,9 @@ namespace KeyPulse
             bool ok = false;
             string report = string.Empty;
 
-            await Task.Run(() =>
-            {
-                ok = DesktopOrganizerService.UndoLastRestore(out report);
-            });
+            var (undoOk, undoReport) = await DesktopOrganizerService.UndoLastRestoreDetailedAsync();
+            ok = undoOk;
+            report = undoReport;
 
             _isBusy = false;
             if (ok)

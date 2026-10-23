@@ -127,8 +127,12 @@ namespace KeyPulse
 
         public static void ShowOverlay()
         {
+            if (!ScreenBrightnessService.IsFeatureActive) return;
+
             Dispatcher.UIThread.Post(() =>
             {
+                if (!ScreenBrightnessService.IsFeatureActive) return;
+
                 if (_instance != null)
                 {
                     try
@@ -853,16 +857,26 @@ namespace KeyPulse
         private async void OnOverlayOpened(object? sender, EventArgs e)
         {
             _openedUtc = DateTime.UtcNow;
-            PositionOrRestoreClamped();
-            _liveReadCts?.Cancel();
-            _liveReadCts?.Dispose();
-            _liveReadCts = new CancellationTokenSource();
-            var token = _liveReadCts.Token;
+            CancellationToken token;
+            try
+            {
+                PositionOrRestoreClamped();
+                _liveReadCts?.Cancel();
+                _liveReadCts?.Dispose();
+                _liveReadCts = new CancellationTokenSource();
+                token = _liveReadCts.Token;
+            }
+            catch (Exception ex) when (!ScreenBrightnessService.IsFatalException(ex))
+            {
+                Program.LogDebug($"[ScreenBrightnessOverlay] OnOverlayOpened setup failed: {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
 
             try
             {
-                var liveStates = await ScreenBrightnessService.ReadAllScreensLiveAsync(token);
+                var outcome = await ScreenBrightnessService.ReadAllScreensLiveOrCachedAsync(token);
                 if (token.IsCancellationRequested || _isClosing) return;
+                var liveStates = outcome.States;
 
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
@@ -872,18 +886,45 @@ namespace KeyPulse
                     foreach (var state in liveStates)
                     {
                         if (state.IsConnected) connectedCount++;
+                        if (state.SlotIndex < 0 || state.SlotIndex >= _containers.Length || _containers[state.SlotIndex] == null) continue;
                         var view = _containers[state.SlotIndex];
                         ScreenContainerBuilder.ApplyLiveStateToContainer(view, state, respectUserTouch: true);
                     }
 
                     if (_headerStatusText != null)
                     {
-                        _headerStatusText.Text = $"{connectedCount} Display{(connectedCount == 1 ? "" : "s")} Active • 250ms Hardware Limiter Ready";
+                        _headerStatusText.Text = outcome.IsFallback
+                            ? "⚠️ Hardware read failed, using cached settings."
+                            : $"{connectedCount} Display{(connectedCount == 1 ? "" : "s")} Active • 250ms Hardware Limiter Ready";
                     }
                 });
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex) when (!ScreenBrightnessService.IsFatalException(ex))
+            {
+                Program.LogDebug($"[ScreenBrightnessOverlay] Live read failed: {ex.GetType().Name}: {ex.Message}");
+                if (token.IsCancellationRequested || _isClosing) return;
+                try
+                {
+                    await Dispatcher.UIThread.InvokeAsync(() =>
+                    {
+                        if (_isClosing) return;
+                        var cached = ScreenBrightnessService.GetCachedStatesSafe();
+                        UpdateVisibleScreenContainers(cached);
+                        foreach (var st in cached)
+                        {
+                            if (st.SlotIndex < 0 || st.SlotIndex >= _containers.Length || _containers[st.SlotIndex] == null) continue;
+                            ScreenContainerBuilder.ApplyLiveStateToContainer(_containers[st.SlotIndex], st, respectUserTouch: true);
+                        }
+                        if (_headerStatusText != null) _headerStatusText.Text = "⚠️ Hardware read failed, using cached settings.";
+                    });
+                }
+                catch (Exception inner) when (!ScreenBrightnessService.IsFatalException(inner))
+                {
+                    Program.LogDebug($"[ScreenBrightnessOverlay] Cached fallback render failed: {inner.GetType().Name}: {inner.Message}");
+                }
             }
         }
 
@@ -892,6 +933,11 @@ namespace KeyPulse
             void Update()
             {
                 if (_isClosing) return;
+                if (!ScreenBrightnessService.IsFeatureActive)
+                {
+                    Close();
+                    return;
+                }
                 var states = ScreenBrightnessService.GetImmediateCachedStates();
                 UpdateVisibleScreenContainers(states);
                 foreach (var st in states)

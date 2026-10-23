@@ -812,7 +812,9 @@ namespace KeyPulse
     public class ScreenBrightnessConfig
     {
         public int SchemaVersion { get; set; } = 1;
-        public bool GlobalLockBrightnessContrast { get; set; } = true;
+        public bool Enabled { get; set; } = false;
+        public bool DisclaimerAccepted { get; set; } = false;
+        public bool GlobalLockBrightnessContrast { get; set; } = false;
         public string LastCycleProfileId { get; set; } = string.Empty;
         public string CycleUpHotkey { get; set; } = string.Empty;
         public string CycleDownHotkey { get; set; } = string.Empty;
@@ -827,6 +829,9 @@ namespace KeyPulse
         public List<ScreenHardwareSetting> Screens { get; set; } = new();
         public List<ScreenBrightnessProfile> Profiles { get; set; } = new();
         public List<ScreenDirectHotkey> DirectHotkeys { get; set; } = new();
+
+        [System.Text.Json.Serialization.JsonIgnore]
+        public bool IsFeatureActive => Enabled && DisclaimerAccepted;
     }
 
     public class ScreenDirectHotkey

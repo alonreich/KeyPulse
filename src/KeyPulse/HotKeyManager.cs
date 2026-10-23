@@ -266,7 +266,28 @@ namespace KeyPulse
             }
         }
 
-        private static bool RunOnThread(Action action)
+        private const int WorkPending = 0;
+        private const int WorkRunning = 1;
+        private const int WorkCancelled = 2;
+        private const int WorkCompleted = 3;
+        private const int WorkAbandoned = 4;
+
+        /// <summary>Hook for tests: overrides the 5,000 ms RunOnThread wait.</summary>
+        public static int RunOnThreadTimeoutMs = 5000;
+
+        /// <summary>Test seam exposing the cancellable queue; not used by application code.</summary>
+        public static bool RunOnThreadForTesting(Action action, Action? onAbandoned = null) => RunOnThread(action, onAbandoned);
+
+        private static bool RunOnThread(Action action) => RunOnThread(action, null);
+
+        /// <summary>
+        /// Runs <paramref name="action"/> on the hotkey thread. The queued item carries an atomic state:
+        /// a caller that times out while the item is still Pending cancels it, so the action never runs;
+        /// a caller that times out while it is Running abandons it, and the thread runs
+        /// <paramref name="onAbandoned"/> to roll back whatever the action did. Either way a timed-out
+        /// (false) call leaves no side effect behind.
+        /// </summary>
+        private static bool RunOnThread(Action action, Action? onAbandoned)
         {
             if (_hWnd == IntPtr.Zero)
             {
@@ -281,41 +302,50 @@ namespace KeyPulse
             }
 
             var signal = new ManualResetEventSlim(false);
-            var completed = false;
+            var state = WorkPending;
 
             _taskQueue.Enqueue(() =>
             {
-                try { action(); }
+                try
+                {
+                    if (Interlocked.CompareExchange(ref state, WorkRunning, WorkPending) != WorkPending)
+                        return;
+
+                    try { action(); }
+                    finally
+                    {
+                        if (Interlocked.CompareExchange(ref state, WorkCompleted, WorkRunning) == WorkAbandoned)
+                        {
+                            try { onAbandoned?.Invoke(); }
+                            catch (Exception ex) { Program.LogDebug($"HotkeyManager.RunOnThread rollback failed: {ex.Message}"); }
+                        }
+                    }
+                }
                 finally
                 {
-                    Volatile.Write(ref completed, true);
-                    try { signal.Set(); } catch { }
+                    signal.Set();
                 }
             });
 
             PostMessage(_hWnd, WM_USER, IntPtr.Zero, IntPtr.Zero);
 
-            if (signal.Wait(5000))
+            if (signal.Wait(RunOnThreadTimeoutMs))
             {
-                signal.Dispose();
-                return true;
+                return Volatile.Read(ref state) == WorkCompleted;
             }
 
-            Program.LogDebug("HotkeyManager.RunOnThread timed out after 5s; the queued work may still run.");
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    signal.Wait(30000);
-                    if (!Volatile.Read(ref completed)) Program.LogCrash("A hotkey thread task never completed.");
-                }
-                catch { }
-                finally { try { signal.Dispose(); } catch { } }
-            });
+            var prior = Interlocked.CompareExchange(ref state, WorkCancelled, WorkPending);
+            if (prior == WorkRunning)
+                prior = Interlocked.CompareExchange(ref state, WorkAbandoned, WorkRunning);
 
+            if (prior == WorkCompleted)
+                return true;
+
+            Program.LogDebug(prior == WorkPending
+                ? "HotkeyManager.RunOnThread timed out; queued work cancelled before execution."
+                : "HotkeyManager.RunOnThread timed out mid-execution; work will be rolled back.");
             return false;
         }
-
         private static Dictionary<int, (uint modifiers, uint vk)> _activeCombos = new();
 
         /// <summary>
@@ -644,6 +674,14 @@ namespace KeyPulse
                 else
                 {
                     lastError = Marshal.GetLastWin32Error();
+                }
+            }, () => {
+                var id = assignedId;
+                if (id != 0)
+                {
+                    UnregisterHotKey(_hWnd, id);
+                    _actions.Remove(id);
+                    _activeCombos.Remove(id);
                 }
             });
 

@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Screen Brightness Atomic Persistence & Non-Truncating LKG Backup**: Replaced ad-hoc temporary file moves and non-atomic `File.Copy` overwrites in `ScreenBrightnessService.SaveConfigInternal` with unified `AtomicFileWriter.WriteAtomic`. Added deterministic `try...finally` temporary file cleanup to prevent orphaned `.tmp` file leaks, eliminated 0-byte truncation risks on `screen_brightness.lkg.json` during sudden power loss, and retained transient lock retry backoff with structured `LogDdc` diagnostics.
+
 ## [v2026.10.20.2010] - 2026-10-20
 
 ### Fixed

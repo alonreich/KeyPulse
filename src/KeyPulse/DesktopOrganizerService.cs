@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -6,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace KeyPulse
 {
@@ -546,39 +548,212 @@ namespace KeyPulse
             return IntPtr.Zero;
         }
 
+        [DllImport("ole32.dll", ExactSpelling = true)]
+        private static extern int CoInitializeEx(IntPtr pvReserved, uint dwCoInit);
+
+        [DllImport("ole32.dll", ExactSpelling = true)]
+        private static extern void CoUninitialize();
+
+        private static readonly BlockingCollection<Action> _staQueue = new();
+        private static Thread? _staThread;
+        private static readonly object _staInitLock = new();
+
+        internal static Thread? StaWorkerThreadForTesting => _staThread;
+
+        private static void EnsureStaWorkerStarted()
+        {
+            if (_staThread != null && _staThread.IsAlive) return;
+            lock (_staInitLock)
+            {
+                if (_staThread != null && _staThread.IsAlive) return;
+                var thread = new Thread(StaWorkerLoop)
+                {
+                    IsBackground = true,
+                    Name = "DesktopOrganizer_STA_Worker"
+                };
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+                _staThread = thread;
+            }
+        }
+
+        private static void StaWorkerLoop()
+        {
+            bool coInit = false;
+            try
+            {
+                int hr = CoInitializeEx(IntPtr.Zero, 2 /* COINIT_APARTMENTTHREADED */);
+                coInit = (hr == 0 || hr == 1);
+
+                foreach (var workItem in _staQueue.GetConsumingEnumerable())
+                {
+                    try
+                    {
+                        workItem();
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.LogDebug($"DesktopOrganizer STA task unhandled exception: {ex}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogCrash($"DesktopOrganizer STA worker thread crashed: {ex}");
+            }
+            finally
+            {
+                if (coInit)
+                {
+                    try { CoUninitialize(); } catch { }
+                }
+            }
+        }
+
+        internal static Task<T> RunInStaAsync<T>(Func<T> action, CancellationToken cancellationToken = default)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return Task.FromCanceled<T>(cancellationToken);
+            }
+
+            if (Thread.CurrentThread == _staThread)
+            {
+                try
+                {
+                    return Task.FromResult(action());
+                }
+                catch (OperationCanceledException)
+                {
+                    return Task.FromCanceled<T>(cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    return Task.FromException<T>(ex);
+                }
+            }
+
+            EnsureStaWorkerStarted();
+
+            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            CancellationTokenRegistration ctr = default;
+            if (cancellationToken.CanBeCanceled)
+            {
+                ctr = cancellationToken.Register(() =>
+                {
+                    tcs.TrySetCanceled(cancellationToken);
+                });
+            }
+
+            void WorkItem()
+            {
+                try
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        tcs.TrySetCanceled(cancellationToken);
+                        return;
+                    }
+
+                    bool coInit = false;
+                    try
+                    {
+                        int hr = CoInitializeEx(IntPtr.Zero, 2 /* COINIT_APARTMENTTHREADED */);
+                        coInit = (hr == 0 || hr == 1);
+
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            tcs.TrySetCanceled(cancellationToken);
+                            return;
+                        }
+
+                        T result = action();
+                        tcs.TrySetResult(result);
+                    }
+                    finally
+                    {
+                        if (coInit)
+                        {
+                            try { CoUninitialize(); } catch { }
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    tcs.TrySetCanceled(cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+                finally
+                {
+                    ctr.Dispose();
+                }
+            }
+
+            try
+            {
+                _staQueue.Add(WorkItem);
+            }
+            catch (Exception ex)
+            {
+                ctr.Dispose();
+                tcs.TrySetException(ex);
+            }
+
+            return tcs.Task;
+        }
+
+        internal static T RunInSta<T>(Func<T> action, CancellationToken cancellationToken = default)
+        {
+            if (Thread.CurrentThread == _staThread)
+            {
+                return action();
+            }
+
+            return RunInStaAsync(action, cancellationToken).GetAwaiter().GetResult();
+        }
+
         private static bool TryGetDesktopFolderView(out IFolderView? folderView, out IShellView? shellView, out IntPtr hwndDesktop)
         {
             folderView = null;
             shellView = null;
             hwndDesktop = IntPtr.Zero;
+
+            IShellWindows? shellWindows = null;
+            object? disp = null;
+            object? browserObj = null;
+            IntPtr pShellView = IntPtr.Zero;
+            IntPtr pFolderView = IntPtr.Zero;
+
             try
             {
                 var clsid = new Guid("9BA05972-F6A8-11CF-A442-00A0C90A8F39");
-                var shellWindows = ComActivation.CreateInstance<IShellWindows>(clsid);
+                shellWindows = ComActivation.CreateInstance<IShellWindows>(clsid);
                 object loc = 0;
                 object empty = Type.Missing;
-                int hr = shellWindows.FindWindowSW(ref loc, ref empty, 8, out int hwnd, 1, out object disp);
+                int hr = shellWindows.FindWindowSW(ref loc, ref empty, 8, out int hwnd, 1, out disp);
                 if (hr != 0 || disp == null) return false;
                 hwndDesktop = (IntPtr)hwnd;
 
                 if (disp is not IServiceProvider sp) return false;
                 var sid = new Guid("4C96BE40-915C-11CF-99D3-00AA004AE837");
                 var iid = typeof(IShellBrowser).GUID;
-                var browserObj = sp.QueryService(ref sid, ref iid);
+                browserObj = sp.QueryService(ref sid, ref iid);
                 if (browserObj is not IShellBrowser browser) return false;
 
-                browser.QueryActiveShellView(out IntPtr pShellView);
+                browser.QueryActiveShellView(out pShellView);
                 if (pShellView == IntPtr.Zero) return false;
 
                 Guid IID_IFolderView = new Guid("cde725b0-ccc9-4519-917e-325d72fab4ce");
-                hr = Marshal.QueryInterface(pShellView, in IID_IFolderView, out IntPtr pFolderView);
+                hr = Marshal.QueryInterface(pShellView, in IID_IFolderView, out pFolderView);
                 shellView = (IShellView)Marshal.GetUniqueObjectForIUnknown(pShellView);
-                Marshal.Release(pShellView);
 
                 if (hr == 0 && pFolderView != IntPtr.Zero)
                 {
                     folderView = (IFolderView)Marshal.GetUniqueObjectForIUnknown(pFolderView);
-                    Marshal.Release(pFolderView);
                     return true;
                 }
             }
@@ -586,40 +761,150 @@ namespace KeyPulse
             {
                 Program.LogDebug($"DesktopOrganizer: COM folder view failed: {ex.Message}");
             }
+            finally
+            {
+                if (pFolderView != IntPtr.Zero) Marshal.Release(pFolderView);
+                if (pShellView != IntPtr.Zero) Marshal.Release(pShellView);
+                if (browserObj != null) { try { Marshal.ReleaseComObject(browserObj); } catch { } }
+                if (disp != null) { try { Marshal.ReleaseComObject(disp); } catch { } }
+                if (shellWindows != null) { try { Marshal.ReleaseComObject(shellWindows); } catch { } }
+            }
             return false;
         }
 
         public static bool IsAutoArrangeActive(out bool isDesktopVisible)
         {
-            isDesktopVisible = true;
-            if (TryGetDesktopFolderView(out var fv, out _, out var hwnd))
+            bool visible = true;
+            bool result = RunInSta(() =>
             {
-                if (hwnd != IntPtr.Zero) isDesktopVisible = IsWindowVisible(hwnd);
-                if (fv != null)
+                IFolderView? fv = null;
+                IShellView? sv = null;
+                try
                 {
-                    return fv.GetAutoArrange() == 0;
+                    if (TryGetDesktopFolderView(out fv, out sv, out var hwnd))
+                    {
+                        if (hwnd != IntPtr.Zero) visible = IsWindowVisible(hwnd);
+                        if (fv != null)
+                        {
+                            return fv.GetAutoArrange() == 0;
+                        }
+                    }
                 }
-            }
+                finally
+                {
+                    if (fv != null) { try { Marshal.ReleaseComObject(fv); } catch { } }
+                    if (sv != null) { try { Marshal.ReleaseComObject(sv); } catch { } }
+                }
 
-            IntPtr listviewHwnd = GetDesktopListView();
-            if (listviewHwnd == IntPtr.Zero) return false;
+                IntPtr listviewHwnd = GetDesktopListView();
+                if (listviewHwnd == IntPtr.Zero) return false;
 
-            isDesktopVisible = IsWindowVisible(listviewHwnd);
-            int style = GetWindowLong(listviewHwnd, GWL_STYLE);
-            return (style & LVS_AUTOARRANGE) != 0;
+                visible = IsWindowVisible(listviewHwnd);
+                int style = GetWindowLong(listviewHwnd, GWL_STYLE);
+                return (style & LVS_AUTOARRANGE) != 0;
+            });
+
+            isDesktopVisible = visible;
+            return result;
+        }
+
+        public static async Task<(bool IsAutoArrange, bool IsDesktopVisible)> IsAutoArrangeActiveDetailedAsync(CancellationToken cancellationToken = default)
+        {
+            bool visible = true;
+            bool isAutoArrange = await RunInStaAsync(() =>
+            {
+                IFolderView? fv = null;
+                IShellView? sv = null;
+                try
+                {
+                    if (TryGetDesktopFolderView(out fv, out sv, out var hwnd))
+                    {
+                        if (hwnd != IntPtr.Zero) visible = IsWindowVisible(hwnd);
+                        if (fv != null)
+                        {
+                            return fv.GetAutoArrange() == 0;
+                        }
+                    }
+                }
+                finally
+                {
+                    if (fv != null) { try { Marshal.ReleaseComObject(fv); } catch { } }
+                    if (sv != null) { try { Marshal.ReleaseComObject(sv); } catch { } }
+                }
+
+                IntPtr listviewHwnd = GetDesktopListView();
+                if (listviewHwnd == IntPtr.Zero) return false;
+
+                visible = IsWindowVisible(listviewHwnd);
+                int style = GetWindowLong(listviewHwnd, GWL_STYLE);
+                return (style & LVS_AUTOARRANGE) != 0;
+            }, cancellationToken).ConfigureAwait(false);
+
+            return (isAutoArrange, visible);
+        }
+
+        public static async Task<bool> IsAutoArrangeActiveAsync(CancellationToken cancellationToken = default)
+        {
+            var (isAutoArrange, _) = await IsAutoArrangeActiveDetailedAsync(cancellationToken).ConfigureAwait(false);
+            return isAutoArrange;
         }
 
         public static DesktopLayoutProfile? CaptureCurrentLayout(string profileName, out string error, CancellationToken cancellationToken = default)
         {
-            error = string.Empty;
-            if (!TryGetDesktopFolderView(out var folderView, out _, out _) || folderView == null)
+            string capturedError = string.Empty;
+            try
             {
-                error = "Could not connect to Windows Desktop Shell COM interface.";
+                var result = RunInSta(() => CaptureCurrentLayoutCore(profileName, out capturedError, cancellationToken), cancellationToken);
+                error = capturedError;
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                error = "Operation cancelled.";
+                return null;
+            }
+        }
+
+        public static async Task<(DesktopLayoutProfile? Profile, string Error)> CaptureCurrentLayoutDetailedAsync(string profileName, CancellationToken cancellationToken = default)
+        {
+            string capturedError = string.Empty;
+            try
+            {
+                var result = await RunInStaAsync(() => CaptureCurrentLayoutCore(profileName, out capturedError, cancellationToken), cancellationToken).ConfigureAwait(false);
+                return (result, capturedError);
+            }
+            catch (OperationCanceledException)
+            {
+                return (null, "Operation cancelled.");
+            }
+        }
+
+        public static async Task<DesktopLayoutProfile?> CaptureCurrentLayoutAsync(string profileName, CancellationToken cancellationToken = default)
+        {
+            var (profile, _) = await CaptureCurrentLayoutDetailedAsync(profileName, cancellationToken).ConfigureAwait(false);
+            return profile;
+        }
+
+        private static DesktopLayoutProfile? CaptureCurrentLayoutCore(string profileName, out string error, CancellationToken cancellationToken = default)
+        {
+            error = string.Empty;
+            if (cancellationToken.IsCancellationRequested)
+            {
+                error = "Operation cancelled.";
                 return null;
             }
 
+            IFolderView? folderView = null;
+            IShellView? shellView = null;
+
             try
             {
+                if (!TryGetDesktopFolderView(out folderView, out shellView, out _) || folderView == null)
+                {
+                    error = "Could not connect to Windows Desktop Shell COM interface.";
+                    return null;
+                }
+
                 var monitors = GetMonitors();
                 var profile = new DesktopLayoutProfile
                 {
@@ -710,11 +995,58 @@ namespace KeyPulse
                 error = "Failed to capture icons: " + ex.Message;
                 return null;
             }
+            finally
+            {
+                if (folderView != null) { try { Marshal.ReleaseComObject(folderView); } catch { } }
+                if (shellView != null) { try { Marshal.ReleaseComObject(shellView); } catch { } }
+            }
         }
 
         public static bool RestoreLayout(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, out string report, CancellationToken cancellationToken = default, bool isUndoOperation = false)
         {
+            string capturedReport = string.Empty;
+            try
+            {
+                bool result = RunInSta(() => RestoreLayoutCore(profile, behavior, out capturedReport, cancellationToken, isUndoOperation), cancellationToken);
+                report = capturedReport;
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                report = "Restore cancelled.";
+                return false;
+            }
+        }
+
+        public static async Task<(bool Success, string Report)> RestoreLayoutDetailedAsync(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, CancellationToken cancellationToken = default, bool isUndoOperation = false)
+        {
+            string capturedReport = string.Empty;
+            try
+            {
+                bool result = await RunInStaAsync(() => RestoreLayoutCore(profile, behavior, out capturedReport, cancellationToken, isUndoOperation), cancellationToken).ConfigureAwait(false);
+                return (result, capturedReport);
+            }
+            catch (OperationCanceledException)
+            {
+                return (false, "Restore cancelled.");
+            }
+        }
+
+        public static async Task<bool> RestoreLayoutAsync(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, CancellationToken cancellationToken = default, bool isUndoOperation = false)
+        {
+            var (success, _) = await RestoreLayoutDetailedAsync(profile, behavior, cancellationToken, isUndoOperation).ConfigureAwait(false);
+            return success;
+        }
+
+        private static bool RestoreLayoutCore(DesktopLayoutProfile profile, UnsavedIconBehavior behavior, out string report, CancellationToken cancellationToken = default, bool isUndoOperation = false)
+        {
             report = string.Empty;
+            if (cancellationToken.IsCancellationRequested)
+            {
+                report = "Restore cancelled.";
+                return false;
+            }
+
             if (profile == null || profile.Icons == null || profile.Icons.Count == 0)
             {
                 report = "The selected profile contains no icon positions.";
@@ -745,14 +1077,18 @@ namespace KeyPulse
                 preRestoreSnapshot = CaptureCurrentLayout("Pre-Restore Snapshot (" + DateTime.Now.ToString("HH:mm:ss") + ")", out _, cancellationToken);
             }
 
-            if (!TryGetDesktopFolderView(out var folderView, out var shellView, out var hwndDesktop) || folderView == null)
-            {
-                report = "Could not connect to Windows Desktop Shell COM interface.";
-                return false;
-            }
+            IFolderView? folderView = null;
+            IShellView? shellView = null;
+            IntPtr hwndDesktop = IntPtr.Zero;
 
             try
             {
+                if (!TryGetDesktopFolderView(out folderView, out shellView, out hwndDesktop) || folderView == null)
+                {
+                    report = "Could not connect to Windows Desktop Shell COM interface.";
+                    return false;
+                }
+
                 var primaryMonitor = monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
                 folderView.ItemCount(0, out int itemCount);
 
@@ -874,7 +1210,11 @@ namespace KeyPulse
 
                         for (int k = 0; k < unsavedItems.Count; k++)
                         {
-                            if (cancellationToken.IsCancellationRequested) break;
+                            if (cancellationToken.IsCancellationRequested)
+                            {
+                                report = "Restore cancelled.";
+                                return false;
+                            }
 
                             int r = k / cols;
                             int c = k % cols;
@@ -916,7 +1256,11 @@ namespace KeyPulse
 
                         for (int k = 0; k < unsavedItems.Count; k++)
                         {
-                            if (cancellationToken.IsCancellationRequested) break;
+                            if (cancellationToken.IsCancellationRequested)
+                            {
+                                report = "Restore cancelled.";
+                                return false;
+                            }
 
                             int sideAttempts = 0;
                             while (occupiedSlots.Contains((curX, curY)) && sideAttempts < maxSideSlots)
@@ -974,6 +1318,11 @@ namespace KeyPulse
                 report = "Restore failed: " + ex.Message;
                 return false;
             }
+            finally
+            {
+                if (folderView != null) { try { Marshal.ReleaseComObject(folderView); } catch { } }
+                if (shellView != null) { try { Marshal.ReleaseComObject(shellView); } catch { } }
+            }
         }
 
         public static bool UndoLastRestore(out string report, CancellationToken cancellationToken = default)
@@ -992,6 +1341,30 @@ namespace KeyPulse
             }
 
             return false;
+        }
+
+        public static async Task<(bool Success, string Report)> UndoLastRestoreDetailedAsync(CancellationToken cancellationToken = default)
+        {
+            if (_lastUndoSnapshot == null)
+            {
+                return (false, "No recent restore to undo.");
+            }
+
+            var snapshot = _lastUndoSnapshot;
+            var (success, report) = await RestoreLayoutDetailedAsync(snapshot, UnsavedIconBehavior.LeaveInPlace, cancellationToken, isUndoOperation: true).ConfigureAwait(false);
+            if (success)
+            {
+                _lastUndoSnapshot = null;
+                return (true, report);
+            }
+
+            return (false, report);
+        }
+
+        public static async Task<bool> UndoLastRestoreAsync(CancellationToken cancellationToken = default)
+        {
+            var (success, _) = await UndoLastRestoreDetailedAsync(cancellationToken).ConfigureAwait(false);
+            return success;
         }
 
         public static void HandleDisplayChangeDebounced()

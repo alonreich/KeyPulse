@@ -8,6 +8,35 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Desktop Organizer UI Thread Non-Blocking STA Dispatcher (`DesktopOrganizerService.cs`, `DesktopOrganizerWindow.axaml.cs`, `project_structure.txt`)
+- **Dedicated Background STA Worker Dispatcher (`DesktopOrganizerService.cs`)**:
+  - Removed short-circuit `if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA) return action();` which previously executed out-of-process Shell COM calls directly on Avalonia's UI dispatcher thread whenever invoked from the UI.
+  - Implemented a dedicated, serialized background STA worker thread (`DesktopOrganizer_STA_Worker`) and work queue (`BlockingCollection<Action>`) via `RunInSta<T>` / `RunInStaAsync<T>` with `TaskCompletionSource<T>`, completely isolating Shell COM IPC (`IShellWindows`, `IFolderView`, `IShellBrowser`, `SelectAndPositionItems`) from the UI dispatcher.
+  - Added re-entrancy bypass on the worker thread (`if (Thread.CurrentThread == _staThread) return action();`) preventing deadlocks when nested operations execute (e.g. `RestoreLayoutCore` invoking `IsAutoArrangeActive` or `CaptureCurrentLayout`).
+  - Preserved COM apartment initialization flags (`CoInitializeEx` with `COINIT_APARTMENTTHREADED = 2`) and balanced cleanup (`CoUninitialize`) in guaranteed `finally` scopes.
+  - Integrated cooperative `CancellationToken` checks at task dequeue, entry points, and throughout icon position loops, immediately aborting execution on cancellation without PIDL memory leaks.
+  - Provided non-blocking asynchronous APIs (`CaptureCurrentLayoutAsync`, `CaptureCurrentLayoutDetailedAsync`, `RestoreLayoutAsync`, `RestoreLayoutDetailedAsync`, `UndoLastRestoreAsync`, `UndoLastRestoreDetailedAsync`, `IsAutoArrangeActiveAsync`, `IsAutoArrangeActiveDetailedAsync`) while maintaining full synchronous wrapper compatibility.
+- **UI Offloading & Frame Rate Retention (`DesktopOrganizerWindow.axaml.cs`)**:
+  - Refactored `restoreBtn.Click`, `updateBtn.Click`, `SaveCurrentLayout_Click`, and `Undo_Click` in `DesktopOrganizerWindow` to await `RestoreLayoutDetailedAsync`, `CaptureCurrentLayoutDetailedAsync`, and `UndoLastRestoreDetailedAsync` directly, eliminating `Task.Run` overhead and preventing UI thread frame drops.
+- **Automated Regression Test Suite (`tests/KeyPulse.Tests/DesktopOrganizerUiThreadComBlockTests.cs`)**:
+  - Added 14 unit tests validating STA offloading from simulated UI dispatcher threads, background worker thread configuration, nested re-entrancy without deadlocks, non-blocking asynchronous execution, cancellation token abort, and exception re-throwing semantics.
+
+### Clipboard Thread Affinity & HWND Leak Remediation (`InputSimulator.cs`, `project_structure.txt`)
+- **Persistent Dedicated Window Handle Binding (`InputSimulator.cs`)**:
+  - Eliminated ephemeral thread message window instantiation via `CreateWindowEx(0, "Static", "KeyPulseClipboardWindow", ...)`.
+  - Refactored `GetClipboardOwnerHwnd()` to prioritize `HotkeyManager.MessageWindowHandle`, which is hosted on a persistent STA Win32 message-loop thread with process lifecycle.
+  - Added thread-safe `_clipboardHwndLock` synchronization and `IsWindow` validation to detect and discard defunct/destroyed window handles.
+  - Implemented safe fallback to `IntPtr.Zero` (binding clipboard ownership to the current task/process) if `HotkeyManager.MessageWindowHandle` is not yet initialized or when the window handle is destroyed.
+  - Enhanced `SafeOpenClipboard()` with exponential backoff (5 ms to 40 ms) and secondary fallback to task-level ownership (`OpenClipboard(IntPtr.Zero)`) if window-bound open fails, completely preventing `ERROR_INVALID_WINDOW_HANDLE` (1400) failures and clipboard paste starvation.
+  - Added comprehensive test suite in `tests/KeyPulse.Tests/ClipboardThreadHwndLeakTests.cs` validating handle binding, defunct handle recovery, thread pool concurrency, paste injection, and zero GDI/USER object handle leaks.
+
+### Screen Brightness Atomic Persistence & Backup Resilience (`ScreenBrightnessService.cs`, `AtomicFileWriter.cs`)
+- **Atomic File Swapping via `AtomicFileWriter.WriteAtomic`**:
+  - Refactored `ScreenBrightnessService.SaveConfigInternal` to utilize `AtomicFileWriter.WriteAtomic` for configuration file persistence (`screen_brightness.json`) and Last-Known-Good backup rotation (`screen_brightness.lkg.json`), removing unsafe `File.Copy(..., overwrite: true)` calls that risked 0-byte truncation on power loss.
+  - Added deterministic `try...finally` cleanup in `AtomicFileWriter.WriteAtomic` and `SaveConfigInternal` (`CleanupOrphanedTempFiles`) ensuring failed or stale staging `.tmp` files are never leaked on disk.
+  - Preserved a 5-attempt retry loop with exponential backoff (`40 * (attempt + 1)` ms) and structured diagnostic logging via `LogDdc` for transient file lock contention.
+  - Added comprehensive test coverage in `tests/KeyPulse.Tests/ScreenBrightnessAtomicPersistenceTests.cs`.
+
 ### Screen Brightness, Desktop Layout Inline Editing & Input Simulation Reliability (`ScreenBrightnessService.cs`, `App.axaml.cs`, `DesktopOrganizerWindow.axaml.cs`, `InputSimulator.cs`)
 - **Brightness Step Hotkeys Persistence (`ScreenBrightnessService.cs`, `App.axaml.cs`)**:
   - Removed early return bypassing `SaveConfig` in `TriggerBrightnessStep` when `cfg.LockMonitorDifferential || connectedSlots.Count == 1`.

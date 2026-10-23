@@ -453,44 +453,71 @@ namespace KeyPulse
         private const ushort VK_RETURN = 0x0D;
         private const ushort VK_TAB = 0x09;
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr CreateWindowEx(
-           uint dwExStyle, string lpClassName, string lpWindowName, uint dwStyle,
-           int x, int y, int nWidth, int nHeight, IntPtr hWndParent, IntPtr hMenu,
-           IntPtr hInstance, IntPtr lpParam);
-
         [DllImport("user32.dll")]
         private static extern uint GetClipboardSequenceNumber();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindow(IntPtr hWnd);
 
         private static readonly object _clipboardHwndLock = new();
         private static IntPtr _clipboardHwnd = IntPtr.Zero;
 
         private static IntPtr GetClipboardOwnerHwnd()
         {
-            if (_clipboardHwnd != IntPtr.Zero) return _clipboardHwnd;
+            var cached = _clipboardHwnd;
+            if (cached != IntPtr.Zero && IsWindow(cached)) return cached;
+
             lock (_clipboardHwndLock)
             {
-                if (_clipboardHwnd == IntPtr.Zero)
+                if (_clipboardHwnd != IntPtr.Zero && IsWindow(_clipboardHwnd))
                 {
-                    _clipboardHwnd = CreateWindowEx(0, "Static", "KeyPulseClipboardWindow", 0, 0, 0, 0, 0, new IntPtr(-3), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-                    if (_clipboardHwnd == IntPtr.Zero)
-                    {
-                        _clipboardHwnd = HotkeyManager.MessageWindowHandle;
-                    }
+                    return _clipboardHwnd;
                 }
-                return _clipboardHwnd;
+
+                _clipboardHwnd = IntPtr.Zero;
+
+                var hotkeyHwnd = HotkeyManager.MessageWindowHandle;
+                if (hotkeyHwnd != IntPtr.Zero && IsWindow(hotkeyHwnd))
+                {
+                    _clipboardHwnd = hotkeyHwnd;
+                    return _clipboardHwnd;
+                }
+
+                return IntPtr.Zero;
             }
         }
 
         private static bool SafeOpenClipboard()
         {
-            var hWnd = GetClipboardOwnerHwnd();
+            int delayMs = 5;
             for (int i = 0; i < 20; i++)
             {
+                var hWnd = GetClipboardOwnerHwnd();
                 if (OpenClipboard(hWnd)) return true;
-                Thread.Sleep(15);
+                if (hWnd != IntPtr.Zero && OpenClipboard(IntPtr.Zero)) return true;
+                Thread.Sleep(delayMs);
+                delayMs = Math.Min(delayMs * 2, 40);
             }
             return false;
+        }
+
+        internal static IntPtr ClipboardOwnerHwndForTesting => GetClipboardOwnerHwnd();
+        internal static bool SafeOpenClipboardForTesting() => SafeOpenClipboard();
+        internal static bool SetWin32ClipboardTextForTesting(string text) => SetWin32ClipboardText(text);
+        internal static void ResetClipboardOwnerHwndForTesting()
+        {
+            lock (_clipboardHwndLock)
+            {
+                _clipboardHwnd = IntPtr.Zero;
+            }
+        }
+        internal static void SetClipboardOwnerHwndForTesting(IntPtr testHwnd)
+        {
+            lock (_clipboardHwndLock)
+            {
+                _clipboardHwnd = testHwnd;
+            }
         }
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -575,9 +602,9 @@ namespace KeyPulse
         /// EVERY press. Anything over the budget is reported through the same warning the user
         /// already sees for content Windows will not let KeyPulse put back.
         /// </summary>
-        private const long ClipboardBackupBudgetBytes = 96L * 1024 * 1024;
+        private const long ClipboardBackupBudgetBytes = 16L * 1024 * 1024;
 
-        private const long ClipboardSingleFormatLimitBytes = 64L * 1024 * 1024;
+        private const long ClipboardSingleFormatLimitBytes = 16L * 1024 * 1024;
 
         private static ClipboardSnapshot BackupClipboard()
         {
@@ -796,17 +823,17 @@ namespace KeyPulse
                 }
                 else if (observedForeignReader)
                 {
-                    Thread.Sleep(20);
+                    Thread.Sleep(10);
                     return;
                 }
 
                 if (stopwatch.ElapsedMilliseconds < 30)
                 {
-                    Thread.Sleep(1);
+                    Thread.Sleep(5);
                 }
                 else
                 {
-                    Thread.Sleep(5);
+                    Thread.Sleep(15);
                 }
             }
 
@@ -876,7 +903,7 @@ namespace KeyPulse
                     return false;
                 }
 
-                WaitForClipboardToBeConsumed(2000);
+                WaitForClipboardToBeConsumed(300);
 
                 return true;
             }

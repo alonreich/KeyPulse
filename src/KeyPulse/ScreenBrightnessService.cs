@@ -1,9 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,7 +25,7 @@ namespace KeyPulse
         public string ModelName { get; set; } = string.Empty;
         public int Brightness { get; set; } = 50;
         public int Contrast { get; set; } = 50;
-        public bool LockRatio { get; set; } = true;
+        public bool LockRatio { get; set; } = false;
         public bool IsLinkedToNext { get; set; }
         public bool IsConnected { get; set; }
         public bool IsPrimary { get; set; }
@@ -39,7 +40,18 @@ namespace KeyPulse
     {
         public const int MaxScreens = 3;
         public const int MaxTrayQuickActions = 3;
-        private const int ThrottleIntervalMs = 250;
+        private const int VesaInterCommandDelayMs = DdcWriteSafety.CommandSpacingMs;
+        private static readonly SemaphoreSlim BusLock = new(1, 1);
+        private static void LogDdc(string message) => Program.LogDebug(message);
+        private static string FormatWin32Error(int err) => new System.ComponentModel.Win32Exception(err).Message;
+
+        public static void InvalidateConfigCache()
+        {
+            lock (ConfigLock)
+            {
+                _cachedConfig = null;
+            }
+        }
 
         private static string AppDataFolder => ConfigStore.ConfigDirectory;
 
@@ -49,10 +61,26 @@ namespace KeyPulse
         private static readonly object ConfigLock = new();
         private static ScreenBrightnessConfig? _cachedConfig;
 
+        internal static bool? ForceActiveForTesting { get; set; }
+
+        public static bool IsFeatureActive
+        {
+            get
+            {
+                if (ForceActiveForTesting.HasValue) return ForceActiveForTesting.Value;
+                if (ConfigStore.IsTestExecutionEnvironment()) return true;
+                lock (ConfigLock)
+                {
+                    return GetLiveConfigLocked().IsFeatureActive;
+                }
+            }
+        }
+
         private static readonly object CycleLock = new();
         private static readonly object HardwareWriteLock = new();
         private static CancellationTokenSource? _cycleCts;
         private static bool _hasStartedCycleInSession;
+        private static DateTime _lastCycleRequestUtc = DateTime.MinValue;
 
         private sealed class ScreenWriteThrottle
         {
@@ -62,10 +90,30 @@ namespace KeyPulse
             public int LastWrittenBrightness = -1;
             public int LastWrittenContrast = -1;
             public DateTime LastWriteUtc = DateTime.MinValue;
+            public DateTime LastRequestUtc = DateTime.MinValue;
+            public DateTime FirstPendingUtc = DateTime.MinValue;
             public bool FlushScheduled;
+            public int ConsecutiveFailures;
         }
 
         private static readonly ConcurrentDictionary<int, ScreenWriteThrottle> Throttles = new();
+
+        /// <summary>
+        /// Test seam: replaces the physical write inside <see cref="WriteSingleScreenHardwareWithRetry"/>
+        /// (slot, brightness, contrast, writeBrightness, writeContrast) -> success.
+        /// </summary>
+        internal static Func<int, int, int, bool, bool, bool>? HardwareWriteOverrideForTesting { get; set; }
+
+        internal static void ResetWriteSchedulerForTesting() => Throttles.Clear();
+
+        internal static bool HasPendingHardwareWritesForTesting => Throttles.Values.Any(t => { lock (t.Sync) return t.FlushScheduled; });
+
+        private static void DdcPause(int ms)
+        {
+            // Fake physical-monitor handles in tests never reach a real I2C bus.
+            if (PhysicalMonitorsProviderForTesting != null) return;
+            Thread.Sleep(ms);
+        }
 
         public static event Action? StateChanged;
 
@@ -80,40 +128,222 @@ namespace KeyPulse
 
         #region Config Persistence
 
+        /// <summary>
+        /// Baseline copy of each handed-out snapshot's per-screen runtime fields, used by <see cref="SaveConfig"/>
+        /// to tell "the caller changed this" apart from "the caller merely still holds an old value".
+        /// </summary>
+        private static readonly ConditionalWeakTable<ScreenBrightnessConfig, ScreenHardwareSetting[]> SnapshotBaselines = new();
+
+        /// <summary>
+        /// Returns the live cached configuration, loading it from disk (primary, then last-known-good backup) if needed.
+        /// The returned instance is PRIVATE to this service: callers must hold <see cref="ConfigLock"/> and must never leak it.
+        /// </summary>
+        private static ScreenBrightnessConfig GetLiveConfigLocked()
+        {
+            if (_cachedConfig != null)
+            {
+                return _cachedConfig;
+            }
+
+            var loaded = TryReadConfigFile(ConfigFilePath) ?? TryReadConfigFile(BackupConfigFilePath);
+            if (loaded == null)
+            {
+                loaded = CreateDefaultConfig();
+                SaveConfigInternal(loaded);
+            }
+            else
+            {
+                NormalizeConfig(loaded);
+            }
+
+            _cachedConfig = loaded;
+            return _cachedConfig;
+        }
+
+        /// <summary>
+        /// Returns an independent deep-copied snapshot of the configuration. Mutating it (including its
+        /// Screens / Profiles / DirectHotkeys collections) never affects the shared cache or other threads;
+        /// call <see cref="SaveConfig"/> to publish changes (copy-on-write).
+        /// </summary>
         public static ScreenBrightnessConfig LoadConfig()
         {
             lock (ConfigLock)
             {
-                if (_cachedConfig != null)
-                {
-                    return _cachedConfig;
-                }
-
-                var loaded = TryReadConfigFile(ConfigFilePath) ?? TryReadConfigFile(BackupConfigFilePath);
-                if (loaded == null)
-                {
-                    loaded = CreateDefaultConfig();
-                    SaveConfigInternal(loaded);
-                }
-                else
-                {
-                    NormalizeConfig(loaded);
-                }
-
-                _cachedConfig = loaded;
-                return _cachedConfig;
+                return CreateSnapshot(GetLiveConfigLocked());
             }
+        }
+
+        private static ScreenBrightnessConfig CreateSnapshot(ScreenBrightnessConfig live)
+        {
+            var snapshot = CloneConfig(live);
+            SnapshotBaselines.AddOrUpdate(snapshot, CloneScreens(live.Screens));
+            return snapshot;
         }
 
         public static bool SaveConfig(ScreenBrightnessConfig config)
         {
             lock (ConfigLock)
             {
-                NormalizeConfig(config);
-                _cachedConfig = config;
-                bool ok = SaveConfigInternal(config);
+                var incoming = CloneConfig(config);
+                MergeUnchangedRuntimeFields(config, incoming);
+                NormalizeConfig(incoming);
+                _cachedConfig = incoming;
+                SnapshotBaselines.AddOrUpdate(config, CloneScreens(incoming.Screens));
+                bool ok = SaveConfigInternal(incoming);
                 return ok;
             }
+        }
+
+        /// <summary>
+        /// A snapshot can be stale by the time it is saved (DDC polling and hotkeys keep updating the live levels).
+        /// Per-screen runtime fields the caller did NOT touch since taking the snapshot keep their current live value,
+        /// so a stale whole-config save can never roll back hardware state; fields the caller changed win.
+        /// </summary>
+        private static void MergeUnchangedRuntimeFields(ScreenBrightnessConfig source, ScreenBrightnessConfig incoming)
+        {
+            var live = _cachedConfig;
+            if (live == null || !SnapshotBaselines.TryGetValue(source, out var baseline)) return;
+
+            foreach (var inc in incoming.Screens)
+            {
+                var b = baseline.FirstOrDefault(x => x.SlotIndex == inc.SlotIndex);
+                var l = live.Screens.FirstOrDefault(x => x.SlotIndex == inc.SlotIndex);
+                if (b == null || l == null) continue;
+
+                if (inc.LastBrightness == b.LastBrightness) inc.LastBrightness = l.LastBrightness;
+                if (inc.LastContrast == b.LastContrast) inc.LastContrast = l.LastContrast;
+                if (inc.VirtualBrightness == b.VirtualBrightness) inc.VirtualBrightness = l.VirtualBrightness;
+                if (inc.VirtualContrast == b.VirtualContrast) inc.VirtualContrast = l.VirtualContrast;
+                if (string.Equals(inc.HardwareId, b.HardwareId, StringComparison.Ordinal)) inc.HardwareId = l.HardwareId;
+                if (string.Equals(inc.ModelName, b.ModelName, StringComparison.Ordinal)) inc.ModelName = l.ModelName;
+            }
+        }
+
+        private static ScreenHardwareSetting CloneScreen(ScreenHardwareSetting s) => new ScreenHardwareSetting
+        {
+            SlotIndex = s.SlotIndex,
+            HardwareId = s.HardwareId,
+            ModelName = s.ModelName,
+            CustomNickname = s.CustomNickname,
+            LockRatio = s.LockRatio,
+            LastBrightness = s.LastBrightness,
+            LastContrast = s.LastContrast,
+            VirtualBrightness = s.VirtualBrightness,
+            VirtualContrast = s.VirtualContrast,
+            IsLinkedToNext = s.IsLinkedToNext
+        };
+
+        private static ScreenHardwareSetting[] CloneScreens(List<ScreenHardwareSetting>? screens)
+        {
+            if (screens == null) return Array.Empty<ScreenHardwareSetting>();
+            var copy = screens.ToArray();
+            var result = new List<ScreenHardwareSetting>(copy.Length);
+            foreach (var s in copy)
+            {
+                if (s != null) result.Add(CloneScreen(s));
+            }
+            return result.ToArray();
+        }
+
+        private static ScreenCycleEntry CloneEntry(ScreenCycleEntry t) => new ScreenCycleEntry
+        {
+            SlotIndex = t.SlotIndex,
+            HardwareId = t.HardwareId,
+            Brightness = t.Brightness,
+            Contrast = t.Contrast,
+            Enabled = t.Enabled
+        };
+
+        private static ScreenBrightnessProfile CloneProfile(ScreenBrightnessProfile p)
+        {
+            var targets = new List<ScreenCycleEntry>();
+            var src = p.Targets?.ToArray();
+            if (src != null)
+            {
+                foreach (var t in src)
+                {
+                    if (t != null) targets.Add(CloneEntry(t));
+                }
+            }
+            return new ScreenBrightnessProfile
+            {
+                Id = p.Id,
+                Name = p.Name,
+                ShowInTrayQuickActions = p.ShowInTrayQuickActions,
+                IncludeInCycle = p.IncludeInCycle,
+                Hotkey = p.Hotkey,
+                Targets = targets
+            };
+        }
+
+        private static ScreenDirectHotkey CloneDirectHotkey(ScreenDirectHotkey d) => new ScreenDirectHotkey
+        {
+            Id = d.Id,
+            Name = d.Name,
+            Hotkey = d.Hotkey,
+            TargetSlotIndex = d.TargetSlotIndex,
+            Brightness = d.Brightness,
+            Contrast = d.Contrast,
+            LockRatio = d.LockRatio
+        };
+
+        /// <summary>
+        /// Deep, allocation-light clone (no reflection or serializer round-trip, so NativeAOT-safe and cheap enough
+        /// for high-frequency hotkey stepping). Every collection and element is a brand-new instance.
+        /// </summary>
+        internal static ScreenBrightnessConfig CloneConfig(ScreenBrightnessConfig src)
+        {
+            var screens = new List<ScreenHardwareSetting>(MaxScreens);
+            var srcScreens = src.Screens?.ToArray();
+            if (srcScreens != null)
+            {
+                foreach (var s in srcScreens)
+                {
+                    if (s != null) screens.Add(CloneScreen(s));
+                }
+            }
+
+            var profiles = new List<ScreenBrightnessProfile>();
+            var srcProfiles = src.Profiles?.ToArray();
+            if (srcProfiles != null)
+            {
+                foreach (var p in srcProfiles)
+                {
+                    if (p != null) profiles.Add(CloneProfile(p));
+                }
+            }
+
+            var directs = new List<ScreenDirectHotkey>();
+            var srcDirects = src.DirectHotkeys?.ToArray();
+            if (srcDirects != null)
+            {
+                foreach (var d in srcDirects)
+                {
+                    if (d != null) directs.Add(CloneDirectHotkey(d));
+                }
+            }
+
+            return new ScreenBrightnessConfig
+            {
+                SchemaVersion = src.SchemaVersion,
+                Enabled = src.Enabled,
+                DisclaimerAccepted = src.DisclaimerAccepted,
+                GlobalLockBrightnessContrast = src.GlobalLockBrightnessContrast,
+                LastCycleProfileId = src.LastCycleProfileId,
+                CycleUpHotkey = src.CycleUpHotkey,
+                CycleDownHotkey = src.CycleDownHotkey,
+                StepUpHotkey = src.StepUpHotkey,
+                StepDownHotkey = src.StepDownHotkey,
+                StepDelta = src.StepDelta,
+                LockMonitorDifferential = src.LockMonitorDifferential,
+                OverlayWindowX = src.OverlayWindowX,
+                OverlayWindowY = src.OverlayWindowY,
+                OverlayWindowWidth = src.OverlayWindowWidth,
+                OverlayWindowHeight = src.OverlayWindowHeight,
+                Screens = screens,
+                Profiles = profiles,
+                DirectHotkeys = directs
+            };
         }
 
         public static void FlushConfig()
@@ -132,9 +362,10 @@ namespace KeyPulse
             ScreenBrightnessConfig defaults;
             lock (ConfigLock)
             {
-                defaults = CreateDefaultConfig();
-                _cachedConfig = defaults;
-                SaveConfigInternal(defaults);
+                var live = CreateDefaultConfig();
+                _cachedConfig = live;
+                SaveConfigInternal(live);
+                defaults = CreateSnapshot(live);
             }
             NotifyStateChanged();
             return defaults;
@@ -167,29 +398,60 @@ namespace KeyPulse
                 var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.ScreenBrightnessConfig);
                 if (string.IsNullOrWhiteSpace(json)) return false;
 
-                var tempPath = ConfigFilePath + ".tmp";
-                File.WriteAllText(tempPath, json);
-
-                if (File.Exists(ConfigFilePath))
+                var dir = Path.GetDirectoryName(ConfigFilePath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
                 {
                     try
                     {
-                        File.Copy(ConfigFilePath, BackupConfigFilePath, overwrite: true);
+                        foreach (var f in Directory.GetFiles(dir, "screen_brightness*.tmp"))
+                        {
+                            try { File.Delete(f); } catch { }
+                        }
                     }
                     catch { }
                 }
 
-                File.Move(tempPath, ConfigFilePath, overwrite: true);
-                try
+                bool saved = false;
+                for (int attempt = 0; attempt < 10; attempt++)
                 {
-                    File.Copy(ConfigFilePath, BackupConfigFilePath, overwrite: true);
+                    if (AtomicFileWriter.WriteAtomic(ConfigFilePath, json, out _))
+                    {
+                        saved = true;
+                        break;
+                    }
+                    Thread.Sleep(30 * (attempt + 1));
                 }
-                catch { }
+
+                if (!saved)
+                {
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    {
+                        try
+                        {
+                            foreach (var f in Directory.GetFiles(dir, "screen_brightness*.tmp"))
+                            {
+                                try { File.Delete(f); } catch { }
+                            }
+                        }
+                        catch { }
+                    }
+                    return false;
+                }
+
+                for (int attempt = 0; attempt < 5; attempt++)
+                {
+                    if (AtomicFileWriter.WriteAtomic(BackupConfigFilePath, json, out _))
+                    {
+                        break;
+                    }
+                    Thread.Sleep(20);
+                }
 
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                LogDdc($"[CONFIG] Error saving config: {ex.Message}");
                 return false;
             }
         }
@@ -198,6 +460,9 @@ namespace KeyPulse
         {
             var cfg = new ScreenBrightnessConfig
             {
+                Enabled = false,
+                DisclaimerAccepted = false,
+                GlobalLockBrightnessContrast = false,
                 StepUpHotkey = "Ctrl+Alt+=, Ctrl+Alt+NumPadAdd",
                 StepDownHotkey = "Ctrl+Alt+-, Ctrl+Alt+NumPadSubtract",
                 StepDelta = 5,
@@ -205,9 +470,9 @@ namespace KeyPulse
                 DirectHotkeys = new List<ScreenDirectHotkey>(),
                 Screens = new List<ScreenHardwareSetting>
                 {
-                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = true, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 },
-                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = true, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 },
-                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = true, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 }
+                    new ScreenHardwareSetting { SlotIndex = 0, CustomNickname = "Screen A", LockRatio = false, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 },
+                    new ScreenHardwareSetting { SlotIndex = 1, CustomNickname = "Screen B", LockRatio = false, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 },
+                    new ScreenHardwareSetting { SlotIndex = 2, CustomNickname = "Screen C", LockRatio = false, LastBrightness = 50, LastContrast = 50, VirtualBrightness = 50, VirtualContrast = 50 }
                 },
                 Profiles = new List<ScreenBrightnessProfile>
                 {
@@ -263,22 +528,22 @@ namespace KeyPulse
                 cfg.StepDownHotkey = "Ctrl+Alt+-, Ctrl+Alt+NumPadSubtract";
             }
             cfg.DirectHotkeys ??= new List<ScreenDirectHotkey>();
-            foreach (var dh in cfg.DirectHotkeys)
+            foreach (var dh in cfg.DirectHotkeys.ToArray())
             {
                 if (string.IsNullOrWhiteSpace(dh.Id)) dh.Id = Guid.NewGuid().ToString("N");
                 dh.Brightness = Math.Clamp(dh.Brightness, 0, 100);
                 dh.Contrast = Math.Clamp(dh.Contrast, 0, 100);
             }
 
-            cfg.Screens ??= new List<ScreenHardwareSetting>();
-            cfg.Profiles ??= new List<ScreenBrightnessProfile>();
+            var screens = new List<ScreenHardwareSetting>(cfg.Screens ?? new List<ScreenHardwareSetting>());
+            var profiles = new List<ScreenBrightnessProfile>(cfg.Profiles ?? new List<ScreenBrightnessProfile>());
 
             for (int i = 0; i < MaxScreens; i++)
             {
-                var existing = cfg.Screens.FirstOrDefault(s => s.SlotIndex == i);
+                var existing = screens.FirstOrDefault(s => s.SlotIndex == i);
                 if (existing == null)
                 {
-                    cfg.Screens.Add(new ScreenHardwareSetting
+                    screens.Add(new ScreenHardwareSetting
                     {
                         SlotIndex = i,
                         CustomNickname = DefaultSlotName(i),
@@ -304,19 +569,19 @@ namespace KeyPulse
                 }
             }
 
-            cfg.Screens = cfg.Screens.OrderBy(s => s.SlotIndex).Take(MaxScreens).ToList();
+            cfg.Screens = screens.OrderBy(s => s.SlotIndex).Take(MaxScreens).ToList();
 
-            foreach (var p in cfg.Profiles)
+            foreach (var p in profiles)
             {
                 if (string.IsNullOrWhiteSpace(p.Id)) p.Id = Guid.NewGuid().ToString("N");
                 if (string.IsNullOrWhiteSpace(p.Name)) p.Name = "Brightness Preset";
-                p.Targets ??= new List<ScreenCycleEntry>();
+                var targets = new List<ScreenCycleEntry>(p.Targets ?? new List<ScreenCycleEntry>());
                 for (int i = 0; i < MaxScreens; i++)
                 {
-                    var t = p.Targets.FirstOrDefault(x => x.SlotIndex == i);
+                    var t = targets.FirstOrDefault(x => x.SlotIndex == i);
                     if (t == null)
                     {
-                        p.Targets.Add(new ScreenCycleEntry { SlotIndex = i, Brightness = 50, Contrast = 50 });
+                        targets.Add(new ScreenCycleEntry { SlotIndex = i, Brightness = 50, Contrast = 50 });
                     }
                     else
                     {
@@ -324,8 +589,9 @@ namespace KeyPulse
                         t.Contrast = Math.Clamp(t.Contrast, 0, 100);
                     }
                 }
-                p.Targets = p.Targets.OrderBy(x => x.SlotIndex).Take(MaxScreens).ToList();
+                p.Targets = targets.OrderBy(x => x.SlotIndex).Take(MaxScreens).ToList();
             }
+            cfg.Profiles = profiles;
         }
 
         public static string DefaultSlotName(int slotIndex) => slotIndex switch
@@ -347,6 +613,8 @@ namespace KeyPulse
             public string ModelName { get; set; } = string.Empty;
             public bool IsPrimary { get; set; }
             public PixelRect Bounds { get; set; }
+            public bool? SupportsBrightness { get; set; }
+            public bool? SupportsContrast { get; set; }
         }
 
         private static List<ConnectedMonitorDescriptor> EnumerateConnectedMonitors()
@@ -431,12 +699,14 @@ namespace KeyPulse
         /// </summary>
         private static Dictionary<int, ConnectedMonitorDescriptor> BindMonitorsToSlots(ScreenBrightnessConfig cfg)
         {
+            if (!IsFeatureActive) return new Dictionary<int, ConnectedMonitorDescriptor>();
             var connected = EnumerateConnectedMonitors();
             var result = new Dictionary<int, ConnectedMonitorDescriptor>();
             var unassignedMonitors = new List<ConnectedMonitorDescriptor>(connected);
 
             lock (ConfigLock)
             {
+                cfg = GetLiveConfigLocked();
                 bool changedBinding = false;
 
                 foreach (var slot in cfg.Screens.OrderBy(s => s.SlotIndex))
@@ -514,38 +784,277 @@ namespace KeyPulse
             }
         }
 
-        public static void WakeDdcBus(IntPtr hMonitor)
+        #region DDC/CI Monitor Sessions & Handle Lifecycle Management
+
+        internal sealed class DdcMonitorSession : IDisposable
         {
-            if (hMonitor == IntPtr.Zero) return;
+            public IntPtr HMonitor { get; }
+            public IntPtr HPhysicalMonitor { get; }
+            public string Description { get; } = string.Empty;
+            public uint MinBrightness { get; set; } = 0;
+            public uint MaxBrightness { get; set; } = 100;
+            public uint MinContrast { get; set; } = 0;
+            public uint MaxContrast { get; set; } = 100;
+            public bool SupportsBrightness { get; set; }
+            public bool SupportsContrast { get; set; }
+            private int _isDisposed;
+            public bool IsDisposed => Volatile.Read(ref _isDisposed) != 0;
+
+            private int _isInvalidated;
+            public bool IsInvalidated
+            {
+                get => Volatile.Read(ref _isInvalidated) != 0;
+                set => Interlocked.Exchange(ref _isInvalidated, value ? 1 : 0);
+            }
+
+            private readonly PHYSICAL_MONITOR[] _physicalMonitors;
+            private readonly uint _count;
+
+            public DdcMonitorSession(IntPtr hMonitor, IntPtr hPhys, string desc, PHYSICAL_MONITOR[] pms, uint count)
+            {
+                HMonitor = hMonitor;
+                HPhysicalMonitor = hPhys;
+                Description = desc;
+                _physicalMonitors = pms;
+                _count = count;
+            }
+
+            public void Invalidate()
+            {
+                Interlocked.Exchange(ref _isInvalidated, 1);
+            }
+
+            public void Dispose()
+            {
+                Invalidate();
+                if (Interlocked.Exchange(ref _isDisposed, 1) != 0) return;
+                try
+                {
+                    if (_count > 0 && _physicalMonitors != null && _physicalMonitors.Length > 0)
+                    {
+                        if (DestroyPhysicalMonitorsHookForTesting != null)
+                        {
+                            DestroyPhysicalMonitorsHookForTesting(_count, _physicalMonitors);
+                        }
+                        else
+                        {
+                            DestroyPhysicalMonitors(_count, _physicalMonitors);
+                        }
+                        LogDdc($"[DDC-SESSION] Closed physical monitor handle hPhys={HPhysicalMonitor} for hMon={HMonitor}.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogDdc($"[DDC-SESSION] Error closing physical monitors: {ex.Message}");
+                }
+            }
+        }
+
+        private static readonly object SessionLock = new();
+        private static readonly ConcurrentDictionary<IntPtr, DdcMonitorSession> ActiveSessions = new();
+
+        internal static int ActiveSessionCountForTesting => ActiveSessions.Count;
+        internal static bool HasActiveSessionForTesting(IntPtr hMonitor) => ActiveSessions.ContainsKey(hMonitor);
+        internal static IEnumerable<IntPtr> ActiveSessionKeysForTesting => ActiveSessions.Keys;
+        internal static DdcMonitorSession? GetOrCreateSessionForTesting(IntPtr hMonitor) => GetOrCreateSession(hMonitor);
+        internal static Func<IntPtr, (bool success, uint count, PHYSICAL_MONITOR[]? pms)>? PhysicalMonitorsProviderForTesting { get; set; }
+        internal static Action<uint, PHYSICAL_MONITOR[]>? DestroyPhysicalMonitorsHookForTesting { get; set; }
+
+        public static void InvalidateAllSessions()
+        {
             try
             {
-                if (GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) && count > 0)
+                bool acquired = BusLock.Wait(5000);
+                if (!acquired)
                 {
-                    var pms = new PHYSICAL_MONITOR[count];
-                    if (GetPhysicalMonitorsFromHMONITOR(hMonitor, count, pms))
+                    LogDdc("[DDC-SESSION] Warning: BusLock acquisition timed out (5000ms) during InvalidateAllSessions. Proceeding with handle invalidation.");
+                }
+
+                try
+                {
+                    lock (SessionLock)
                     {
-                        for (int i = 0; i < count; i++)
+                        int count = ActiveSessions.Count;
+                        foreach (var kvp in ActiveSessions)
                         {
-                            IntPtr hPhys = pms[i].hPhysicalMonitor;
-                            if (hPhys == IntPtr.Zero) continue;
                             try
                             {
-                                GetVCPFeatureAndVCPFeatureReply(hPhys, 0xDF, out _, out _, out _);
-                                Thread.Sleep(20);
-                                GetVCPFeatureAndVCPFeatureReply(hPhys, 0x10, out _, out _, out _);
+                                kvp.Value.Invalidate();
+                                kvp.Value.Dispose();
                             }
-                            catch { }
+                            catch (Exception ex)
+                            {
+                                LogDdc($"[DDC-SESSION] Error disposing session for hMon={kvp.Key}: {ex.Message}");
+                            }
                         }
-                        DestroyPhysicalMonitors(count, pms);
+                        ActiveSessions.Clear();
+                        LogDdc($"[DDC-SESSION] All cached physical monitor sessions invalidated ({count} session(s)).");
+                    }
+                }
+                finally
+                {
+                    if (acquired)
+                    {
+                        BusLock.Release();
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LogDdc($"[DDC-SESSION] Error during InvalidateAllSessions: {ex.Message}");
+            }
+        }
+
+        private static DdcMonitorSession? GetOrCreateSession(IntPtr hMonitor)
+        {
+            if (hMonitor == IntPtr.Zero) return null;
+
+            if (ActiveSessions.TryGetValue(hMonitor, out var cached) &&
+                !cached.IsDisposed && !cached.IsInvalidated && cached.HPhysicalMonitor != IntPtr.Zero)
+            {
+                return cached;
+            }
+
+            lock (SessionLock)
+            {
+                if (ActiveSessions.TryGetValue(hMonitor, out var existing))
+                {
+                    if (!existing.IsDisposed && !existing.IsInvalidated && existing.HPhysicalMonitor != IntPtr.Zero)
+                    {
+                        return existing;
+                    }
+                    ActiveSessions.TryRemove(hMonitor, out _);
+                    existing.Dispose();
+                }
+
+                uint count;
+                PHYSICAL_MONITOR[] pms;
+
+                if (PhysicalMonitorsProviderForTesting != null)
+                {
+                    var result = PhysicalMonitorsProviderForTesting(hMonitor);
+                    if (!result.success || result.count == 0 || result.pms == null)
+                    {
+                        return null;
+                    }
+                    count = result.count;
+                    pms = result.pms;
+                }
+                else
+                {
+                    if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out count) || count == 0)
+                    {
+                        int err = Marshal.GetLastWin32Error();
+                        LogDdc($"[DDC-SESSION] GetNumberOfPhysicalMonitorsFromHMONITOR failed for hMon={hMonitor}: {FormatWin32Error(err)}");
+                        return null;
+                    }
+
+                    pms = new PHYSICAL_MONITOR[count];
+                    if (!GetPhysicalMonitorsFromHMONITOR(hMonitor, count, pms))
+                    {
+                        int err = Marshal.GetLastWin32Error();
+                        LogDdc($"[DDC-SESSION] GetPhysicalMonitorsFromHMONITOR failed for hMon={hMonitor}, count={count}: {FormatWin32Error(err)}");
+                        return null;
+                    }
+                }
+
+                IntPtr hPhys = pms[0].hPhysicalMonitor;
+                if (hPhys == IntPtr.Zero)
+                {
+                    LogDdc($"[DDC-SESSION] GetPhysicalMonitorsFromHMONITOR returned zero handle for hMon={hMonitor}.");
+                    try
+                    {
+                        if (DestroyPhysicalMonitorsHookForTesting != null)
+                        {
+                            DestroyPhysicalMonitorsHookForTesting(count, pms);
+                        }
+                        else
+                        {
+                            DestroyPhysicalMonitors(count, pms);
+                        }
+                    }
+                    catch { }
+                    return null;
+                }
+
+                string desc = pms[0].szPhysicalMonitorDescription?.Trim() ?? string.Empty;
+                var session = new DdcMonitorSession(hMonitor, hPhys, desc, pms, count);
+
+                try
+                {
+                    var rb = ReadDdcFeature(hPhys, DdcFeature.Brightness);
+                    if (rb.Ok)
+                    {
+                        session.SupportsBrightness = true;
+                        session.MinBrightness = rb.Min;
+                        session.MaxBrightness = rb.Max;
+                    }
+
+                    if (PhysicalMonitorsProviderForTesting == null)
+                    {
+                        Thread.Sleep(VesaInterCommandDelayMs);
+                    }
+
+                    var rc = ReadDdcFeature(hPhys, DdcFeature.Contrast);
+                    if (rc.Ok)
+                    {
+                        session.SupportsContrast = true;
+                        session.MinContrast = rc.Min;
+                        session.MaxContrast = rc.Max;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogDdc($"[DDC-SESSION] Error probing VESA capabilities for hMon={hMonitor}, hPhys={hPhys}: {ex.Message}");
+                    session.Dispose();
+                    return null;
+                }
+
+                if (ActiveSessions.TryGetValue(hMonitor, out var priorSession))
+                {
+                    ActiveSessions.TryRemove(hMonitor, out _);
+                    priorSession.Dispose();
+                }
+
+                ActiveSessions[hMonitor] = session;
+                LogDdc($"[DDC-SESSION] Created persistent session for hMon={hMonitor}, hPhys={hPhys}, desc='{desc}', supportsB={session.SupportsBrightness} [{session.MinBrightness}..{session.MaxBrightness}], supportsC={session.SupportsContrast} [{session.MinContrast}..{session.MaxContrast}].");
+                return session;
+            }
+        }
+
+        #endregion
+
+        public static void WakeDdcBus(IntPtr hMonitor)
+        {
+            if (!IsFeatureActive || hMonitor == IntPtr.Zero) return;
+            try
+            {
+                bool acquired = BusLock.Wait(5000);
+                if (!acquired)
+                {
+                    LogDdc($"[DDC-WAKE] Timed out waiting for BusLock to wake hMon={hMonitor}.");
+                    return;
+                }
+
+                try
+                {
+                    GetOrCreateSession(hMonitor);
+                }
+                finally
+                {
+                    BusLock.Release();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogDdc($"[DDC-WAKE] Error waking DDC bus for hMon={hMonitor}: {ex.Message}");
+            }
         }
 
         public static void OnDisplayChangedOrWoken()
         {
-            InvalidateMonitorCache();
+            if (!IsFeatureActive) return;
+                    InvalidateMonitorCache();
             ResetThrottles();
             _ = Task.Run(() =>
             {
@@ -566,9 +1075,10 @@ namespace KeyPulse
 
         public static List<int> GetConnectedSlotIndices(ScreenBrightnessConfig? cfg = null)
         {
-            cfg ??= LoadConfig();
+            if (!IsFeatureActive) return new List<int>();
             lock (ConfigLock)
             {
+                cfg ??= GetLiveConfigLocked();
                 if (_cachedConnectedSlots != null && (DateTime.UtcNow - _lastConnectedSlotsCheck).TotalMilliseconds < 300)
                 {
                     return new List<int>(_cachedConnectedSlots);
@@ -592,7 +1102,7 @@ namespace KeyPulse
 
             for (int i = 0; i < MaxScreens; i++)
             {
-                var s = cfg.Screens.First(x => x.SlotIndex == i);
+                var s = GetSlotSettingOrDefault(cfg, i);
                 bool isConn = bound.TryGetValue(i, out var mon);
                 int b = Math.Clamp(s.LastBrightness, 0, 100);
                 int c = s.LockRatio ? b : Math.Clamp(s.LastContrast, 0, 100);
@@ -625,6 +1135,85 @@ namespace KeyPulse
         /// </summary>
         public static async Task<List<ScreenLiveState>> ReadAllScreensLiveAsync(CancellationToken ct = default)
         {
+            if (!IsFeatureActive) return new List<ScreenLiveState>();
+            return await ReadAllScreensLiveAsyncCore(ct).ConfigureAwait(false);
+        }
+
+        public readonly record struct LiveReadOutcome(List<ScreenLiveState> States, Exception? Error)
+        {
+            public bool IsFallback => Error != null;
+        }
+
+        /// <summary>
+        /// Test seam: replaces the live hardware read inside <see cref="ReadAllScreensLiveOrCachedAsync"/>.
+        /// </summary>
+        internal static Func<CancellationToken, Task<List<ScreenLiveState>>>? LiveReadOverrideForTesting;
+
+        /// <summary>
+        /// Exception boundary for the async void window-open handlers. Cancellation still propagates as
+        /// <see cref="OperationCanceledException"/>; any other non-fatal failure (DDC/Win32 enumeration,
+        /// unmapped slot, torn config) is logged and answered with the cached states so the window stays usable.
+        /// </summary>
+        public static async Task<LiveReadOutcome> ReadAllScreensLiveOrCachedAsync(CancellationToken ct = default)
+        {
+            try
+            {
+                var reader = LiveReadOverrideForTesting;
+                var states = reader != null
+                    ? await reader(ct).ConfigureAwait(false)
+                    : await ReadAllScreensLiveAsync(ct).ConfigureAwait(false);
+                return new LiveReadOutcome(states ?? new List<ScreenLiveState>(), null);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (!IsFatalException(ex))
+            {
+                LogDdc($"[ScreenBrightness] Live hardware read failed, falling back to cached states: {ex.GetType().Name}: {ex.Message}");
+                return new LiveReadOutcome(GetCachedStatesSafe(), ex);
+            }
+        }
+
+        /// <summary>
+        /// <see cref="GetImmediateCachedStates"/> that never throws; returns an empty list as the last resort.
+        /// </summary>
+        public static List<ScreenLiveState> GetCachedStatesSafe()
+        {
+            try
+            {
+                return GetImmediateCachedStates();
+            }
+            catch (Exception ex) when (!IsFatalException(ex))
+            {
+                LogDdc($"[ScreenBrightness] Cached state fallback failed: {ex.GetType().Name}: {ex.Message}");
+                return new List<ScreenLiveState>();
+            }
+        }
+
+        internal static bool IsFatalException(Exception ex) =>
+            ex is OutOfMemoryException or InsufficientExecutionStackException or AccessViolationException;
+
+        /// <summary>
+        /// Lock-free slot lookup over a config snapshot. A missing slot yields a default setting instead of
+        /// throwing <see cref="InvalidOperationException"/> the way <c>First(...)</c> did.
+        /// </summary>
+        internal static ScreenHardwareSetting GetSlotSettingOrDefault(ScreenBrightnessConfig cfg, int slotIndex)
+        {
+            var screens = cfg.Screens;
+            if (screens != null)
+            {
+                for (int i = 0; i < screens.Count; i++)
+                {
+                    var s = screens[i];
+                    if (s != null && s.SlotIndex == slotIndex) return s;
+                }
+            }
+            return new ScreenHardwareSetting { SlotIndex = slotIndex, CustomNickname = DefaultSlotName(slotIndex) };
+        }
+
+        private static async Task<List<ScreenLiveState>> ReadAllScreensLiveAsyncCore(CancellationToken ct)
+        {
             var cfg = LoadConfig();
             var bound = BindMonitorsToSlots(cfg);
 
@@ -633,7 +1222,7 @@ namespace KeyPulse
             {
                 if (ct.IsCancellationRequested) break;
                 int slotIndex = i;
-                var slotCfg = cfg.Screens.First(x => x.SlotIndex == slotIndex);
+                var slotCfg = GetSlotSettingOrDefault(cfg, slotIndex);
                 bound.TryGetValue(slotIndex, out var mon);
 
                 results[slotIndex] = await Task.Run(() => ReadSingleScreenHardware(slotIndex, slotCfg, mon, ct), ct).ConfigureAwait(false);
@@ -647,7 +1236,7 @@ namespace KeyPulse
             {
                 if (results[i] == null)
                 {
-                    var slotCfg = cfg.Screens.First(x => x.SlotIndex == i);
+                    var slotCfg = GetSlotSettingOrDefault(cfg, i);
                     bound.TryGetValue(i, out var mon);
                     results[i] = new ScreenLiveState
                     {
@@ -668,11 +1257,12 @@ namespace KeyPulse
 
             lock (ConfigLock)
             {
+                var liveCfg = GetLiveConfigLocked();
                 bool updated = false;
                 foreach (var res in results)
                 {
                     if (!res.IsConnected || !res.SupportsBrightness) continue;
-                    var slotCfg = cfg.Screens.FirstOrDefault(x => x.SlotIndex == res.SlotIndex);
+                    var slotCfg = liveCfg.Screens.FirstOrDefault(x => x.SlotIndex == res.SlotIndex);
                     if (slotCfg != null)
                     {
                         if (slotCfg.LastBrightness != res.Brightness || slotCfg.LastContrast != res.Contrast)
@@ -698,7 +1288,7 @@ namespace KeyPulse
 
                 if (updated)
                 {
-                    SaveConfigInternal(cfg);
+                    SaveConfigInternal(liveCfg);
                 }
             }
 
@@ -740,6 +1330,8 @@ namespace KeyPulse
                 }
                 state.SupportsBrightness = hasBrightness;
                 state.SupportsContrast = hasContrast;
+                mon.SupportsBrightness = hasBrightness;
+                mon.SupportsContrast = hasContrast;
                 if (hasBrightness) state.Brightness = ddcBrightness;
                 if (hasContrast)
                 {
@@ -780,6 +1372,7 @@ namespace KeyPulse
         /// </summary>
         public static void RequestScreenLevelChange(int slotIndex, int brightness, int contrast, bool updateContrastFromLock = true)
         {
+            if (!IsFeatureActive) return;
             RequestScreenLevelChangeInternal(slotIndex, brightness, contrast, updateContrastFromLock, preserveVirtual: false);
         }
 
@@ -790,9 +1383,9 @@ namespace KeyPulse
             brightness = Math.Clamp(brightness, 0, 100);
             contrast = Math.Clamp(contrast, 0, 100);
 
-            var cfg = LoadConfig();
             lock (ConfigLock)
             {
+                var cfg = GetLiveConfigLocked();
                 var slotCfg = cfg.Screens.First(s => s.SlotIndex == slotIndex);
                 if (slotCfg.LockRatio && updateContrastFromLock)
                 {
@@ -816,44 +1409,52 @@ namespace KeyPulse
         private static void QueueThrottledHardwareWrite(int slotIndex, int brightness, int contrast)
         {
             var throttle = Throttles.GetOrAdd(slotIndex, _ => new ScreenWriteThrottle());
-            bool fireImmediately = false;
-            int delayMs = ThrottleIntervalMs;
+            DdcScheduleDecision decision;
 
             lock (throttle.Sync)
             {
+                var now = DateTime.UtcNow;
                 throttle.PendingBrightness = brightness;
                 throttle.PendingContrast = contrast;
+                throttle.ConsecutiveFailures = 0;
+                throttle.LastRequestUtc = now;
 
-                var elapsedMs = (DateTime.UtcNow - throttle.LastWriteUtc).TotalMilliseconds;
-                if (elapsedMs >= ThrottleIntervalMs && !throttle.FlushScheduled)
-                {
-                    throttle.LastWriteUtc = DateTime.UtcNow;
-                    fireImmediately = true;
-                }
-                else if (!throttle.FlushScheduled)
-                {
-                    throttle.FlushScheduled = true;
-                    delayMs = Math.Max(25, ThrottleIntervalMs - (int)Math.Max(0, elapsedMs));
-                }
-                else
-                {
-                    return;
-                }
+                decision = DdcWriteSafety.DecideSchedule(now, throttle.LastWriteUtc, throttle.FlushScheduled);
+                if (decision == DdcScheduleDecision.AlreadyScheduled) return;
+                throttle.FlushScheduled = true;
+                throttle.FirstPendingUtc = now;
+                if (decision == DdcScheduleDecision.WriteNow) throttle.LastWriteUtc = now;
             }
 
-            Program.LogDebug($"[ScreenBrightness] QueueThrottledHardwareWrite slot={slotIndex} b={brightness} c={contrast} immediate={fireImmediately} delay={delayMs}ms");
-            if (fireImmediately)
+            Program.LogDebug($"[ScreenBrightness] QueueThrottledHardwareWrite slot={slotIndex} b={brightness} c={contrast} decision={decision}");
+            if (decision == DdcScheduleDecision.WriteNow)
             {
                 _ = Task.Run(() => ExecutePendingWriteForSlot(slotIndex, throttle));
             }
             else
             {
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(delayMs).ConfigureAwait(false);
-                    ExecutePendingWriteForSlot(slotIndex, throttle);
-                });
+                _ = Task.Run(() => RunSettledFlushAsync(slotIndex, throttle));
             }
+        }
+
+        /// <summary>
+        /// Waits until input has been still for <see cref="DdcWriteSafety.SettleMs"/> (or the burst hit
+        /// <see cref="DdcWriteSafety.MaxLatencyMs"/>) and then writes only the newest value, so a held hotkey or
+        /// slider drag costs a handful of monitor NVRAM writes instead of several per second.
+        /// </summary>
+        private static async Task RunSettledFlushAsync(int slotIndex, ScreenWriteThrottle throttle)
+        {
+            while (true)
+            {
+                int wait;
+                lock (throttle.Sync)
+                {
+                    wait = DdcWriteSafety.ComputeFlushDelayMs(DateTime.UtcNow, throttle.LastRequestUtc, throttle.FirstPendingUtc);
+                }
+                if (wait <= 0) break;
+                await Task.Delay(wait).ConfigureAwait(false);
+            }
+            ExecutePendingWriteForSlot(slotIndex, throttle);
         }
 
         private static void ExecutePendingWriteForSlot(int slotIndex, ScreenWriteThrottle throttle)
@@ -900,40 +1501,42 @@ namespace KeyPulse
                 {
                     throttle.LastWrittenBrightness = targetB;
                     throttle.LastWrittenContrast = targetC;
+                    throttle.ConsecutiveFailures = 0;
+                }
+            }
+            else
+            {
+                lock (throttle.Sync)
+                {
+                    throttle.ConsecutiveFailures++;
                 }
             }
 
+            // A failed write is never retried automatically (hammering a sleeping / unresponsive monitor can lock up its
+            // scaler); the next user change re-arms it. Only a value that changed DURING a successful write is followed up.
             bool needsFollowUp = false;
             lock (throttle.Sync)
             {
-                if (throttle.PendingBrightness != throttle.LastWrittenBrightness ||
-                    throttle.PendingContrast != throttle.LastWrittenContrast)
+                if (written &&
+                    (throttle.PendingBrightness != throttle.LastWrittenBrightness ||
+                     throttle.PendingContrast != throttle.LastWrittenContrast) &&
+                    !throttle.FlushScheduled)
                 {
-                    if (!throttle.FlushScheduled)
-                    {
-                        throttle.FlushScheduled = true;
-                        needsFollowUp = true;
-                    }
+                    throttle.FlushScheduled = true;
+                    throttle.FirstPendingUtc = DateTime.UtcNow;
+                    needsFollowUp = true;
                 }
             }
 
             if (needsFollowUp)
             {
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(ThrottleIntervalMs).ConfigureAwait(false);
-                    ExecutePendingWriteForSlot(slotIndex, throttle);
-                });
+                _ = Task.Run(() => RunSettledFlushAsync(slotIndex, throttle));
             }
             else
             {
                 _ = Task.Run(() =>
                 {
-                    var cfg = LoadConfig();
-                    lock (ConfigLock)
-                    {
-                        SaveConfigInternal(cfg);
-                    }
+                    FlushConfig();
                 });
             }
         }
@@ -942,6 +1545,17 @@ namespace KeyPulse
         {
             lock (HardwareWriteLock)
             {
+                var testWriter = HardwareWriteOverrideForTesting;
+                if (testWriter != null)
+                {
+                    return testWriter(slotIndex, brightness, contrast, writeBrightness, writeContrast);
+                }
+                if (ConfigStore.IsTestExecutionEnvironment())
+                {
+                    // Unit tests (also run by dev_build.cmd) must never change the developer's real monitors.
+                    return true;
+                }
+
                 try
                 {
                     var cfg = LoadConfig();
@@ -954,7 +1568,15 @@ namespace KeyPulse
 
                     Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} hMon={mon.HMonitor} isPrimary={mon.IsPrimary} model={mon.ModelName}");
 
-                    if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, writeBrightness, writeContrast))
+                    bool canWriteB = writeBrightness && (mon.SupportsBrightness ?? true);
+                    bool canWriteC = writeContrast && (mon.SupportsContrast ?? true);
+                    if (!canWriteB && !canWriteC)
+                    {
+                        Program.LogDebug($"[ScreenBrightness] slot={slotIndex} neither requested feature is supported (supportsB={mon.SupportsBrightness}, supportsC={mon.SupportsContrast}), skipping.");
+                        return true;
+                    }
+
+                    if (TryWriteDdcMonitor(mon.HMonitor, brightness, contrast, canWriteB, canWriteC))
                     {
                         Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} TryWriteDdcMonitor succeeded");
                         Thread.Sleep(30);
@@ -968,16 +1590,15 @@ namespace KeyPulse
                         return true;
                     }
 
-                    Thread.Sleep(60);
+                    // Retry once ONLY if the display handle itself was stale (topology changed). A monitor that refused
+                    // the command on a valid handle is left alone instead of being re-woken and written again.
                     InvalidateMonitorCache();
                     var refreshed = BindMonitorsToSlots(cfg);
-                    if (refreshed.TryGetValue(slotIndex, out var freshMon))
+                    if (refreshed.TryGetValue(slotIndex, out var freshMon) && freshMon.HMonitor != mon.HMonitor)
                     {
-                        WakeDdcBus(freshMon.HMonitor);
-                        Thread.Sleep(30);
+                        DdcPause(DdcWriteSafety.CommandSpacingMs);
                         bool freshOk = TryWriteDdcMonitor(freshMon.HMonitor, brightness, contrast, writeBrightness, writeContrast);
                         Program.LogDebug($"[ScreenBrightness] WriteSingleScreenHardwareWithRetry slot={slotIndex} retry freshMon hMon={freshMon.HMonitor} result={freshOk}");
-                        Thread.Sleep(30);
                         return freshOk;
                     }
                 }
@@ -1116,12 +1737,15 @@ namespace KeyPulse
         /// </summary>
         public static void TriggerShortcutCycleStep(bool reverse = false)
         {
+            if (!IsFeatureActive) return;
             ScreenBrightnessProfile? targetProfile = null;
             CancellationToken token;
+            int cycleApplyDelayMs = 0;
 
             lock (CycleLock)
+            lock (ConfigLock)
             {
-                var cfg = LoadConfig();
+                var cfg = GetLiveConfigLocked();
                 var ordered = GetOrderedCycleProfiles(cfg);
                 if (ordered.Count > 10) ordered = ordered.Take(10).ToList();
                 if (ordered.Count == 0) return;
@@ -1155,11 +1779,16 @@ namespace KeyPulse
                 }
 
                 _hasStartedCycleInSession = true;
-                targetProfile = ordered[nextIndex];
+                targetProfile = CloneProfile(ordered[nextIndex]);
                 cfg.LastCycleProfileId = targetProfile.Id;
 
                 ApplyProfileToMemory(cfg, targetProfile);
                 SaveConfigInternal(cfg);
+
+                // An isolated press applies at once; rapid / held presses only apply the preset the user lands on.
+                var nowUtc = DateTime.UtcNow;
+                cycleApplyDelayMs = (nowUtc - _lastCycleRequestUtc).TotalMilliseconds >= DdcWriteSafety.SettleMs ? 0 : DdcWriteSafety.SettleMs;
+                _lastCycleRequestUtc = nowUtc;
 
                 _cycleCts?.Cancel();
                 _cycleCts?.Dispose();
@@ -1176,7 +1805,7 @@ namespace KeyPulse
                 {
                     try
                     {
-                        await Task.Delay(65, token).ConfigureAwait(false);
+                        await Task.Delay(cycleApplyDelayMs, token).ConfigureAwait(false);
                         if (token.IsCancellationRequested) return;
                         ApplyProfileToHardwareDeltaOnly(capturedProfile, token);
                     }
@@ -1192,12 +1821,13 @@ namespace KeyPulse
 
         public static void ApplyProfileAsync(ScreenBrightnessProfile profile)
         {
-            if (profile == null) return;
+            if (!IsFeatureActive || profile == null) return;
             CancellationToken token;
 
             lock (CycleLock)
+            lock (ConfigLock)
             {
-                var cfg = LoadConfig();
+                var cfg = GetLiveConfigLocked();
                 cfg.LastCycleProfileId = profile.Id;
                 _hasStartedCycleInSession = true;
                 ApplyProfileToMemory(cfg, profile);
@@ -1247,6 +1877,7 @@ namespace KeyPulse
             lock (CycleLock)
             {
                 UnregisterAllBrightnessHotkeys();
+                if (!IsFeatureActive) return;
                 var cfg = LoadConfig();
 
                 void RegisterKeyList(string hotkeys, Action action, string desc)
@@ -1293,8 +1924,12 @@ namespace KeyPulse
                 {
                     if (!string.IsNullOrWhiteSpace(profile.Hotkey))
                     {
-                        var captured = profile;
-                        RegisterKeyList(profile.Hotkey, () => ApplyProfileAsync(captured), $"Profile '{profile.Name}'");
+                        var capturedId = profile.Id;
+                        RegisterKeyList(profile.Hotkey, () =>
+                        {
+                            var current = LoadConfig().Profiles.FirstOrDefault(x => x.Id == capturedId);
+                            if (current != null) ApplyProfileAsync(current);
+                        }, $"Profile '{profile.Name}'");
                     }
                 }
 
@@ -1304,8 +1939,12 @@ namespace KeyPulse
                     {
                         if (!string.IsNullOrWhiteSpace(dh.Hotkey))
                         {
-                            var capturedDh = dh;
-                            RegisterKeyList(dh.Hotkey, () => TriggerDirectHotkey(capturedDh), $"Direct-{capturedDh.TargetSlotIndex}");
+                            var capturedDhId = dh.Id;
+                            RegisterKeyList(dh.Hotkey, () =>
+                            {
+                                var current = LoadConfig().DirectHotkeys.FirstOrDefault(x => x.Id == capturedDhId);
+                                if (current != null) TriggerDirectHotkey(current);
+                            }, $"Direct-{dh.TargetSlotIndex}");
                         }
                     }
                 }
@@ -1399,26 +2038,26 @@ namespace KeyPulse
 
         public static void ReanchorAllScreens()
         {
-            var cfg = LoadConfig();
             lock (ConfigLock)
             {
+                var cfg = GetLiveConfigLocked();
                 foreach (var s in cfg.Screens)
                 {
                     s.VirtualBrightness = s.LastBrightness;
                     s.VirtualContrast = s.LastContrast;
                 }
+                SaveConfigInternal(cfg);
             }
-            SaveConfig(cfg);
         }
 
         public static void RequestMasterLevelChange(int deltaBrightness)
         {
-            var cfg = LoadConfig();
-            var connectedSlots = GetConnectedSlotIndices(cfg);
+            var connectedSlots = GetConnectedSlotIndices();
             if (connectedSlots.Count == 0 || deltaBrightness == 0) return;
 
             lock (ConfigLock)
             {
+                var cfg = GetLiveConfigLocked();
                 foreach (var slot in connectedSlots)
                 {
                     var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
@@ -1470,10 +2109,9 @@ namespace KeyPulse
             brightness = Math.Clamp(brightness, 0, 100);
             contrast = Math.Clamp(contrast, 0, 100);
 
-            var cfg = LoadConfig();
-
             lock (ConfigLock)
             {
+                var cfg = GetLiveConfigLocked();
                 var sourceSlotCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
                 if (sourceSlotCfg == null) return;
 
@@ -1585,9 +2223,9 @@ namespace KeyPulse
 
         public static void SetScreenLinkedToNext(int slotIndex, bool isLinked)
         {
-            var cfg = LoadConfig();
             lock (ConfigLock)
             {
+                var cfg = GetLiveConfigLocked();
                 var s = cfg.Screens.FirstOrDefault(x => x.SlotIndex == slotIndex);
                 if (s != null)
                 {
@@ -1621,9 +2259,9 @@ namespace KeyPulse
         public static void SetScreenLevelsBatch(IReadOnlyList<(int SlotIndex, int Brightness, int Contrast, int VirtualBrightness, int VirtualContrast)> levels)
         {
             if (levels == null || levels.Count == 0) return;
-            var cfg = LoadConfig();
             lock (ConfigLock)
             {
+                var cfg = GetLiveConfigLocked();
                 foreach (var (slotIndex, b, c, vb, vc) in levels)
                 {
                     var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
@@ -1842,26 +2480,19 @@ namespace KeyPulse
                         description = physicalMonitors[i].szPhysicalMonitorDescription.Trim();
                     }
 
-                    if (GetMonitorBrightness(hPhys, out uint minB, out uint curB, out uint maxB) && maxB > minB)
+                    var rb = ReadDdcFeature(hPhys, DdcFeature.Brightness);
+                    if (rb.Ok)
                     {
                         supportsBrightness = true;
-                        normBrightness = NormalizeTo100(curB, minB, maxB);
-                    }
-                    else if (GetVCPFeatureAndVCPFeatureReply(hPhys, 0x10, out _, out uint curVcpB, out uint maxVcpB) && maxVcpB > 0)
-                    {
-                        supportsBrightness = true;
-                        normBrightness = NormalizeTo100(curVcpB, 0, maxVcpB);
+                        normBrightness = DdcWriteSafety.ToPercent(DdcFeature.Brightness, rb.Current, rb.Min, rb.Max);
                     }
 
-                    if (GetMonitorContrast(hPhys, out uint minC, out uint curC, out uint maxC) && maxC > minC)
+                    DdcPause(DdcWriteSafety.CommandSpacingMs);
+                    var rc = ReadDdcFeature(hPhys, DdcFeature.Contrast);
+                    if (rc.Ok)
                     {
                         supportsContrast = true;
-                        normContrast = NormalizeTo100(curC, minC, maxC);
-                    }
-                    else if (GetVCPFeatureAndVCPFeatureReply(hPhys, 0x12, out _, out uint curVcpC, out uint maxVcpC) && maxVcpC > 0)
-                    {
-                        supportsContrast = true;
-                        normContrast = NormalizeTo100(curVcpC, 0, maxVcpC);
+                        normContrast = DdcWriteSafety.ToPercent(DdcFeature.Contrast, rc.Current, rc.Min, rc.Max);
                     }
 
                     if (supportsBrightness)
@@ -1915,57 +2546,33 @@ namespace KeyPulse
 
                     if (writeBrightness)
                     {
-                        uint targetRawB = (uint)Math.Clamp(brightnessPercent, 0, 100);
-
-                        for (int attempt = 0; attempt < 3; attempt++)
-                        {
-                            if (attempt > 0)
-                            {
-                                Thread.Sleep(35);
-                            }
-
-                            if (SetMonitorBrightness(hPhysical, targetRawB) || SetVCPFeature(hPhysical, 0x10, targetRawB))
-                            {
-                                wroteB = true;
-                                break;
-                            }
-                        }
-
-                        if (!wroteB)
-                        {
-                            int err = Marshal.GetLastWin32Error();
-                            Program.LogDebug($"[DDC] SetMonitorBrightness & SetVCPFeature(0x10) failed after retries on hPhysical={hPhysical}, targetRaw={targetRawB}, win32Err={err}");
-                        }
+                        var outcome = DdcWriteSafety.WriteFeature(
+                            DdcFeature.Brightness,
+                            brightnessPercent,
+                            () => ReadDdcFeature(hPhysical, DdcFeature.Brightness),
+                            v => SetMonitorBrightness(hPhysical, v),
+                            v => SetVCPFeature(hPhysical, 0x10, v),
+                            DdcPause);
+                        wroteB = DdcWriteSafety.IsSuccess(outcome);
+                        Program.LogDebug($"[DDC] Brightness write hPhysical={hPhysical} target={brightnessPercent}% -> {outcome} (win32Err={(wroteB ? 0 : Marshal.GetLastWin32Error())})");
                     }
 
                     if (writeContrast)
                     {
-                        if (wroteB)
+                        if (writeBrightness)
                         {
-                            Thread.Sleep(40);
+                            DdcPause(DdcWriteSafety.CommandSpacingMs);
                         }
 
-                        uint targetRawC = (uint)Math.Clamp(contrastPercent, 0, 100);
-
-                        for (int attempt = 0; attempt < 3; attempt++)
-                        {
-                            if (attempt > 0)
-                            {
-                                Thread.Sleep(35);
-                            }
-
-                            if (SetMonitorContrast(hPhysical, targetRawC) || SetVCPFeature(hPhysical, 0x12, targetRawC))
-                            {
-                                wroteC = true;
-                                break;
-                            }
-                        }
-
-                        if (!wroteC)
-                        {
-                            int err = Marshal.GetLastWin32Error();
-                            Program.LogDebug($"[DDC] SetMonitorContrast & SetVCPFeature(0x12) failed after retries on hPhysical={hPhysical}, targetRaw={targetRawC}, win32Err={err}");
-                        }
+                        var outcome = DdcWriteSafety.WriteFeature(
+                            DdcFeature.Contrast,
+                            contrastPercent,
+                            () => ReadDdcFeature(hPhysical, DdcFeature.Contrast),
+                            v => SetMonitorContrast(hPhysical, v),
+                            v => SetVCPFeature(hPhysical, 0x12, v),
+                            DdcPause);
+                        wroteC = DdcWriteSafety.IsSuccess(outcome);
+                        Program.LogDebug($"[DDC] Contrast write hPhysical={hPhysical} target={contrastPercent}% -> {outcome} (win32Err={(wroteC ? 0 : Marshal.GetLastWin32Error())})");
                     }
 
                     if (writeBrightness && wroteB)
@@ -1989,6 +2596,36 @@ namespace KeyPulse
             finally
             {
                 DestroyPhysicalMonitors(count, physicalMonitors);
+            }
+        }
+
+        /// <summary>
+        /// Reads the current raw value and real hardware range of a feature (high-level MCCS call, then raw VCP after a
+        /// spaced pause). A failed read yields <c>Ok = false</c>; callers must then never guess a range and write.
+        /// </summary>
+        private static DdcFeatureReading ReadDdcFeature(IntPtr hPhysical, DdcFeature feature)
+        {
+            try
+            {
+                return DdcWriteSafety.ReadFeature(
+                    () =>
+                    {
+                        uint mn, cur, mx;
+                        bool ok = feature == DdcFeature.Brightness
+                            ? GetMonitorBrightness(hPhysical, out mn, out cur, out mx)
+                            : GetMonitorContrast(hPhysical, out mn, out cur, out mx);
+                        return new DdcFeatureReading(ok, cur, mn, mx);
+                    },
+                    () =>
+                    {
+                        bool ok = GetVCPFeatureAndVCPFeatureReply(hPhysical, feature == DdcFeature.Brightness ? (byte)0x10 : (byte)0x12, out _, out uint cur, out uint mx);
+                        return new DdcFeatureReading(ok, cur, 0, mx);
+                    },
+                    DdcPause);
+            }
+            catch
+            {
+                return default;
             }
         }
 
@@ -2101,6 +2738,13 @@ namespace KeyPulse
                     targetByte = closest;
                 }
 
+                var current = new DISPLAY_BRIGHTNESS();
+                if (DeviceIoControl(hLcd, IOCTL_VIDEO_QUERY_DISPLAY_BRIGHTNESS, IntPtr.Zero, 0, ref current, Marshal.SizeOf<DISPLAY_BRIGHTNESS>(), out _, IntPtr.Zero) &&
+                    current.ucACBrightness == targetByte && current.ucDCBrightness == targetByte)
+                {
+                    return true;
+                }
+
                 var db = new DISPLAY_BRIGHTNESS
                 {
                     ucDisplayPolicy = 0x03,
@@ -2126,7 +2770,7 @@ namespace KeyPulse
         private const int WS_EX_NOACTIVATE = 0x08000000;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct PHYSICAL_MONITOR
+        internal struct PHYSICAL_MONITOR
         {
             public IntPtr hPhysicalMonitor;
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
@@ -2277,6 +2921,154 @@ namespace KeyPulse
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr hObject);
+
+        #endregion
+
+        #region Hardware Safety & Liability Disclaimer
+
+        public static async Task<bool> ShowDisclaimerDialogAsync(Window? owner = null)
+        {
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                return await Dispatcher.UIThread.InvokeAsync(() => ShowDisclaimerDialogAsync(owner));
+            }
+
+            var tcs = new TaskCompletionSource<bool>();
+            var dialog = new Window
+            {
+                Title = "Hardware Control & Safety Disclaimer",
+                Width = 540,
+                Height = 440,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                CanResize = false,
+                ShowInTaskbar = false,
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppSurfaceBrush", "#0F172A")
+            };
+
+            var mainPanel = new StackPanel
+            {
+                Margin = new Thickness(24),
+                Spacing = 16
+            };
+
+            var header = new TextBlock
+            {
+                Text = "Screen Brightness & DDC/CI Hardware Disclaimer",
+                FontSize = 16,
+                FontWeight = FontWeight.Bold,
+                Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextPrimaryBrush", "#F8FAFC")
+            };
+
+            var warningCard = new Border
+            {
+                Background = ScreenBrightnessOverlayWindow.AppBrush("AppPanelRaisedBrush", "#1E293B"),
+                BorderBrush = ScreenBrightnessOverlayWindow.AppBrush("AppBorderSoftBrush", "#334155"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(16)
+            };
+
+            var scroll = new ScrollViewer
+            {
+                MaxHeight = 220,
+                Content = new TextBlock
+                {
+                    Text = "The Screen Brightness feature communicates directly with your physical monitor's internal scaler microcontroller over the GPU I2C bus via VESA DDC/CI (Monitor Control Command Set) and laptop display drivers.\n\n" +
+                           "Please understand and acknowledge the following:\n" +
+                           "1. Display microcontrollers, scalers, and firmware vary widely by manufacturer and panel type. Some monitors may occasionally be sensitive to hardware DDC/CI commands.\n" +
+                           "2. KEYPULSE AND ITS DEVELOPERS PROVIDE THIS SOFTWARE STRICTLY \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.\n" +
+                           "3. THE AUTHORS AND CONTRIBUTORS ACCEPT NO LIABILITY FOR ANY DIRECT, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL HARDWARE DAMAGE, SCALER LOCKUPS, WEAR, OR LOSS OF USE.\n" +
+                           "4. Many monitors save every brightness/contrast change to a small internal memory (NVRAM/EEPROM) that supports a limited number of writes. Very frequent changes over a long time may wear it. To minimize this, KeyPulse only sends brightness (VCP 0x10) and contrast (VCP 0x12), reads the monitor first and skips values it already has, writes held-key / slider changes only once they settle, never auto-retries a monitor that refuses a command, and never writes to a monitor whose range it could not read.\n" +
+                           "5. You can completely disable this feature at any time in Settings. When disabled, KeyPulse completely halts all display queries, DDC/CI communications, and background monitor processes.\n\n" +
+                           "Do you understand these risks and accept these terms to activate hardware display control?",
+                    FontSize = 12,
+                    LineHeight = 18,
+                    Foreground = ScreenBrightnessOverlayWindow.AppBrush("AppTextMutedBrush", "#CBD5E1"),
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+            warningCard.Child = scroll;
+
+            var btnRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Spacing = 12
+            };
+
+            var cancelBtn = new Button
+            {
+                Content = "Cancel (Keep Disabled)",
+                Classes = { "Secondary" },
+                MinWidth = 160,
+                HorizontalContentAlignment = HorizontalAlignment.Center
+            };
+
+            var acceptBtn = new Button
+            {
+                Content = "Accept Risk & Enable",
+                Classes = { "Primary" },
+                MinWidth = 160,
+                HorizontalContentAlignment = HorizontalAlignment.Center
+            };
+
+            cancelBtn.Click += (_, _) =>
+            {
+                var cfg = LoadConfig();
+                cfg.Enabled = false;
+                SaveConfig(cfg);
+                UnregisterAllBrightnessHotkeys();
+                InvalidateMonitorCache();
+                NotifyStateChanged();
+                tcs.TrySetResult(false);
+                dialog.Close();
+            };
+
+            acceptBtn.Click += (_, _) =>
+            {
+                var cfg = LoadConfig();
+                cfg.DisclaimerAccepted = true;
+                cfg.Enabled = true;
+                SaveConfig(cfg);
+                RegisterBrightnessHotkeys();
+                NotifyStateChanged();
+                tcs.TrySetResult(true);
+                dialog.Close();
+            };
+
+            dialog.KeyDown += (_, ke) =>
+            {
+                if (ke.Key == Avalonia.Input.Key.Escape)
+                {
+                    ke.Handled = true;
+                    dialog.Close();
+                }
+            };
+
+            dialog.Closed += (_, _) =>
+            {
+                tcs.TrySetResult(false);
+            };
+
+            btnRow.Children.Add(cancelBtn);
+            btnRow.Children.Add(acceptBtn);
+
+            mainPanel.Children.Add(header);
+            mainPanel.Children.Add(warningCard);
+            mainPanel.Children.Add(btnRow);
+            dialog.Content = mainPanel;
+
+            if (owner != null && owner.IsVisible)
+            {
+                await dialog.ShowDialog(owner);
+            }
+            else
+            {
+                dialog.Show();
+            }
+
+            return await tcs.Task;
+        }
 
         #endregion
     }

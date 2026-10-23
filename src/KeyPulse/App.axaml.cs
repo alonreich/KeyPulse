@@ -91,7 +91,9 @@ public partial class App : Application
 
             trayIcon.Menu.Items.Clear();
 
-            var brightnessSubMenu = new NativeMenu();
+            if (ScreenBrightnessService.IsFeatureActive)
+            {
+                var brightnessSubMenu = new NativeMenu();
             var sbConfig = ScreenBrightnessService.LoadConfig();
             var sbQuickProfiles = ScreenBrightnessService.GetTrayQuickActionProfiles(sbConfig);
 
@@ -124,6 +126,8 @@ public partial class App : Application
             };
             trayIcon.Menu.Items.Add(brightnessRootItem);
             trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
+
+            }
 
             var orgItem = new NativeMenuItem("Desktop Organizer");
             orgItem.Click += current.DesktopOrganizer_Clicked;
@@ -473,6 +477,7 @@ public partial class App : Application
     {
         IsExiting = true;
         ScreenBrightnessService.FlushConfig();
+        try { ScreenBrightnessService.InvalidateAllSessions(); } catch { }
         IpcService.StopServer();
         InputSimulator.CancelTyping();
         HotkeyManager.DisableCaptureHook();

@@ -122,10 +122,13 @@ namespace KeyPulse
             }
             catch (Exception ex)
             {
-                TryDelete(tempPath);
                 error = $"Atomic file write failed for '{targetPath}': {ex.Message}";
                 Program.LogCrash(error);
                 return false;
+            }
+            finally
+            {
+                TryDelete(tempPath);
             }
         }
 

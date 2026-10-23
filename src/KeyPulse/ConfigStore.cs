@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -57,7 +57,7 @@ namespace KeyPulse
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "KeyPulse");
         }
 
-        private static bool IsTestExecutionEnvironment()
+        internal static bool IsTestExecutionEnvironment()
         {
             try
             {
@@ -146,7 +146,7 @@ namespace KeyPulse
                     if (loaded == null) throw new InvalidDataException("The settings file contained no data.");
                     if (loaded.Hotkeys == null) loaded.Hotkeys = new List<HotkeyEntry>();
                     MigrateConfig(loaded);
-                    UpdateLkgCopy(json);
+
                     return loaded;
                 }
                 catch (Exception ex)

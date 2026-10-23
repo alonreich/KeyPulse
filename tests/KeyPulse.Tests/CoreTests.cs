@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using KeyPulse;
@@ -686,6 +686,132 @@ namespace KeyPulse.Tests
             var updatedScreen0 = reloaded.Screens.First(s => s.SlotIndex == 0);
 
             Assert.AreEqual(originalBrightness + 10, updatedScreen0.LastBrightness, "TriggerBrightnessStep must persist brightness changes to disk");
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_ConcurrentConfigSaves_DoNotThrowOrCorrupt()
+        {
+            var initialCfg = ScreenBrightnessService.ResetToDefaults();
+            var exceptions = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+
+            Parallel.For(0, 20, i =>
+            {
+                try
+                {
+                    var cfg = ScreenBrightnessService.LoadConfig();
+                    cfg.Screens[0].LastBrightness = (i * 5) % 100;
+                    bool saved = ScreenBrightnessService.SaveConfig(cfg);
+                    Assert.IsTrue(saved, "Concurrent save must succeed");
+                }
+                catch (Exception ex)
+                {
+                    exceptions.Add(ex);
+                }
+            });
+
+            Assert.AreEqual(0, exceptions.Count, "Concurrent config saves must never throw: " + string.Join("; ", exceptions));
+            var reloaded = ScreenBrightnessService.LoadConfig();
+            Assert.IsNotNull(reloaded, "Reloaded config must be valid JSON");
+            Assert.AreEqual(3, reloaded.Screens.Count);
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_GetImmediateCachedStates_ReturnsValidSlots()
+        {
+            var states = ScreenBrightnessService.GetImmediateCachedStates();
+            Assert.IsNotNull(states);
+            Assert.AreEqual(ScreenBrightnessService.MaxScreens, states.Count);
+            for (int i = 0; i < ScreenBrightnessService.MaxScreens; i++)
+            {
+                Assert.AreEqual(i, states[i].SlotIndex);
+                Assert.IsTrue(states[i].Brightness >= 0 && states[i].Brightness <= 100);
+            }
+        }
+
+        [TestMethod]
+        public void DdcMonitorSession_IsInvalidated_AtomicFlagTracksState()
+        {
+            var session = new ScreenBrightnessService.DdcMonitorSession(
+                new IntPtr(1001),
+                new IntPtr(2001),
+                "Test Monitor",
+                Array.Empty<ScreenBrightnessService.PHYSICAL_MONITOR>(),
+                0);
+
+            Assert.IsFalse(session.IsInvalidated, "Session should initially not be invalidated");
+            Assert.IsFalse(session.IsDisposed, "Session should initially not be disposed");
+
+            session.Invalidate();
+            Assert.IsTrue(session.IsInvalidated, "Session should be marked invalidated after Invalidate()");
+
+            session.Dispose();
+            Assert.IsTrue(session.IsDisposed, "Session should be marked disposed after Dispose()");
+            Assert.IsTrue(session.IsInvalidated, "Session should remain invalidated after Dispose()");
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_ConcurrentInvalidateAndWakeDdcBus_DoesNotDeadlockOrThrow()
+        {
+            var exceptions = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+
+            Parallel.For(0, 30, i =>
+            {
+                try
+                {
+                    if (i % 3 == 0)
+                    {
+                        ScreenBrightnessService.InvalidateAllSessions();
+                    }
+                    else if (i % 3 == 1)
+                    {
+                        ScreenBrightnessService.WakeDdcBus(new IntPtr(1000 + (i % 4)));
+                    }
+                    else
+                    {
+                        ScreenBrightnessService.TriggerBrightnessStep((i % 2 == 0) ? 5 : -5);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    exceptions.Add(ex);
+                }
+            });
+
+            Assert.AreEqual(0, exceptions.Count, "Concurrent InvalidateAllSessions and WakeDdcBus must never throw: " + string.Join("; ", exceptions));
+        }
+
+        [TestMethod]
+        public void ScreenBrightness_SimulatedConcurrentDdcWritesDuringInvalidate_DoesNotThrowInvalidHandle()
+        {
+            var exceptions = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+            var tasks = new List<System.Threading.Tasks.Task>();
+
+            for (int i = 0; i < 20; i++)
+            {
+                int index = i;
+                tasks.Add(System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        if (index % 2 == 0)
+                        {
+                            ScreenBrightnessService.InvalidateAllSessions();
+                        }
+                        else
+                        {
+                            ScreenBrightnessService.WakeDdcBus(new IntPtr(2000 + (index % 3)));
+                            ScreenBrightnessService.TriggerBrightnessStep(5);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Add(ex);
+                    }
+                }));
+            }
+
+            System.Threading.Tasks.Task.WaitAll(tasks.ToArray());
+            Assert.AreEqual(0, exceptions.Count, "Concurrent DDC writes and invalidation must not throw: " + string.Join("; ", exceptions));
         }
     }
 }

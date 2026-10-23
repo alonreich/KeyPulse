@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1544,7 +1544,7 @@ class Program
         try
         {
             Directory.CreateDirectory(ConfigStore.ConfigDirectory);
-            File.WriteAllText(StagedAddPath, target ?? string.Empty);
+            File.AppendAllLines(StagedAddPath, new[] { target ?? string.Empty });
         }
         catch (Exception ex)
         {

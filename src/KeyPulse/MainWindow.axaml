@@ -735,7 +735,7 @@
                         Orientation="Horizontal"
                         Spacing="8"
                         HorizontalAlignment="Right">
-                <Button Content="Screen Brightness"
+                <Button x:Name="ScreenBrightnessBottomBtn" Content="Screen Brightness"
                         Classes="Secondary"
                         Click="ScreenBrightness_Click"
                         TabIndex="16"

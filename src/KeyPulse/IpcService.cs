@@ -165,21 +165,13 @@ namespace KeyPulse
                 client.Flush();
 
                 var respLenBytes = new byte[4];
-                int read = client.Read(respLenBytes, 0, 4);
-                if (read == 4)
+                if (ReadExact(client, respLenBytes, 0, 4))
                 {
                     int respLen = BitConverter.ToInt32(respLenBytes, 0);
                     if (respLen > 0 && respLen <= MaxMessageBytes)
                     {
                         var respBytes = new byte[respLen];
-                        int totalRead = 0;
-                        while (totalRead < respLen)
-                        {
-                            int r = client.Read(respBytes, totalRead, respLen - totalRead);
-                            if (r <= 0) break;
-                            totalRead += r;
-                        }
-                        return totalRead == respLen;
+                        return ReadExact(client, respBytes, 0, respLen);
                     }
                 }
 
@@ -192,25 +184,41 @@ namespace KeyPulse
             }
         }
 
+        private static bool ReadExact(Stream stream, byte[] buffer, int offset, int count)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int r = stream.Read(buffer, offset + total, count - total);
+                if (r <= 0) return false;
+                total += r;
+            }
+            return true;
+        }
+
+        private static async Task<bool> ReadExactAsync(Stream stream, byte[] buffer, int offset, int count, CancellationToken token)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int r = await stream.ReadAsync(buffer.AsMemory(offset + total, count - total), token);
+                if (r <= 0) return false;
+                total += r;
+            }
+            return true;
+        }
+
         private static async Task<IpcMessage?> ReadMessageAsync(NamedPipeServerStream stream, CancellationToken token)
         {
             var lenBytes = new byte[4];
-            int read = await stream.ReadAsync(lenBytes, 0, 4, token);
-            if (read < 4) return null;
+            if (!await ReadExactAsync(stream, lenBytes, 0, 4, token)) return null;
 
             int len = BitConverter.ToInt32(lenBytes, 0);
             if (len <= 0 || len > MaxMessageBytes) return null;
 
             var buffer = new byte[len];
-            int totalRead = 0;
-            while (totalRead < len)
-            {
-                int r = await stream.ReadAsync(buffer, totalRead, len - totalRead, token);
-                if (r <= 0) break;
-                totalRead += r;
-            }
+            if (!await ReadExactAsync(stream, buffer, 0, len, token)) return null;
 
-            if (totalRead != len) return null;
             var json = Encoding.UTF8.GetString(buffer, 0, len);
             return JsonSerializer.Deserialize(json, AppConfigJsonContext.Default.IpcMessage);
         }
