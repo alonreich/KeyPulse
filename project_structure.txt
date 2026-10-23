@@ -50,6 +50,7 @@
 │       ├── DdcHandleAllocationRaceTests.cs
 │       ├── DdcSessionBusCollisionTests.cs
 │       ├── HotkeyManagerGhostRegistrationTests.cs
+│       ├── DesktopOrganizerStaticPathSandboxLeakTests.cs
 │       ├── DesktopOrganizerUiThreadComBlockTests.cs
 │       ├── ScreenBrightnessAsyncVoidCrashTests.cs
 │       ├── ScreenBrightnessAtomicPersistenceTests.cs
@@ -220,6 +221,7 @@ is, proved it is undamaged, and been read end to end.** Nothing is touched befor
 - **Inline Profile Renaming & Non-Overlapping Profile Cards**: Each profile card uses a `WrapPanel` with clipping constraints so badges (`MANUAL (Protected)` vs. `AUTO-SNAPSHOT (x/5)`, `ACTIVE`) wrap fluidly without overflowing into column 1 or overlapping `Restore Layout` buttons. Inline renaming activates a dedicated rename editor row with explicit `[Save]` and `[Cancel]` buttons (in addition to `Enter`/`Escape` keybindings) so users never feel trapped.
 - **Configurable Periodic Auto-Snapshots**: When `AutoPeriodicSnapshotEnabled` is checked, `EnsureAutoSnapshotScheduler()` runs an initial check (after a 15-second startup delay) and a 6-hour background timer to capture automated snapshots on a customizable day interval (`AutoSnapshotIntervalDays`, `1–30 days`, default 3 days) with an interactive stepper (`− / +`). Auto-snapshots skip execution if fewer monitors are connected than previously seen or if no icon moved by more than 4 pixels compared to the newest snapshot, and automatically prune only the oldest auto-snapshot beyond `MaxAutoSnapshots = 5` while **never** auto-deleting user-created manual profiles.
 - **Corrupt Profile Quarantine & Graceful Recovery**: Load failures return a typed `DesktopOrganizerLoadResult` without erasing in-memory profiles. If `desktop_organizer.json` is corrupted, it is quarantined to `desktop_organizer.damaged-<timestamp>.json` and automatic recovery from the LKG backup is attempted. If recovery fails, the UI enters Read-Only mode to protect surviving profile state from accidental overwrite.
+- **Dynamic Config Path Binding (Sandbox Isolation)**: `DesktopOrganizerService.ConfigPath` and `LkgConfigPath` are expression-bodied static properties (`=> Path.Combine(ConfigStore.ConfigDirectory, ...)`), not `static readonly` fields, so every load/save/quarantine/LKG recovery re-resolves against the current `ConfigStore.ConfigDirectory`. Redirecting the directory (test sandboxes, CI, portable mode) takes effect immediately and layout data never leaks into the real `%APPDATA%` profile. Covered by `DesktopOrganizerStaticPathSandboxLeakTests.cs`.
 - **Pre-Wipe Safety Preservation**: Desktop Organizer profiles are included in the setup wipe safety system via `ConfigStore.SaveAllWipeSafetyCopies()` and backup envelopes.
 - **Auto-Arrange Guard**: `RestoreLayout` verifies `IsAutoArrangeActive(out bool desktopVisible)` upfront, warning the user and aborting restoration if Windows Auto-Arrange is enabled.
 - **Boundary Clamping**: Anti-collision icon coordinate displacement contains horizontal boundary checks (`maxX` and `minCurX` wrap/clamp) to prevent icon displacement beyond visible monitor coordinates.

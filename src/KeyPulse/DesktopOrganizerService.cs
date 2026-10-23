@@ -186,8 +186,9 @@ namespace KeyPulse
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
-        public static readonly string ConfigPath = Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json");
-        public static readonly string LkgConfigPath = Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.lkg.json");
+        // Evaluated on every access so a redirected ConfigStore.ConfigDirectory (tests, portable mode) is honoured.
+        public static string ConfigPath => Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json");
+        public static string LkgConfigPath => Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.lkg.json");
 
         private static DesktopLayoutProfile? _lastUndoSnapshot;
         private static System.Threading.Timer? _displayChangeDebounceTimer;
