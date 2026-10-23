@@ -186,12 +186,9 @@ namespace KeyPulse
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
-        // Evaluated on every access so a redirected ConfigStore.ConfigDirectory (tests, portable mode) is honoured.
         public static string ConfigPath => Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json");
         public static string LkgConfigPath => Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.lkg.json");
 
-        // Shared between the UI thread (manual restore/undo) and the display-change timer thread.
-        // Accessed only through the atomic helpers below; never read or assign it directly.
         private static DesktopLayoutProfile? _lastUndoSnapshot;
         private static System.Threading.Timer? _displayChangeDebounceTimer;
         private static readonly object SyncLock = new();
@@ -200,13 +197,10 @@ namespace KeyPulse
 
         internal static DesktopLayoutProfile? PeekUndoSnapshot() => Volatile.Read(ref _lastUndoSnapshot);
 
-        // Last writer wins: the most recent non-undo restore owns the undo buffer.
         internal static void PublishUndoSnapshot(DesktopLayoutProfile snapshot) => Interlocked.Exchange(ref _lastUndoSnapshot, snapshot);
 
-        // Atomically claims the snapshot so at most one undo can ever apply it.
         internal static DesktopLayoutProfile? TakeUndoSnapshot() => Interlocked.Exchange(ref _lastUndoSnapshot, null);
 
-        // Returns a claimed snapshot after a failed undo, unless a newer restore already published one.
         internal static bool TryReinstateUndoSnapshot(DesktopLayoutProfile snapshot) =>
             Interlocked.CompareExchange(ref _lastUndoSnapshot, snapshot, null) == null;
 

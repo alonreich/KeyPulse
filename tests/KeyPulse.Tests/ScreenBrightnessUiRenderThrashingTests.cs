@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -57,7 +57,6 @@ namespace KeyPulse.Tests
             }
         };
 
-        // ---------- Guarded behaviour: ordering, badges, active styling inputs ----------
 
         [TestMethod]
         public void SortProfiles_OrdersByScreenATargetThenAverage()
@@ -168,7 +167,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(before, cfg.Profiles[0].Targets.Count);
         }
 
-        // ---------- Reconciliation decisions ----------
 
         [TestMethod]
         public void FirstRender_AlwaysRebuilds_EvenWhileInteracting()
@@ -346,7 +344,6 @@ namespace KeyPulse.Tests
             Assert.IsTrue(a.ContentEquals(RowsFromService()[0]));
         }
 
-        // ---------- Instant hotkey list ----------
 
         [TestMethod]
         public void DirectHotkeys_SignatureStableAcrossScreenLevelAndActivePresetChanges()
@@ -401,7 +398,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(ListReconcileAction.DeferRebuild, ScreenBrightnessListReconciler.DecideDirectHotkeys("x", "y", true));
         }
 
-        // ---------- Performance ----------
 
         [TestMethod]
         public void HighFrequencyReconcile_IsCheap()

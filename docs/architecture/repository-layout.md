@@ -49,6 +49,7 @@
 │       ├── DesktopOrganizerStaticPathSandboxLeakTests.cs
 │       ├── DesktopOrganizerUiThreadComBlockTests.cs
 │       ├── DesktopOrganizerUndoStateTearingTests.cs
+│       ├── MainWindowServiceExtractionTests.cs
 │       ├── ProgramAudioStreamStarvationTests.cs
 │       ├── ScreenBrightnessAsyncVoidCrashTests.cs
 │       ├── ScreenBrightnessAtomicPersistenceTests.cs

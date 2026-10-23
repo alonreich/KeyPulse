@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -37,7 +37,6 @@ namespace KeyPulse.Tests
         [TestCleanup]
         public void Cleanup()
         {
-            // Drain scheduled flushes BEFORE removing the fake writer, so no test write can reach a real monitor.
             var deadline = DateTime.UtcNow.AddMilliseconds(DdcWriteSafety.MaxLatencyMs * 3);
             while (ScreenBrightnessService.HasPendingHardwareWritesForTesting && DateTime.UtcNow < deadline)
             {
@@ -53,7 +52,6 @@ namespace KeyPulse.Tests
             }
         }
 
-        // ---------- Fake monitor for the pure write policy ----------
 
         private sealed class FakeMonitor
         {
@@ -99,7 +97,6 @@ namespace KeyPulse.Tests
             }
         }
 
-        // ---------- Fix 2 / 3: read-before-write, skip unchanged ----------
 
         [TestMethod]
         public void UnchangedValue_IsNeverWritten()
@@ -136,7 +133,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(55u, m.Current);
         }
 
-        // ---------- Fix 4: bounded retries, spaced commands ----------
 
         [TestMethod]
         public void RefusingMonitor_GetsAtMostTwoWriteCommands()
@@ -169,7 +165,6 @@ namespace KeyPulse.Tests
             }
         }
 
-        // ---------- Fix 5: no write without a confirmed range ----------
 
         [TestMethod]
         public void UnreadableMonitor_IsNeverWritten()
@@ -201,7 +196,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(0u, DdcWriteSafety.ToRaw(DdcFeature.Brightness, 0, 0, 255), "Brightness keeps its full range (0% = hardware minimum).");
         }
 
-        // ---------- Fix 6: contrast floor ----------
 
         [TestMethod]
         public void ZeroContrast_NeverGoesBelowFloor()
@@ -222,7 +216,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(0, DdcWriteSafety.ToPercent(DdcFeature.Contrast, 0, 0, 100), "Below-floor hardware value set via OSD reads as 0%.");
         }
 
-        // ---------- Fix 1: settle-based scheduling (pure) ----------
 
         [TestMethod]
         public void Schedule_IsolatedChangeWritesNow_BurstWaits()
@@ -245,7 +238,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(0, DdcWriteSafety.ComputeFlushDelayMs(t0.AddMilliseconds(DdcWriteSafety.MaxLatencyMs), now, t0));
         }
 
-        // ---------- Fix 1 + 4: end-to-end through the real write scheduler ----------
 
         private int WriteCount(int slot) => _writes.Count(w => w.Slot == slot);
 

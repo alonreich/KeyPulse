@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1978,7 +1978,6 @@ class Program
                 return;
             }
 
-            // A false return means no audio device or a muted/unavailable endpoint: stay silent.
             PlaySoundNative(Marshal.UnsafeAddrOfPinnedArrayElement(buffer, 0), IntPtr.Zero, SoundPlaybackFlags);
         }
         catch { }

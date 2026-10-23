@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -23,7 +23,6 @@ namespace KeyPulse.Tests
         [TestInitialize]
         public void Setup()
         {
-            // Snapshot the real profile location first so tests can prove it is never touched.
             ConfigStore.ConfigDirectory = null!;
             _defaultDir = ConfigStore.ConfigDirectory;
             var defPrimary = Path.Combine(_defaultDir, "desktop_organizer.json");
@@ -70,7 +69,6 @@ namespace KeyPulse.Tests
             if (_defaultLkgExisted) Assert.AreEqual(_defaultLkgWrite, File.GetLastWriteTimeUtc(defLkg), "Real LKG layout file was rewritten.");
         }
 
-        // ---------- Path binding ----------
 
         [TestMethod]
         public void Paths_PreserveFileNames()
@@ -104,11 +102,9 @@ namespace KeyPulse.Tests
         [TestMethod]
         public void Paths_MatchConfigStoreBackupNaming()
         {
-            // ConfigStore snapshots/backups hardcode the same file name; both must resolve to one file.
             Assert.AreEqual(Path.Combine(ConfigStore.ConfigDirectory, "desktop_organizer.json"), DesktopOrganizerService.ConfigPath);
         }
 
-        // ---------- I/O isolation ----------
 
         [TestMethod]
         public void Save_WritesPrimaryAndLkg_OnlyInsideSandbox()
@@ -145,18 +141,15 @@ namespace KeyPulse.Tests
         {
             Assert.IsTrue(DesktopOrganizerService.SaveConfig(ConfigWith("Keep"), out var err), err);
 
-            // In a new, empty sandbox an empty save has nothing to protect and must stay empty.
             ConfigStore.ConfigDirectory = _sandboxB!;
             Assert.IsTrue(DesktopOrganizerService.SaveConfig(ConfigWith(), out err), err);
             Assert.AreEqual(0, DesktopOrganizerService.LoadConfig().Profiles.Count);
 
-            // Back in sandbox A the guard still protects saved layouts.
             ConfigStore.ConfigDirectory = _sandboxA!;
             Assert.IsTrue(DesktopOrganizerService.SaveConfig(ConfigWith(), out err), err);
             CollectionAssert.AreEqual(new[] { "Keep" }, DesktopOrganizerService.LoadConfig().Profiles.Select(p => p.Name).ToArray());
         }
 
-        // ---------- LKG recovery inside the redirected directory ----------
 
         [TestMethod]
         public void MissingPrimary_RecoversFromSandboxLkg()
@@ -211,7 +204,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(0, res.Config.Profiles.Count);
         }
 
-        // ---------- Performance ----------
 
         [TestMethod]
         public void PathEvaluation_IsCheap()

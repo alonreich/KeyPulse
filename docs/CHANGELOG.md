@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Safety
+- **Hardware consent stays with each PC**: Restoring a backup on another PC no longer switches on monitor brightness/contrast control by itself. If this PC never accepted the hardware disclaimer, Screen Brightness is restored switched off and the disclaimer is shown right after the restore.
+- **Laptop screen no longer changed by mistake**: When an external main monitor refuses a brightness command, KeyPulse no longer adjusts the laptop's built-in screen (and its power-plan brightness) instead. The laptop backlight is only used for an actual built-in panel.
+
 ### Fixed
+- **Uninstall leaves nothing behind**: Uninstalling now also removes the Screen Brightness and backup-settings safety copies created by a "Wipe Settings" install.
+- **No more stalls while holding a hotkey**: Click sounds now play without tying up background threads, so holding a shortcut no longer slows timers or other work.
+- **Smoother brightness changes with several monitors**: Waiting for the monitor connection no longer ties up background threads, so brightness changes and the rest of the app stay responsive.
+- **Desktop Organizer undo is reliable**: Undo can no longer apply the same layout twice or lose a layout when a display change happens at the same moment.
+- **Desktop Organizer respects the active settings folder**: Layouts are always saved to and loaded from the current settings folder.
 - **Screen Brightness Atomic Persistence & Non-Truncating LKG Backup**: Replaced ad-hoc temporary file moves and non-atomic `File.Copy` overwrites in `ScreenBrightnessService.SaveConfigInternal` with unified `AtomicFileWriter.WriteAtomic`. Added deterministic `try...finally` temporary file cleanup to prevent orphaned `.tmp` file leaks, eliminated 0-byte truncation risks on `screen_brightness.lkg.json` during sudden power loss, and retained transient lock retry backoff with structured `LogDdc` diagnostics.
 
 ## [v2026.10.20.2010] - 2026-10-20

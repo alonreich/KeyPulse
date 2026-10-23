@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using Microsoft.Win32;
 
 namespace KeyPulse
 {
@@ -179,78 +178,14 @@ namespace KeyPulse
                 throw new InvalidOperationException(error);
             }
 
-            string pref = _currentConfig.PreferredBrowser ?? (_currentConfig.UseGoogleChromeForUrls ? "Chrome" : "System");
-            if (!string.Equals(pref, "System", StringComparison.OrdinalIgnoreCase) && TryFindBrowser(pref, out var browserPath))
+            string pref = BrowserDetectionService.ResolvePreference(_currentConfig);
+            if (!BrowserDetectionService.IsSystemDefault(pref) && BrowserDetectionService.TryFindBrowser(pref, out var browserPath))
             {
                 using var proc = Process.Start(new ProcessStartInfo(browserPath, $"\"{normalizedUrl}\"") { UseShellExecute = true });
                 return;
             }
 
             using var browser = Process.Start(new ProcessStartInfo(normalizedUrl) { UseShellExecute = true });
-        }
-
-        private static bool TryFindBrowser(string browserKey, out string browserPath)
-        {
-            var candidates = new List<string>();
-
-            switch ((browserKey ?? string.Empty).ToLowerInvariant())
-            {
-                case "chrome":
-                    AddBrowserCandidateFromRegistry(Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe", candidates);
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google", "Chrome", "Application", "chrome.exe"));
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Google", "Chrome", "Application", "chrome.exe"));
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "Chrome", "Application", "chrome.exe"));
-                    break;
-                case "edge":
-                    AddBrowserCandidateFromRegistry(Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe", candidates);
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Microsoft", "Edge", "Application", "msedge.exe"));
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft", "Edge", "Application", "msedge.exe"));
-                    break;
-                case "firefox":
-                    AddBrowserCandidateFromRegistry(Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe", candidates);
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Mozilla Firefox", "firefox.exe"));
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Mozilla Firefox", "firefox.exe"));
-                    break;
-                case "brave":
-                    AddBrowserCandidateFromRegistry(Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\App Paths\brave.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\Microsoft\Windows\CurrentVersion\App Paths\brave.exe", candidates);
-                    AddBrowserCandidateFromRegistry(Registry.LocalMachine, @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\brave.exe", candidates);
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"));
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"));
-                    candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"));
-                    break;
-            }
-
-            foreach (var candidate in candidates.Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (File.Exists(candidate))
-                {
-                    browserPath = candidate;
-                    return true;
-                }
-            }
-
-            browserPath = string.Empty;
-            return false;
-        }
-
-        private static void AddBrowserCandidateFromRegistry(RegistryKey root, string subKey, List<string> candidates)
-        {
-            try
-            {
-                using var key = root.OpenSubKey(subKey, false);
-                if (key?.GetValue(null) is string path)
-                {
-                    candidates.Add(path.Trim('"'));
-                }
-            }
-            catch { }
         }
 
     }

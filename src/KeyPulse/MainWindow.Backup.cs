@@ -18,66 +18,11 @@ namespace KeyPulse
         private BackupPayload BuildBackupPayload()
         {
             CaptureShortcutColumnWidths();
-
-            return new BackupPayload
-            {
-                UseGoogleChromeForUrls = _currentConfig.UseGoogleChromeForUrls,
-                PreferredBrowser = _currentConfig.PreferredBrowser ?? "System",
-                SoundEnabled = _currentConfig.SoundEnabled,
-                TypingDelayMs = _currentConfig.TypingDelayMs,
-                Theme = _currentConfig.Theme,
-                AutoCheckForUpdates = _currentConfig.AutoCheckForUpdates,
-                UpdateChannel = _currentConfig.UpdateChannel ?? "Stable",
-                SkippedUpdateVersion = _currentConfig.SkippedUpdateVersion ?? string.Empty,
-                ShortcutSortColumn = _currentConfig.ShortcutSortColumn,
-                ShortcutSortDescending = _currentConfig.ShortcutSortDescending,
-                HasSeenTrayHint = _currentConfig.HasSeenTrayHint,
-                LastActiveSettingsTab = _currentConfig.LastActiveSettingsTab,
-                Window = new BackupWindowLayout
-                {
-                    MainWindowX = _currentConfig.MainWindowX,
-                    MainWindowY = _currentConfig.MainWindowY,
-                    MainWindowWidth = _currentConfig.MainWindowWidth,
-                    MainWindowHeight = _currentConfig.MainWindowHeight,
-                    MainWindowState = _currentConfig.MainWindowState,
-                    SettingsWindowX = _currentConfig.SettingsWindowX,
-                    SettingsWindowY = _currentConfig.SettingsWindowY,
-                    SettingsWindowWidth = _currentConfig.SettingsWindowWidth,
-                    SettingsWindowHeight = _currentConfig.SettingsWindowHeight,
-                    SettingsWindowState = _currentConfig.SettingsWindowState,
-                    SetupWindowX = _currentConfig.SetupWindowX,
-                    SetupWindowY = _currentConfig.SetupWindowY,
-                    SetupWindowWidth = _currentConfig.SetupWindowWidth,
-                    SetupWindowHeight = _currentConfig.SetupWindowHeight,
-                    DesktopOrganizerWindowX = _currentConfig.DesktopOrganizerWindowX,
-                    DesktopOrganizerWindowY = _currentConfig.DesktopOrganizerWindowY,
-                    DesktopOrganizerWindowWidth = _currentConfig.DesktopOrganizerWindowWidth,
-                    DesktopOrganizerWindowHeight = _currentConfig.DesktopOrganizerWindowHeight,
-                    ScreenBrightnessWindowX = _currentConfig.ScreenBrightnessWindowX,
-                    ScreenBrightnessWindowY = _currentConfig.ScreenBrightnessWindowY,
-                    ScreenBrightnessWindowWidth = _currentConfig.ScreenBrightnessWindowWidth,
-                    ScreenBrightnessWindowHeight = _currentConfig.ScreenBrightnessWindowHeight,
-                    ShortcutStatusColumnWidth = _currentConfig.ShortcutStatusColumnWidth,
-                    ShortcutKeyColumnWidth = _currentConfig.ShortcutKeyColumnWidth,
-                    ShortcutActionColumnWidth = _currentConfig.ShortcutActionColumnWidth,
-                    ShortcutTargetColumnWidth = _currentConfig.ShortcutTargetColumnWidth
-                },
-                Shortcuts = Hotkeys.Select(h => new BackupShortcut
-                {
-                    Id = h.Id,
-                    IsEnabled = h.IsEnabled,
-                    AllowRiskyShortcut = h.AllowRiskyShortcut,
-                    DisplayName = h.DisplayName,
-                    KeyCombination = h.KeyCombination,
-                    KeyCombinations = new List<string>(h.KeyCombinations),
-                    Action = h.Action,
-                    Target = h.Target,
-                    IsTargetObfuscated = h.IsTargetObfuscated,
-                    AddToQuickActionMenu = h.AddToQuickActionMenu
-                }).ToList(),
-                DesktopOrganizer = DesktopOrganizerService.LoadConfig(),
-                ScreenBrightness = ScreenBrightnessService.LoadConfig()
-            };
+            return BackupService.BuildPayload(
+                _currentConfig,
+                Hotkeys,
+                DesktopOrganizerService.LoadConfig(),
+                ScreenBrightnessService.LoadConfig());
         }
 
         private readonly struct BackupPassphraseChoice
@@ -518,44 +463,12 @@ namespace KeyPulse
             ReleaseAllRegistrations();
             Hotkeys.Clear();
 
-            foreach (var item in payload.Shortcuts)
+            foreach (var entry in BackupService.CreateHotkeyEntries(payload))
             {
-                var entry = new HotkeyEntry
-                {
-                    Id = string.IsNullOrWhiteSpace(item.Id) ? Guid.NewGuid().ToString() : item.Id,
-                    IsEnabled = item.IsEnabled,
-                    AllowRiskyShortcut = item.AllowRiskyShortcut,
-                    DisplayName = item.DisplayName ?? string.Empty,
-                    Action = item.Action,
-                    Target = item.Target ?? string.Empty,
-                    IsTargetObfuscated = item.IsTargetObfuscated,
-                    AddToQuickActionMenu = item.AddToQuickActionMenu
-                };
-
-                if (item.KeyCombinations != null && item.KeyCombinations.Count > 0)
-                {
-                    entry.KeyCombinations = new List<string>(item.KeyCombinations);
-                }
-                else if (!string.IsNullOrWhiteSpace(item.KeyCombination))
-                {
-                    entry.KeyCombination = item.KeyCombination;
-                }
-
                 Hotkeys.Add(entry);
             }
 
-            _currentConfig.UseGoogleChromeForUrls = payload.UseGoogleChromeForUrls;
-            _currentConfig.PreferredBrowser = string.IsNullOrWhiteSpace(payload.PreferredBrowser) ? (payload.UseGoogleChromeForUrls ? "Chrome" : "System") : payload.PreferredBrowser;
-            _currentConfig.SoundEnabled = payload.SoundEnabled;
-            _currentConfig.TypingDelayMs = NormalizeTypingDelay(payload.TypingDelayMs);
-            _currentConfig.Theme = string.IsNullOrWhiteSpace(payload.Theme) ? "System" : payload.Theme;
-            _currentConfig.AutoCheckForUpdates = payload.AutoCheckForUpdates;
-            _currentConfig.UpdateChannel = string.IsNullOrWhiteSpace(payload.UpdateChannel) ? "Stable" : payload.UpdateChannel;
-            _currentConfig.SkippedUpdateVersion = payload.SkippedUpdateVersion ?? string.Empty;
-            _currentConfig.ShortcutSortColumn = payload.ShortcutSortColumn ?? string.Empty;
-            _currentConfig.ShortcutSortDescending = payload.ShortcutSortDescending;
-            _currentConfig.HasSeenTrayHint = payload.HasSeenTrayHint;
-            _currentConfig.LastActiveSettingsTab = Math.Clamp(payload.LastActiveSettingsTab, 0, 3);
+            BackupService.ApplyPreferences(payload, _currentConfig, NormalizeTypingDelay);
 
             Program.SoundEnabled = _currentConfig.SoundEnabled;
             InputSimulator.CharacterDelayMs = _currentConfig.TypingDelayMs;
@@ -703,13 +616,7 @@ namespace KeyPulse
                 : "Window layout restored, except: " + string.Join("; ", skipped) + ".";
         }
 
-        private static bool IsSaneWindowSize(double width, double height)
-        {
-            return !double.IsNaN(width) && !double.IsNaN(height)
-                && !double.IsInfinity(width) && !double.IsInfinity(height)
-                && width >= 200 && height >= 150
-                && width <= 20000 && height <= 20000;
-        }
+        private static bool IsSaneWindowSize(double width, double height) => BackupService.IsSaneWindowSize(width, height);
 
         /// <summary>True when this point falls inside a monitor attached to THIS machine.</summary>
         private bool IsPositionOnAConnectedScreen(double x, double y)

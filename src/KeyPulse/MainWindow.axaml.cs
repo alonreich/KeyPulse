@@ -887,7 +887,7 @@ namespace KeyPulse
         /// <summary>Hands back every live registration. Used before the list itself is replaced.</summary>
         private void ReleaseAllRegistrations()
         {
-            foreach (var entry in Hotkeys) ReleaseRegistration(entry);
+            HotkeyCoordinator.ReleaseAll(Hotkeys);
         }
 
         private void RestoreConfigSnapshot(AppConfig config)
@@ -1007,49 +1007,7 @@ namespace KeyPulse
                     continue;
                 }
 
-                var currentNormSet = new HashSet<string>(validCombos.Select(v => v.normalized), StringComparer.OrdinalIgnoreCase);
-                var toRemove = h.RegisteredHotkeyIds.Keys.Where(k => !currentNormSet.Contains(k)).ToList();
-                foreach (var k in toRemove)
-                {
-                    if (h.RegisteredHotkeyIds.TryGetValue(k, out var regId) && regId != 0)
-                    {
-                        HotkeyManager.Unregister(regId);
-                    }
-                    h.RegisteredHotkeyIds.Remove(k);
-                    h.ComboStatuses.Remove(k);
-                    h.ComboHints.Remove(k);
-                }
-
-                var successCount = 0;
-                var conflictCount = 0;
-                string? firstConflictCombo = null;
-
-                foreach (var (orig, norm) in validCombos)
-                {
-                    if (h.RegisteredHotkeyIds.TryGetValue(norm, out var existingId) && existingId != 0)
-                    {
-                        successCount++;
-                        h.ComboStatuses[norm] = "Active";
-                        continue;
-                    }
-
-                    if (HotkeyManager.Register(orig, () => ExecuteAction(h), out var newId))
-                    {
-                        h.RegisteredHotkeyIds[norm] = newId;
-                        h.ComboStatuses[norm] = "Active";
-                        h.ComboHints.Remove(norm);
-                        successCount++;
-                    }
-                    else
-                    {
-                        h.ComboStatuses[norm] = "Conflict";
-                        conflictCount++;
-                        firstConflictCombo ??= orig;
-                    }
-                }
-
-                h.RegisteredHotkeyId = h.RegisteredHotkeyIds.Values.FirstOrDefault();
-                h.RegisteredCombo = h.RegisteredHotkeyIds.Keys.FirstOrDefault() ?? string.Empty;
+                var (successCount, conflictCount, firstConflictCombo) = HotkeyCoordinator.Reconcile(h, validCombos, () => ExecuteAction(h));
 
                 var totalTargetCombos = h.KeyCombinations.Count;
                 if (conflictCount == 0 && rowFormatErrors.Count == 0 && rowDuplicateErrors.Count == 0)
@@ -1093,27 +1051,7 @@ namespace KeyPulse
         }
 
         /// <summary>Hands one row's Win32 hotkeys back, leaving every other row registered.</summary>
-        private static void ReleaseRegistration(HotkeyEntry entry)
-        {
-            if (entry.RegisteredHotkeyIds.Count > 0)
-            {
-                foreach (var id in entry.RegisteredHotkeyIds.Values)
-                {
-                    if (id != 0) HotkeyManager.Unregister(id);
-                }
-                entry.RegisteredHotkeyIds.Clear();
-            }
-
-            if (entry.RegisteredHotkeyId != 0)
-            {
-                HotkeyManager.Unregister(entry.RegisteredHotkeyId);
-                entry.RegisteredHotkeyId = 0;
-            }
-
-            entry.RegisteredCombo = string.Empty;
-            entry.ComboStatuses.Clear();
-            entry.ComboHints.Clear();
-        }
+        private static void ReleaseRegistration(HotkeyEntry entry) => HotkeyCoordinator.Release(entry);
 
         /// <summary>Active vs. Waiting for a registered row, without touching the registration.</summary>
         private void RefreshLiveStatus(HotkeyEntry entry)

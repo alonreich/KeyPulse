@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -32,7 +32,6 @@ namespace KeyPulse.Tests
             return profile;
         }
 
-        // An undo of an icon-less snapshot fails deterministically before touching the shell (no COM needed).
         private static DesktopLayoutProfile MakeUnrestorableSnapshot(string name) => MakeSnapshot(name, 0);
 
         [TestMethod]
@@ -163,7 +162,6 @@ namespace KeyPulse.Tests
         [TestMethod]
         public void UndoRestore_IsUndoOperation_NeverWritesUndoBuffer()
         {
-            // An undo restore that fails before the shell call must leave the buffer exactly as the undo path manages it.
             var unrelated = MakeSnapshot("unrelated", 2);
             DesktopOrganizerService.PublishUndoSnapshot(unrelated);
 
@@ -267,7 +265,6 @@ namespace KeyPulse.Tests
             var reports = new ConcurrentBag<string>();
             using var start = new Barrier(undoWorkers + 1);
 
-            // Simulates HandleDisplayChangeDebounced -> RestoreLayout publishing pre-restore snapshots from a timer thread.
             var background = Task.Run(() =>
             {
                 start.SignalAndWait();
@@ -304,7 +301,6 @@ namespace KeyPulse.Tests
                 Assert.IsTrue(r == NoUndoReport || r == NoIconsReport, "Unexpected undo report: " + r);
             }
 
-            // Every undo here fails and reinstates, so the buffer can never be lost.
             var final = DesktopOrganizerService.PeekUndoSnapshot();
             Assert.IsNotNull(final, "Failed undos racing a background restore must not drop the undo buffer.");
             Assert.IsTrue(published.ContainsKey(final), "Undo buffer must only ever hold a published snapshot.");

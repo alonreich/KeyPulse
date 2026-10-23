@@ -7,7 +7,7 @@ Read [`project_structure.txt`](../project_structure.txt) first (mandatory rules 
 | You are changing... | Read |
 |---|---|
 | Startup args, Dev Mode, single-instance mutex, native DLL extraction, start-with-Windows, admin task / elevation, installer, uninstaller, updates, canary rollback | [architecture/boot-install-update.md](architecture/boot-install-update.md) |
-| Main window, shortcut table, editor, search/sort, Settings dialog, `ApplyHotkeys` | [architecture/main-window.md](architecture/main-window.md) |
+| Main window, shortcut table, editor, search/sort, Settings dialog, `ApplyHotkeys`, extracted services (`StartupElevationService`, `BrowserDetectionService`, `HotkeyCoordinator`) | [architecture/main-window.md](architecture/main-window.md) |
 | Global hotkey registration, capture mode, `RunOnThread`, typing / paste / clipboard injection | [architecture/hotkeys-input.md](architecture/hotkeys-input.md) |
 | Backup export / restore, encryption, payload validation, rollback | [architecture/backup-restore.md](architecture/backup-restore.md) |
 | Desktop icon layouts, auto-snapshots, Shell COM / STA worker, undo | [architecture/desktop-organizer.md](architecture/desktop-organizer.md) |
@@ -23,8 +23,8 @@ A change that crosses subsystems (for example: a new persisted setting shown in 
 
 | File | Read |
 |---|---|
-| `Program.cs`, `App.axaml(.cs)`, `SetupWindow.cs`, `UpdateChecker.cs` | boot-install-update.md |
-| `MainWindow.axaml(.cs)`, `MainWindow.Actions.cs`, `MainWindow.Settings.cs`, `MainWindow.Backup.cs` | main-window.md |
+| `Program.cs`, `App.axaml(.cs)`, `SetupWindow.cs`, `UpdateChecker.cs`, `StartupElevationService.cs` | boot-install-update.md (+ main-window.md for `StartupElevationService`) |
+| `MainWindow.axaml(.cs)`, `MainWindow.Actions.cs`, `MainWindow.Settings.cs`, `MainWindow.Backup.cs`, `BrowserDetectionService.cs`, `HotkeyCoordinator.cs` | main-window.md |
 | `HotKeyManager.cs`, `InputSimulator.cs` | hotkeys-input.md |
 | `BackupService.cs` | backup-restore.md |
 | `DesktopOrganizerService.cs`, `DesktopOrganizerWindow.axaml(.cs)` | desktop-organizer.md |

@@ -2543,7 +2543,6 @@ namespace KeyPulse
                 th.BrightnessSlider = bSlider;
                 th.BrightnessText = bValText;
 
-                // Slider values are persisted on pointer release (and per tick for keyboard / wheel changes) against the current config.
                 void PersistSliderValues()
                 {
                     int b = (int)Math.Round(bSlider.Value);

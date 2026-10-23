@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -72,7 +72,6 @@ namespace KeyPulse.Tests
             return true;
         }
 
-        // ---------- Asynchronous arbitration ----------
 
         [TestMethod]
         public async Task HeldBus_CallerIsNotBlocked_AndWriteRunsAfterRelease()
@@ -136,8 +135,6 @@ namespace KeyPulse.Tests
             int calls = 0;
             ScreenBrightnessService.DdcBusWriteOverrideForTesting = (h, b, c, wb, wc) => { Interlocked.Increment(ref calls); return true; };
             var bus = ScreenBrightnessService.BusLockForTesting;
-            // Above the ThreadPool minimum (so synchronous waits would starve it), but small enough that the queue drains
-            // through the per-write VESA spacing well inside the 5000 ms bounded BusLock wait.
             int writers = Math.Clamp(Environment.ProcessorCount * 2 + 8, 24, 48);
 
             bus.Wait();
@@ -150,8 +147,6 @@ namespace KeyPulse.Tests
 
                 await Task.Delay(300);
 
-                // With a synchronous BusLock.Wait every queued writer would park a pool thread and this probe would
-                // wait for the slow thread-injection heuristic (~1 thread / 500 ms beyond the minimum).
                 var probe = Stopwatch.StartNew();
                 var probes = Enumerable.Range(0, Environment.ProcessorCount * 2).Select(_ => Task.Run(() => 42)).ToArray();
                 await Task.WhenAll(probes);
@@ -187,7 +182,6 @@ namespace KeyPulse.Tests
             Assert.IsTrue(sw.ElapsedMilliseconds >= spacing - 20, $"Next bus owner got the bus after only {sw.ElapsedMilliseconds} ms (spacing {spacing} ms).");
         }
 
-        // ---------- Deterministic release ----------
 
         [TestMethod]
         public async Task BusLock_ReleasedWhenBusCommandThrows()
@@ -256,7 +250,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(1, bus.CurrentCount);
         }
 
-        // ---------- Per-slot pipelines through WriteSingleScreenHardwareWithRetryAsync ----------
 
         [TestMethod]
         public async Task SlotPipelines_AreSerialised()
@@ -337,7 +330,6 @@ namespace KeyPulse.Tests
             Assert.AreEqual(1, calls, "A refusing monitor must not be hammered (bus-thrash guard preserved).");
         }
 
-        // ---------- Pure async policy parity ----------
 
         private sealed class FakeMonitor
         {

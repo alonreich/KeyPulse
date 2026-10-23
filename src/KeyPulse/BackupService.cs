@@ -68,6 +68,134 @@ namespace KeyPulse
         private static readonly byte[] AssociatedData = Encoding.UTF8.GetBytes("KeyPulseBackup.v2");
 
         /// <summary>
+        /// TASK 10: snapshot of everything a backup carries, built from the live settings and list.
+        /// Moved out of MainWindow so the mapping can be tested without a window. LaunchOnBoot is
+        /// deliberately absent - it is a property of the machine, not of the user's preferences.
+        /// </summary>
+        public static BackupPayload BuildPayload(
+            AppConfig config,
+            IEnumerable<HotkeyEntry> hotkeys,
+            DesktopOrganizerConfig? desktopOrganizer,
+            ScreenBrightnessConfig? screenBrightness)
+        {
+            return new BackupPayload
+            {
+                UseGoogleChromeForUrls = config.UseGoogleChromeForUrls,
+                PreferredBrowser = config.PreferredBrowser ?? "System",
+                SoundEnabled = config.SoundEnabled,
+                TypingDelayMs = config.TypingDelayMs,
+                Theme = config.Theme,
+                AutoCheckForUpdates = config.AutoCheckForUpdates,
+                UpdateChannel = config.UpdateChannel ?? "Stable",
+                SkippedUpdateVersion = config.SkippedUpdateVersion ?? string.Empty,
+                ShortcutSortColumn = config.ShortcutSortColumn,
+                ShortcutSortDescending = config.ShortcutSortDescending,
+                HasSeenTrayHint = config.HasSeenTrayHint,
+                LastActiveSettingsTab = config.LastActiveSettingsTab,
+                Window = new BackupWindowLayout
+                {
+                    MainWindowX = config.MainWindowX,
+                    MainWindowY = config.MainWindowY,
+                    MainWindowWidth = config.MainWindowWidth,
+                    MainWindowHeight = config.MainWindowHeight,
+                    MainWindowState = config.MainWindowState,
+                    SettingsWindowX = config.SettingsWindowX,
+                    SettingsWindowY = config.SettingsWindowY,
+                    SettingsWindowWidth = config.SettingsWindowWidth,
+                    SettingsWindowHeight = config.SettingsWindowHeight,
+                    SettingsWindowState = config.SettingsWindowState,
+                    SetupWindowX = config.SetupWindowX,
+                    SetupWindowY = config.SetupWindowY,
+                    SetupWindowWidth = config.SetupWindowWidth,
+                    SetupWindowHeight = config.SetupWindowHeight,
+                    DesktopOrganizerWindowX = config.DesktopOrganizerWindowX,
+                    DesktopOrganizerWindowY = config.DesktopOrganizerWindowY,
+                    DesktopOrganizerWindowWidth = config.DesktopOrganizerWindowWidth,
+                    DesktopOrganizerWindowHeight = config.DesktopOrganizerWindowHeight,
+                    ScreenBrightnessWindowX = config.ScreenBrightnessWindowX,
+                    ScreenBrightnessWindowY = config.ScreenBrightnessWindowY,
+                    ScreenBrightnessWindowWidth = config.ScreenBrightnessWindowWidth,
+                    ScreenBrightnessWindowHeight = config.ScreenBrightnessWindowHeight,
+                    ShortcutStatusColumnWidth = config.ShortcutStatusColumnWidth,
+                    ShortcutKeyColumnWidth = config.ShortcutKeyColumnWidth,
+                    ShortcutActionColumnWidth = config.ShortcutActionColumnWidth,
+                    ShortcutTargetColumnWidth = config.ShortcutTargetColumnWidth
+                },
+                Shortcuts = hotkeys.Select(h => new BackupShortcut
+                {
+                    Id = h.Id,
+                    IsEnabled = h.IsEnabled,
+                    AllowRiskyShortcut = h.AllowRiskyShortcut,
+                    DisplayName = h.DisplayName,
+                    KeyCombination = h.KeyCombination,
+                    KeyCombinations = new List<string>(h.KeyCombinations),
+                    Action = h.Action,
+                    Target = h.Target,
+                    IsTargetObfuscated = h.IsTargetObfuscated,
+                    AddToQuickActionMenu = h.AddToQuickActionMenu
+                }).ToList(),
+                DesktopOrganizer = desktopOrganizer,
+                ScreenBrightness = screenBrightness
+            };
+        }
+
+        /// <summary>
+        /// TASK 10: turns restored rows back into list entries. A row without an Id gets a fresh one;
+        /// the multi-combination list wins, and a pre-multi-key backup falls back to KeyCombination.
+        /// </summary>
+        public static List<HotkeyEntry> CreateHotkeyEntries(BackupPayload payload)
+        {
+            var entries = new List<HotkeyEntry>(payload.Shortcuts.Count);
+            foreach (var item in payload.Shortcuts)
+            {
+                var entry = new HotkeyEntry
+                {
+                    Id = string.IsNullOrWhiteSpace(item.Id) ? Guid.NewGuid().ToString() : item.Id,
+                    IsEnabled = item.IsEnabled,
+                    AllowRiskyShortcut = item.AllowRiskyShortcut,
+                    DisplayName = item.DisplayName ?? string.Empty,
+                    Action = item.Action,
+                    Target = item.Target ?? string.Empty,
+                    IsTargetObfuscated = item.IsTargetObfuscated,
+                    AddToQuickActionMenu = item.AddToQuickActionMenu
+                };
+
+                if (item.KeyCombinations != null && item.KeyCombinations.Count > 0)
+                {
+                    entry.KeyCombinations = new List<string>(item.KeyCombinations);
+                }
+                else if (!string.IsNullOrWhiteSpace(item.KeyCombination))
+                {
+                    entry.KeyCombination = item.KeyCombination;
+                }
+
+                entries.Add(entry);
+            }
+            return entries;
+        }
+
+        /// <summary>
+        /// TASK 10: copies the restored preferences into the live settings, with the same defaults a
+        /// blank or older backup always received. Window geometry is handled separately because it
+        /// needs the monitors attached to THIS machine.
+        /// </summary>
+        public static void ApplyPreferences(BackupPayload payload, AppConfig config, Func<int, int> normalizeTypingDelay)
+        {
+            config.UseGoogleChromeForUrls = payload.UseGoogleChromeForUrls;
+            config.PreferredBrowser = string.IsNullOrWhiteSpace(payload.PreferredBrowser) ? (payload.UseGoogleChromeForUrls ? "Chrome" : "System") : payload.PreferredBrowser;
+            config.SoundEnabled = payload.SoundEnabled;
+            config.TypingDelayMs = normalizeTypingDelay(payload.TypingDelayMs);
+            config.Theme = string.IsNullOrWhiteSpace(payload.Theme) ? "System" : payload.Theme;
+            config.AutoCheckForUpdates = payload.AutoCheckForUpdates;
+            config.UpdateChannel = string.IsNullOrWhiteSpace(payload.UpdateChannel) ? "Stable" : payload.UpdateChannel;
+            config.SkippedUpdateVersion = payload.SkippedUpdateVersion ?? string.Empty;
+            config.ShortcutSortColumn = payload.ShortcutSortColumn ?? string.Empty;
+            config.ShortcutSortDescending = payload.ShortcutSortDescending;
+            config.HasSeenTrayHint = payload.HasSeenTrayHint;
+            config.LastActiveSettingsTab = Math.Clamp(payload.LastActiveSettingsTab, 0, 3);
+        }
+
+        /// <summary>
         /// Hardware-control consent belongs to the person at THIS PC, never to the backup file: the restored
         /// Screen Brightness config keeps this PC's disclaimer answer, and if that answer is "not accepted" the
         /// feature is switched off. Returns true when the backup had the feature on and this PC must ask for
@@ -80,6 +208,15 @@ namespace KeyPulse
             bool wasEnabled = restored.Enabled;
             restored.Enabled = false;
             return wasEnabled;
+        }
+
+        /// <summary>ISSUE_24: rejects NaN, infinite, tiny or absurd saved window sizes.</summary>
+        public static bool IsSaneWindowSize(double width, double height)
+        {
+            return !double.IsNaN(width) && !double.IsNaN(height)
+                && !double.IsInfinity(width) && !double.IsInfinity(height)
+                && width >= 200 && height >= 150
+                && width <= 20000 && height <= 20000;
         }
 
 

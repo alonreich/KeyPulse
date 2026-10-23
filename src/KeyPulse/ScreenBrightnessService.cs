@@ -77,7 +77,6 @@ namespace KeyPulse
         }
 
         private static readonly object CycleLock = new();
-        // Serialises the per-slot write pipelines without parking ThreadPool threads (a Monitor cannot span an await).
         private static readonly SemaphoreSlim HardwareWriteGate = new(1, 1);
         private const int BusLockTimeoutMs = 5000;
         private static CancellationTokenSource? _cycleCts;
@@ -129,7 +128,6 @@ namespace KeyPulse
 
         private static void DdcPause(int ms)
         {
-            // Fake physical-monitor handles in tests never reach a real I2C bus.
             if (PhysicalMonitorsProviderForTesting != null) return;
             Thread.Sleep(ms);
         }
@@ -1604,8 +1602,6 @@ namespace KeyPulse
                 }
             }
 
-            // A failed write is never retried automatically (hammering a sleeping / unresponsive monitor can lock up its
-            // scaler); the next user change re-arms it. Only a value that changed DURING a successful write is followed up.
             bool needsFollowUp = false;
             lock (throttle.Sync)
             {
@@ -1645,7 +1641,6 @@ namespace KeyPulse
                 }
                 if (ConfigStore.IsTestExecutionEnvironment())
                 {
-                    // Unit tests (also run by dev_build.cmd) must never change the developer's real monitors.
                     return true;
                 }
 
@@ -1683,8 +1678,6 @@ namespace KeyPulse
                         return true;
                     }
 
-                    // Retry once ONLY if the display handle itself was stale (topology changed). A monitor that refused
-                    // the command on a valid handle is left alone instead of being re-woken and written again.
                     InvalidateMonitorCache();
                     var refreshed = BindMonitorsToSlots(cfg);
                     if (refreshed.TryGetValue(slotIndex, out var freshMon) && freshMon.HMonitor != mon.HMonitor)
@@ -1882,7 +1875,6 @@ namespace KeyPulse
                 ApplyProfileToMemory(cfg, targetProfile);
                 SaveConfigInternal(cfg);
 
-                // An isolated press applies at once; rapid / held presses only apply the preset the user lands on.
                 var nowUtc = DateTime.UtcNow;
                 cycleApplyDelayMs = (nowUtc - _lastCycleRequestUtc).TotalMilliseconds >= DdcWriteSafety.SettleMs ? 0 : DdcWriteSafety.SettleMs;
                 _lastCycleRequestUtc = nowUtc;

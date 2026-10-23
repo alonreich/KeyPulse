@@ -318,26 +318,22 @@ namespace KeyPulse
                 startupStatus.Foreground = AppBrush("AppTextMutedBrush");
 
                 string startupError = string.Empty;
-                var ok = await System.Threading.Tasks.Task.Run(() => Program.SetStartup(requestedState, out startupError));
+                var ok = await System.Threading.Tasks.Task.Run(() => StartupElevationService.SetStartup(requestedState, out startupError));
 
                 if (ok)
                 {
                     _currentConfig.LaunchOnBoot = requestedState;
                     SaveConfig();
-
-                    startupStatus.Text = requestedState
-                        ? "KeyPulse will start hidden in the tray when Windows starts."
-                        : "KeyPulse will no longer start with Windows.";
-                    startupStatus.Foreground = AppBrush("AppSuccessSoftBrush");
                 }
                 else
                 {
                     suppressStartupEvent = true;
                     chk.IsChecked = !requestedState;
                     suppressStartupEvent = false;
-                    startupStatus.Text = "Startup change failed: " + startupError;
-                    startupStatus.Foreground = AppBrush("AppDangerBrush");
                 }
+                var changeStatus = StartupElevationService.DescribeStartupChange(requestedState, ok, startupError);
+                startupStatus.Text = changeStatus.Text;
+                startupStatus.Foreground = AppBrush(changeStatus.BrushKey);
                 chk.IsEnabled = true;
             };
 
@@ -725,7 +721,7 @@ namespace KeyPulse
 
             void RefreshBrowserStateUi()
             {
-                string pref = _currentConfig.PreferredBrowser ?? (_currentConfig.UseGoogleChromeForUrls ? "Chrome" : "System");
+                string pref = BrowserDetectionService.ResolvePreference(_currentConfig);
                 browserCombo.SelectedIndex = GetBrowserKeyIndex(pref);
 
                 if (string.Equals(pref, "System", StringComparison.OrdinalIgnoreCase))
@@ -733,7 +729,7 @@ namespace KeyPulse
                     browserStatusText.Text = "✓ Web links will launch in your default Windows browser (Edge, Chrome, Firefox, Brave, etc.).";
                     browserStatusText.Foreground = AppBrush("AppTextMutedBrush");
                 }
-                else if (TryFindBrowser(pref, out _))
+                else if (BrowserDetectionService.TryFindBrowser(pref, out _))
                 {
                     browserStatusText.Text = $"✓ {pref} detected on this PC. Web link shortcuts will launch explicitly in {pref}.";
                     browserStatusText.Foreground = AppBrush("AppSuccessSoftBrush");
@@ -1568,7 +1564,7 @@ namespace KeyPulse
 
                 if (activeTab == 0)
                 {
-                    if (Program.SetStartup(true, out var startErr))
+                    if (StartupElevationService.SetStartup(true, out var startErr))
                     {
                         _currentConfig.LaunchOnBoot = true;
                         suppressStartupEvent = true;
@@ -1621,7 +1617,7 @@ namespace KeyPulse
                     "Restore All Defaults");
                 if (!confirmed) return;
 
-                if (Program.SetStartup(true, out _))
+                if (StartupElevationService.SetStartup(true, out _))
                 {
                     _currentConfig.LaunchOnBoot = true;
                     suppressStartupEvent = true;
@@ -1667,7 +1663,7 @@ namespace KeyPulse
                         "Restart as Standard User");
                     if (confirmRevert)
                     {
-                        RelaunchWithPrivilegeChange(w, "--remove-admin-task", statusTxt);
+                        RelaunchWithPrivilegeChange(w, StartupElevationService.RemoveAdminTaskArgument, statusTxt);
                     }
                 }
                 else if (currentWiredAdmin)
@@ -1701,11 +1697,11 @@ namespace KeyPulse
                     await ShowDialogOrWindowAsync(dialog);
                     if (choice == 1)
                     {
-                        RelaunchWithPrivilegeChange(w, "--setup-admin-task", statusTxt);
+                        RelaunchWithPrivilegeChange(w, StartupElevationService.SetupAdminTaskArgument, statusTxt);
                     }
                     else if (choice == 2)
                     {
-                        RelaunchWithPrivilegeChange(w, "--remove-admin-task", statusTxt);
+                        RelaunchWithPrivilegeChange(w, StartupElevationService.RemoveAdminTaskArgument, statusTxt);
                     }
                 }
                 else
@@ -1728,7 +1724,7 @@ namespace KeyPulse
                     warnW.Content = warnP;
 
                     await ShowDialogOrWindowAsync(warnW);
-                    if (accepted) RelaunchWithPrivilegeChange(w, "--setup-admin-task", statusTxt);
+                    if (accepted) RelaunchWithPrivilegeChange(w, StartupElevationService.SetupAdminTaskArgument, statusTxt);
                 }
             };
 
@@ -2036,49 +2032,33 @@ namespace KeyPulse
         {
             try
             {
-                var (startup, adminTaskInstalled) = await System.Threading.Tasks.Task.Run(() =>
-                {
-                    Program.InvalidateAdminTaskState();
-                    if (Program.IsAdminTaskInstalled())
-                    {
-                        Program.EnsureAdminTaskBatterySettings();
-                    }
-                    return (Program.QueryStartupState(), Program.IsAdminTaskInstalled());
-                });
+                var snapshot = await System.Threading.Tasks.Task.Run(StartupElevationService.LoadSnapshot);
 
-                updateAdminBtn?.Invoke(Program.IsElevated, adminTaskInstalled);
+                updateAdminBtn?.Invoke(snapshot.IsElevated, snapshot.AdminTaskInstalled);
 
-                if (startup == Program.StartupState.Unknown)
+                var status = StartupElevationService.DescribeStartup(snapshot);
+
+                if (snapshot.IsUnknown)
                 {
                     chk.IsEnabled = false;
                     chk.IsThreeState = true;
                     setSuppress(true);
                     chk.IsChecked = null;
                     setSuppress(false);
-                    startupStatus.Text = "Windows did not answer when asked whether KeyPulse starts with Windows, so this could not be checked. Nothing was changed. Try closing and reopening Settings.";
-                    startupStatus.Foreground = AppBrush("AppWarningBrush");
+                    startupStatus.Text = status.Text;
+                    startupStatus.Foreground = AppBrush(status.BrushKey);
                     return;
                 }
 
-                var isStartup = startup == Program.StartupState.On;
-
                 setSuppress(true);
                 chk.IsThreeState = false;
-                chk.IsChecked = isStartup;
+                chk.IsChecked = snapshot.IsStartupOn;
                 setSuppress(false);
 
                 chk.IsEnabled = true;
 
-                var adminTaskIneffective = adminTaskInstalled && isStartup && !Program.IsElevated;
-
-                startupStatus.Text = isStartup
-                    ? (adminTaskInstalled
-                        ? (adminTaskIneffective
-                            ? "KeyPulse starts with Windows using its Administrator logon task, but this session is NOT running as Administrator - the task did not take effect on this account."
-                            : "KeyPulse starts with Windows using its Administrator logon task.")
-                        : "KeyPulse starts with Windows.")
-                    : "KeyPulse does not start with Windows.";
-                startupStatus.Foreground = AppBrush(adminTaskIneffective ? "AppWarningBrush" : "AppTextMutedBrush");
+                startupStatus.Text = status.Text;
+                startupStatus.Foreground = AppBrush(status.BrushKey);
             }
             catch (Exception ex)
             {
@@ -2111,33 +2091,16 @@ namespace KeyPulse
 
             try { settingsWindow.Close(); } catch { }
 
-            try
+            if (!StartupElevationService.TryStartPrivilegeRelaunch(arguments, out var startError))
             {
-                var forUser = System.Security.Principal.WindowsIdentity.GetCurrent().Name;
-
-                using var elevated = Process.Start(new ProcessStartInfo
-                {
-                    FileName = Program.ExePath,
-                    Arguments = arguments + " --for-user \"" + forUser + "\"",
-                    UseShellExecute = true,
-                    Verb = "runas"
-                });
-            }
-            catch (Exception ex)
-            {
-                Program.LogDebug("Privilege change was not started: " + ex.Message);
+                Program.LogDebug("Privilege change was not started: " + startError);
                 ShowActionMessage("KeyPulse", "Nothing was changed",
                     "KeyPulse is still running exactly as before. Windows did not allow the change to start ("
-                    + ex.Message + ").", false);
+                    + startError + ").", false);
                 return;
             }
 
-            try { HotkeyManager.DisableCaptureHook(); } catch { }
-            try { HotkeyManager.Clear(); } catch { }
-            try { HotkeyManager.Stop(); } catch { }
-
-            try { ScreenBrightnessService.InvalidateMonitorCache(); } catch { }
-            try { Program.ReleaseSingleInstanceLock(); } catch { }
+            StartupElevationService.ReleaseForRelaunch();
 
             Environment.Exit(0);
         }
