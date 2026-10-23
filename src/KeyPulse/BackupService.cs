@@ -27,7 +27,6 @@ namespace KeyPulse
         public string CreatedUtc { get; init; } = string.Empty;
         public string CreatedByVersion { get; init; } = string.Empty;
         public int ShortcutCount { get; init; }
-        public int DesktopProfileCount { get; init; }
 
         /// <summary>Set for an unencrypted file; null when a passphrase is still needed.</summary>
         public BackupPayload? Payload { get; init; }
@@ -282,7 +281,6 @@ namespace KeyPulse
                 CreatedUtc = envelope.CreatedUtc,
                 CreatedByVersion = envelope.CreatedByVersion,
                 ShortcutCount = opened.Payload!.Shortcuts.Count,
-                DesktopProfileCount = opened.Payload.DesktopOrganizer?.Profiles?.Count ?? 0,
                 Payload = opened.Payload,
                 Envelope = envelope
             };

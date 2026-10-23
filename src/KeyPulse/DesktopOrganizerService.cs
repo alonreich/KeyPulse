@@ -808,47 +808,6 @@ namespace KeyPulse
             return result;
         }
 
-        public static async Task<(bool IsAutoArrange, bool IsDesktopVisible)> IsAutoArrangeActiveDetailedAsync(CancellationToken cancellationToken = default)
-        {
-            bool visible = true;
-            bool isAutoArrange = await RunInStaAsync(() =>
-            {
-                IFolderView? fv = null;
-                IShellView? sv = null;
-                try
-                {
-                    if (TryGetDesktopFolderView(out fv, out sv, out var hwnd))
-                    {
-                        if (hwnd != IntPtr.Zero) visible = IsWindowVisible(hwnd);
-                        if (fv != null)
-                        {
-                            return fv.GetAutoArrange() == 0;
-                        }
-                    }
-                }
-                finally
-                {
-                    if (fv != null) { try { Marshal.ReleaseComObject(fv); } catch { } }
-                    if (sv != null) { try { Marshal.ReleaseComObject(sv); } catch { } }
-                }
-
-                IntPtr listviewHwnd = GetDesktopListView();
-                if (listviewHwnd == IntPtr.Zero) return false;
-
-                visible = IsWindowVisible(listviewHwnd);
-                int style = GetWindowLong(listviewHwnd, GWL_STYLE);
-                return (style & LVS_AUTOARRANGE) != 0;
-            }, cancellationToken).ConfigureAwait(false);
-
-            return (isAutoArrange, visible);
-        }
-
-        public static async Task<bool> IsAutoArrangeActiveAsync(CancellationToken cancellationToken = default)
-        {
-            var (isAutoArrange, _) = await IsAutoArrangeActiveDetailedAsync(cancellationToken).ConfigureAwait(false);
-            return isAutoArrange;
-        }
-
         public static DesktopLayoutProfile? CaptureCurrentLayout(string profileName, out string error, CancellationToken cancellationToken = default)
         {
             string capturedError = string.Empty;
@@ -1325,24 +1284,6 @@ namespace KeyPulse
             }
         }
 
-        public static bool UndoLastRestore(out string report, CancellationToken cancellationToken = default)
-        {
-            if (_lastUndoSnapshot == null)
-            {
-                report = "No recent restore to undo.";
-                return false;
-            }
-
-            var snapshot = _lastUndoSnapshot;
-            if (RestoreLayout(snapshot, UnsavedIconBehavior.LeaveInPlace, out report, cancellationToken, isUndoOperation: true))
-            {
-                _lastUndoSnapshot = null;
-                return true;
-            }
-
-            return false;
-        }
-
         public static async Task<(bool Success, string Report)> UndoLastRestoreDetailedAsync(CancellationToken cancellationToken = default)
         {
             if (_lastUndoSnapshot == null)
@@ -1359,12 +1300,6 @@ namespace KeyPulse
             }
 
             return (false, report);
-        }
-
-        public static async Task<bool> UndoLastRestoreAsync(CancellationToken cancellationToken = default)
-        {
-            var (success, _) = await UndoLastRestoreDetailedAsync(cancellationToken).ConfigureAwait(false);
-            return success;
         }
 
         public static void HandleDisplayChangeDebounced()

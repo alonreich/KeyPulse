@@ -616,8 +616,6 @@ namespace KeyPulse
             }
         }
 
-        private static bool TryCreateShortcutViaPowerShell(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation) => false;
-
         internal static bool CreateShortcut(string shortcutPath, string targetPath, string workingDir, string description, string iconLocation, out string? errorMessage)
         {
             errorMessage = null;

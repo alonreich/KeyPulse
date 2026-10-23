@@ -189,8 +189,6 @@ namespace KeyPulse
             using var browser = Process.Start(new ProcessStartInfo(normalizedUrl) { UseShellExecute = true });
         }
 
-        private static bool TryFindGoogleChrome(out string chromePath) => TryFindBrowser("Chrome", out chromePath);
-
         private static bool TryFindBrowser(string browserKey, out string browserPath)
         {
             var candidates = new List<string>();

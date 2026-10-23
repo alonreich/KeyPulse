@@ -38,14 +38,6 @@ namespace KeyPulse
         public static event Action<string>? ProtectionFailed;
         private static bool _protectionFailureAnnounced;
 
-        /// <summary>True when the stored value carries the DPAPI or legacy cipher-text prefix.</summary>
-        public static bool IsProtectedValue(string? stored)
-        {
-            return stored != null
-                && (stored.StartsWith(DpapiPrefix, StringComparison.Ordinal)
-                    || stored.StartsWith(LegacyPrefix, StringComparison.Ordinal));
-        }
-
         /// <summary>Turns a plain target into the string written to config.json.</summary>
         public static string Protect(string plainText)
         {

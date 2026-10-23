@@ -8,6 +8,12 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Dead Code Removal & CI Project Path Fix (`HotKeyManager.cs`, `MainWindow.Actions.cs`, `SetupWindow.cs`, `CryptoHelper.cs`, `DesktopOrganizerService.cs`, `BackupService.cs`, `.github/workflows/ci.yml`, `project_structure.txt`)
+- **Removed remnants of the retired low-level keyboard hook (`HotKeyManager.cs`)**: `WM_KEYDOWN`/`WM_SYSKEYDOWN`/`WM_KEYUP`/`WM_SYSKEYUP`, `UpdateCaptureModifierState`, `ResetCaptureModifierState`, the `_captureCtrlDown`/`_captureAltDown`/`_captureShiftDown`/`_captureWinDown` fields (nothing ever set them to `true`, so `GetModifierSnapshot` is behaviourally unchanged), `IsKeyPulseForeground`, its `CurrentProcessId` field, and the now-unused `GetForegroundWindow`/`GetWindowThreadProcessId` P/Invokes.
+- **Removed uncalled members**: `MainWindow.TryFindGoogleChrome`, the `SetupWindow.TryCreateShortcutViaPowerShell` stub (always returned `false`), `CryptoHelper.IsProtectedValue`, `DesktopOrganizerService.IsAutoArrangeActiveAsync` / `IsAutoArrangeActiveDetailedAsync` / `UndoLastRestore` / `UndoLastRestoreAsync` (the UI uses `UndoLastRestoreDetailedAsync`; internal callers use synchronous `IsAutoArrangeActive`), and the write-only `BackupInspection.DesktopProfileCount`.
+- **CI (`.github/workflows/ci.yml`)**: `dotnet restore` and `dotnet publish` pointed at a non-existent root `KeyPulse.csproj`; both now target `src/KeyPulse/KeyPulse.csproj`.
+- **Docs (`project_structure.txt`)**: the "Capture Hook" bullet described a `HookCallback`/`IsKeyPulseForeground` guard that no longer exists; it now describes the actual Avalonia `KeyDown` capture and the `IsCaptureMode` retry-timer gate.
+
 ### Desktop Organizer UI Thread Non-Blocking STA Dispatcher (`DesktopOrganizerService.cs`, `DesktopOrganizerWindow.axaml.cs`, `project_structure.txt`)
 - **Dedicated Background STA Worker Dispatcher (`DesktopOrganizerService.cs`)**:
   - Removed short-circuit `if (Thread.CurrentThread.GetApartmentState() == ApartmentState.STA) return action();` which previously executed out-of-process Shell COM calls directly on Avalonia's UI dispatcher thread whenever invoked from the UI.

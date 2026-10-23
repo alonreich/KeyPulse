@@ -35,12 +35,6 @@ namespace KeyPulse
         [DllImport("user32.dll")]
         private static extern void PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
         {
@@ -74,10 +68,6 @@ namespace KeyPulse
         private static int _currentId = 0;
         private static System.Collections.Concurrent.ConcurrentQueue<Action> _taskQueue = new();
 
-        private const int WM_KEYDOWN = 0x0100;
-        private const int WM_SYSKEYDOWN = 0x0104;
-        private const int WM_KEYUP = 0x0101;
-        private const int WM_SYSKEYUP = 0x0105;
         private const int VK_SHIFT = 0x10;
         private const int VK_CONTROL = 0x11;
         private const int VK_MENU = 0x12;
@@ -89,12 +79,6 @@ namespace KeyPulse
         private const int VK_RMENU = 0xA5;
         private const int VK_LWIN = 0x5B;
         private const int VK_RWIN = 0x5C;
-        private static volatile bool _captureCtrlDown;
-        private static volatile bool _captureAltDown;
-        private static volatile bool _captureShiftDown;
-        private static volatile bool _captureWinDown;
-
-        private static readonly uint CurrentProcessId = (uint)Environment.ProcessId;
 
         public static bool IsCaptureMode { get; set; } = false;
 
@@ -106,14 +90,12 @@ namespace KeyPulse
 
         public static void EnableCaptureHook()
         {
-            ResetCaptureModifierState();
             IsCaptureMode = true;
         }
 
         public static void DisableCaptureHook()
         {
             IsCaptureMode = false;
-            ResetCaptureModifierState();
         }
 
         [DllImport("user32.dll")]
@@ -122,14 +104,6 @@ namespace KeyPulse
         private static bool IsKeyDown(int vKey)
         {
             return (GetAsyncKeyState(vKey) & 0x8000) != 0;
-        }
-
-        private static void ResetCaptureModifierState()
-        {
-            _captureCtrlDown = false;
-            _captureAltDown = false;
-            _captureShiftDown = false;
-            _captureWinDown = false;
         }
 
         private static bool IsCtrlVk(int vk)
@@ -152,38 +126,16 @@ namespace KeyPulse
             return vk == VK_LWIN || vk == VK_RWIN;
         }
 
-        private static void UpdateCaptureModifierState(int vk, bool isDown)
-        {
-            if (IsCtrlVk(vk)) _captureCtrlDown = isDown;
-            else if (IsAltVk(vk)) _captureAltDown = isDown;
-            else if (IsShiftVk(vk)) _captureShiftDown = isDown;
-            else if (IsWinVk(vk)) _captureWinDown = isDown;
-        }
-
         public static void GetModifierSnapshot(int currentVk, out bool ctrl, out bool alt, out bool shift, out bool win)
         {
             ctrl = IsKeyDown(VK_CONTROL) || IsKeyDown(VK_LCONTROL) || IsKeyDown(VK_RCONTROL)
-                || _captureCtrlDown || IsCtrlVk(currentVk);
+                || IsCtrlVk(currentVk);
             alt = IsKeyDown(VK_MENU) || IsKeyDown(VK_LMENU) || IsKeyDown(VK_RMENU)
-                || _captureAltDown || IsAltVk(currentVk);
+                || IsAltVk(currentVk);
             shift = IsKeyDown(VK_SHIFT) || IsKeyDown(VK_LSHIFT) || IsKeyDown(VK_RSHIFT)
-                || _captureShiftDown || IsShiftVk(currentVk);
+                || IsShiftVk(currentVk);
             win = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN)
-                || _captureWinDown || IsWinVk(currentVk);
-        }
-
-        /// <summary>
-        /// ISSUE_1: the capture hook must only ever swallow keys while a KeyPulse window is the
-        /// foreground window. Previously it kept eating the whole machine's keyboard as soon as the
-        /// shortcut box held focus, including after the user alt-tabbed to another application.
-        /// </summary>
-        public static bool IsKeyPulseForeground()
-        {
-            var hWnd = GetForegroundWindow();
-            if (hWnd == IntPtr.Zero) return false;
-
-            GetWindowThreadProcessId(hWnd, out var processId);
-            return processId == CurrentProcessId;
+                || IsWinVk(currentVk);
         }
 
 

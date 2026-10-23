@@ -39,14 +39,14 @@ jobs:
           Write-Host "Changelog verified: Unreleased notes are present."
 
       - name: Restore dependencies
-        run: dotnet restore KeyPulse.csproj
+        run: dotnet restore src/KeyPulse/KeyPulse.csproj
 
       - name: Run Automated Regression Tests
         run: dotnet test tests/KeyPulse.Tests/KeyPulse.Tests.csproj --configuration Release --nologo --verbosity normal
 
       - name: Compile NativeAOT Quality Gate Check
         run: |
-          dotnet publish KeyPulse.csproj -c Release -r win-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --nologo -o ./publish-ci
+          dotnet publish src/KeyPulse/KeyPulse.csproj -c Release -r win-x64 -p:PublishAot=true -p:TreatWarningsAsErrors=true --nologo -o ./publish-ci
 
       - name: Verify Authenticode Signing
         shell: pwsh
