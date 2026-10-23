@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.23.1540] - 2026-10-23
+
 ### Safety
 - **Hardware consent stays with each PC**: Restoring a backup on another PC no longer switches on monitor brightness/contrast control by itself. If this PC never accepted the hardware disclaimer, Screen Brightness is restored switched off and the disclaimer is shown right after the restore.
 - **Laptop screen no longer changed by mistake**: When an external main monitor refuses a brightness command, KeyPulse no longer adjusts the laptop's built-in screen (and its power-plan brightness) instead. The laptop backlight is only used for an actual built-in panel.
@@ -246,12 +248,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
 
-## [v2026.10.20.2010] - 2026-10-20
+## [v2026.10.23.1540] - 2026-10-23
+
+### Safety
+- **Hardware consent stays with each PC**: Restoring a backup on another PC no longer switches on monitor brightness/contrast control by itself. If this PC never accepted the hardware disclaimer, Screen Brightness is restored switched off and the disclaimer is shown right after the restore.
+- **Laptop screen no longer changed by mistake**: When an external main monitor refuses a brightness command, KeyPulse no longer adjusts the laptop's built-in screen (and its power-plan brightness) instead. The laptop backlight is only used for an actual built-in panel.
 
 ### Fixed
-- **Brightness Step Hotkeys Persistence**: Fixed an issue where stepping brightness up or down via global hotkeys (`Ctrl+Alt+=` / `Ctrl+Alt+-`) or master overlay nudge buttons did not persist to disk under default differential lock or single-monitor setups, causing brightness to revert upon application restart.
-- **Desktop Layout Inline Rename Cancellation**: Fixed an issue where clicking the Cancel button in the Desktop Organizer profile rename editor committed and saved unwanted name edits due to early focus loss. Clicking Cancel now reliably discards changes and restores the previous layout name.
-- **Robust Clipboard Restore on InsertText**: Enhanced clipboard format restoration during `InsertText` actions by introducing resilient retry backoffs and exception isolation against external clipboard monitors and history managers.
+- **Uninstall leaves nothing behind**: Uninstalling now also removes the Screen Brightness and backup-settings safety copies created by a "Wipe Settings" install.
+- **No more stalls while holding a hotkey**: Click sounds now play without tying up background threads, so holding a shortcut no longer slows timers or other work.
+- **Smoother brightness changes with several monitors**: Waiting for the monitor connection no longer ties up background threads, so brightness changes and the rest of the app stay responsive.
+- **Desktop Organizer undo is reliable**: Undo can no longer apply the same layout twice or lose a layout when a display change happens at the same moment.
+- **Desktop Organizer respects the active settings folder**: Layouts are always saved to and loaded from the current settings folder.
+- **Screen Brightness Atomic Persistence & Non-Truncating LKG Backup**: Replaced ad-hoc temporary file moves and non-atomic `File.Copy` overwrites in `ScreenBrightnessService.SaveConfigInternal` with unified `AtomicFileWriter.WriteAtomic`. Added deterministic `try...finally` temporary file cleanup to prevent orphaned `.tmp` file leaks, eliminated 0-byte truncation risks on `screen_brightness.lkg.json` during sudden power loss, and retained transient lock retry backoff with structured `LogDdc` diagnostics.
 
 ## [v2026.10.20.1850] - 2026-10-20
 
