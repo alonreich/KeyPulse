@@ -550,70 +550,100 @@ function Test-CompiledOutput {
     return $true
 }
 
-# SIG_01: Authenticode code-signing helper with RFC-3161 Digicert timestamping (no self-signed untrusted root fallback)
+# SIG_01: Free Authenticode signing with the self-signed KeyPulse release certificate.
+# The certificate's thumbprint is pinned inside the app (src\KeyPulse\AuthenticodeVerifier.cs,
+# PinnedSignerThumbprints), so the updater trusts exactly this signer without a paid CA. The private
+# key is used straight from the Windows certificate store (Cert:\CurrentUser\My, created by
+# ssl-certificate\Create-SelfSignedCert.ps1) - no password, no signtool, no cost. A .pfx is only a
+# fallback (KEYPULSE_CERT_PATH + KEYPULSE_CERT_PASSWORD). Timestamping uses free RFC-3161 servers
+# so signatures stay valid after the certificate expires.
+$script:TimestampServers = @(
+    'http://timestamp.digicert.com',
+    'http://timestamp.sectigo.com',
+    'http://timestamp.globalsign.com/tsa/r6advanced1'
+)
+
+function Get-PinnedSignerThumbprints {
+    $verifier = Join-Path $repoRoot 'src\KeyPulse\AuthenticodeVerifier.cs'
+    if (-not (Test-Path -LiteralPath $verifier)) { return @() }
+    $text = [System.IO.File]::ReadAllText($verifier)
+    $block = [regex]::Match($text, 'PinnedSignerThumbprints\s*=\s*\{(?<body>[^}]*)\}')
+    if (-not $block.Success) { return @() }
+    return @([regex]::Matches($block.Groups['body'].Value, '"(?<t>[0-9A-Fa-f]{40})"') | ForEach-Object { $_.Groups['t'].Value.ToUpperInvariant() })
+}
+
+function Get-SigningCertificate {
+    param([string[]]$Pinned)
+    $wanted = if ($env:KEYPULSE_CERT_THUMBPRINT) { @($env:KEYPULSE_CERT_THUMBPRINT.Trim().ToUpperInvariant()) } else { $Pinned }
+    foreach ($store in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\My')) {
+        foreach ($tp in $wanted) {
+            $cert = Get-ChildItem -Path $store -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $tp -and $_.HasPrivateKey } | Select-Object -First 1
+            if ($cert) { return $cert }
+        }
+    }
+    if ($env:KEYPULSE_CERT_PATH -and (Test-Path -LiteralPath $env:KEYPULSE_CERT_PATH)) {
+        try {
+            return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($env:KEYPULSE_CERT_PATH, $env:KEYPULSE_CERT_PASSWORD)
+        } catch {
+            Write-Host "WARNING: [SIGN] Could not open the .pfx in KEYPULSE_CERT_PATH: $($_.Exception.Message)"
+        }
+    }
+    return $null
+}
+
+function Test-PinnedSignature {
+    param([string]$TargetExe, [string[]]$Pinned)
+    $sig = Get-AuthenticodeSignature -FilePath $TargetExe
+    if ($null -eq $sig.SignerCertificate) { return $false }
+    # A self-signed root reports UnknownError (untrusted root) while the digest is intact; HashMismatch
+    # or NotSigned are failures. The app applies the same rule through WinVerifyTrust.
+    if ($sig.Status -ne 'Valid' -and $sig.Status -ne 'UnknownError') { return $false }
+    return $Pinned -contains $sig.SignerCertificate.Thumbprint.ToUpperInvariant()
+}
+
 function Invoke-CodeSign {
     param([string]$TargetExe)
-    $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)
-    $thumbprint = $env:KEYPULSE_CERT_THUMBPRINT
-
-    if ($thumbprint -and $signtool) {
-        Write-Host "[SIGN] Authenticode signing $TargetExe using certificate thumbprint $thumbprint..."
-        & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $TargetExe > $null 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "[SIGN] Executable signed and timestamped via certificate store. [OK]"
-            return $true
-        } else {
-            Write-Host "WARNING: [SIGN] Signing via certificate store failed (exit code $LASTEXITCODE)."
-            return $false
-        }
-    }
-
-    $certPath = if ($env:KEYPULSE_CERT_PATH -and (Test-Path -LiteralPath $env:KEYPULSE_CERT_PATH)) {
-        $env:KEYPULSE_CERT_PATH
-    } else {
-        $null
-    }
-
-    if (-not $certPath) {
-        Write-Host "[SIGN] No trusted code signing certificate configured ($env:KEYPULSE_CERT_THUMBPRINT or $env:KEYPULSE_CERT_PATH)."
-        Write-Host "[SIGN] Skipping Authenticode signing to avoid untrusted root chain errors (CERT_E_UNTRUSTEDROOT)."
-        Write-Host "[SIGN] Release SHA256 can be submitted to Microsoft Defender Security Intelligence portal for free reputation."
+    $pinned = Get-PinnedSignerThumbprints
+    if ($pinned.Count -eq 0) {
+        Write-Host "WARNING: [SIGN] No pinned signer thumbprint found in AuthenticodeVerifier.cs."
         return $false
     }
 
-    $certPwd = $env:KEYPULSE_CERT_PASSWORD
-
-    Write-Host "[SIGN] Authenticode signing $TargetExe with $([System.IO.Path]::GetFileName($certPath))..."
-    $signed = $false
-    if ($signtool) {
-        $pwdArg = if ($certPwd) { @('/p', $certPwd) } else { @() }
-        & $signtool sign /f $certPath @pwdArg /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $TargetExe > $null 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $signed = $true
-        } else {
-            Write-Host "WARNING: [SIGN] signtool signing failed with code $LASTEXITCODE."
-        }
+    if (Test-PinnedSignature -TargetExe $TargetExe -Pinned $pinned) {
+        Write-Host "[SIGN] Already signed by the pinned KeyPulse certificate.          [OK]"
+        return $true
     }
-    if (-not $signed) {
+
+    $cert = Get-SigningCertificate -Pinned $pinned
+    if ($null -eq $cert) {
+        Write-Host "WARNING: [SIGN] The KeyPulse signing certificate ($($pinned -join ', ')) is not in Cert:\CurrentUser\My with its private key."
+        Write-Host "WARNING: [SIGN] Import ssl-certificate\KeyPulse_CodeSigning.pfx into the current user's Personal store, or set KEYPULSE_CERT_PATH / KEYPULSE_CERT_PASSWORD."
+        return $false
+    }
+    if ($pinned -notcontains $cert.Thumbprint.ToUpperInvariant()) {
+        Write-Host "WARNING: [SIGN] Certificate $($cert.Thumbprint) is not pinned in AuthenticodeVerifier.cs; installed apps would reject this update. Add it to PinnedSignerThumbprints first."
+        return $false
+    }
+
+    foreach ($tsa in $script:TimestampServers) {
         try {
-            $pfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPwd)
-            try {
-                $sig = Set-AuthenticodeSignature -FilePath $TargetExe -Certificate $pfx -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
-                if ($null -ne $sig.SignerCertificate) { $signed = $true }
-            } catch {
-                Write-Host "WARNING: [SIGN] PowerShell signing failed: $($_.Exception.Message)"
+            Write-Host "[SIGN] Signing $([System.IO.Path]::GetFileName($TargetExe)) with $($cert.Thumbprint), timestamp $tsa..."
+            $null = Set-AuthenticodeSignature -FilePath $TargetExe -Certificate $cert -HashAlgorithm SHA256 -TimestampServer $tsa -ErrorAction Stop
+            if (Test-PinnedSignature -TargetExe $TargetExe -Pinned $pinned) {
+                $ts = (Get-AuthenticodeSignature -FilePath $TargetExe).TimeStamperCertificate
+                if ($null -ne $ts) {
+                    Write-Host "[SIGN] Signed, timestamped and verified against the pinned thumbprint. [OK]"
+                    return $true
+                }
+                Write-Host "WARNING: [SIGN] Signed but $tsa returned no timestamp; trying the next server."
             }
         } catch {
-            Write-Host "WARNING: [SIGN] Could not load certificate: $($_.Exception.Message)"
+            Write-Host "WARNING: [SIGN] Signing with timestamp server $tsa failed: $($_.Exception.Message)"
         }
     }
-    if ($signed) {
-        Write-Host "[SIGN] Executable signed and timestamped successfully.         [OK]"
-        return $true
-    } else {
-        Write-Host "WARNING: [SIGN] Signing attempt did not complete successfully."
-        return $false
-    }
+
+    Write-Host "WARNING: [SIGN] Could not produce a timestamped signature (all timestamp servers failed)."
+    return $false
 }
 
 # RELTAG_01 / RETAIN_01: Draft-first GitHub release publisher with SHA-256 verification and 5-release retention keeping git tags.
@@ -648,8 +678,12 @@ function Publish-GitHubRelease {
         return $false
     }
 
-    # SIG_01: Authenticode code-signing hook
-    Invoke-CodeSign -TargetExe $ExePath | Out-Null
+    # SIG_01: an official release must carry the pinned signature. Unsigned updates are accepted by the
+    # app only through the published SHA-256, which proves integrity but not who built the file.
+    if (-not (Invoke-CodeSign -TargetExe $ExePath)) {
+        Write-Host "[PUBLISH] STOPPED: the release executable is not signed by the pinned KeyPulse certificate."
+        return $false
+    }
 
     $hasher = [System.Security.Cryptography.SHA256]::Create()
     $fileStream = [System.IO.File]::OpenRead($ExePath)

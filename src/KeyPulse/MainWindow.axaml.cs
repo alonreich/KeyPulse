@@ -265,6 +265,7 @@ namespace KeyPulse
             try
             {
                 SaveConfig();
+                if (!ConfigStore.Flush(out var flushError)) Program.LogCrash("Could not save before elevating: " + flushError);
             }
             catch (Exception ex)
             {
@@ -472,6 +473,7 @@ namespace KeyPulse
 
             _currentConfig = loaded;
             foreach (var item in loaded.Hotkeys) Hotkeys.Add(item);
+            ConfigStore.RegisterLiveOwner(ApplyExternalConfigMutation);
 
             _searchText = string.Empty;
             _sortColumn = loaded.ShortcutSortColumn ?? string.Empty;
@@ -781,6 +783,37 @@ namespace KeyPulse
             }, System.Threading.Tasks.TaskScheduler.Default);
         }
 
+        /// <summary>
+        /// Audit #5: this window owns the live AppConfig. ConfigStore.TryUpdate callers (Desktop
+        /// Organizer / Brightness window geometry, the start-with-Windows mirror) land here instead
+        /// of a disk read-modify-write that the next SaveConfig would have overwritten.
+        /// Returns null on success, or the reason the change was refused.
+        /// </summary>
+        private string? ApplyExternalConfigMutation(Action<AppConfig> mutate)
+        {
+            if (_currentConfig.IsReadOnlySession)
+            {
+                return "Your KeyPulse settings file needs attention, so this change was NOT saved and nothing was lost.";
+            }
+
+            void Apply()
+            {
+                try
+                {
+                    mutate(_currentConfig);
+                    SaveConfig();
+                }
+                catch (Exception ex)
+                {
+                    Program.LogCrash("Applying a settings change failed: " + ex);
+                }
+            }
+
+            if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess()) Apply();
+            else Avalonia.Threading.Dispatcher.UIThread.Post(Apply);
+            return null;
+        }
+
         private void SaveConfig()
         {
             try
@@ -806,7 +839,8 @@ namespace KeyPulse
                 _currentConfig.ShortcutSortColumn = _sortColumn;
                 _currentConfig.ShortcutSortDescending = _sortDescending;
 
-                if (!ConfigStore.Save(_currentConfig, out var saveError) && !string.IsNullOrEmpty(saveError))
+                // Audit #4: serialized here, written to disk by ConfigStore's background writer.
+                if (!ConfigStore.QueueSave(_currentConfig, out var saveError) && !string.IsNullOrEmpty(saveError))
                 {
                     Program.LogCrash("Could not save configuration: " + saveError);
                 }
@@ -956,7 +990,7 @@ namespace KeyPulse
                 {
                     ReleaseRegistration(h);
                     h.RegistrationStatus = "Ready (Manual)";
-                    h.StatusHint = "Ready to run manually via [RUN] or from tray Quick Actions.";
+                    h.StatusHint = "Run it with ▶ Run or from the tray menu.";
                     h.SuggestedForCombo = string.Empty;
                     QueueAvailabilityCheck(h);
                     continue;
@@ -1059,7 +1093,7 @@ namespace KeyPulse
             if (entry.KeyCombinations.Count == 0)
             {
                 entry.RegistrationStatus = "Ready (Manual)";
-                entry.StatusHint = "Ready to run manually via [RUN] or from tray Quick Actions.";
+                entry.StatusHint = "Run it with ▶ Run or from the tray menu.";
             }
             else if (entry.TargetReachable == true)
             {
@@ -1128,7 +1162,7 @@ namespace KeyPulse
                         if (!IsStatus(entry, "Ready"))
                         {
                             entry.RegistrationStatus = "Ready (Manual)";
-                            entry.StatusHint = "Ready to run manually via [RUN] or from tray Quick Actions.";
+                            entry.StatusHint = "Run it with ▶ Run or from the tray menu.";
                             RefreshStatusSummary();
                         }
                     }
@@ -4118,29 +4152,9 @@ namespace KeyPulse
         /// <summary>ISSUE_19: picks up a target staged by a second launch of KeyPulse.</summary>
         public void ConsumeStagedAdd()
         {
-            try
+            foreach (var path in Program.TakeStagedAddTargets())
             {
-                if (!File.Exists(Program.StagedAddPath)) return;
-
-                string[] lines;
-                lock (typeof(Program))
-                {
-                    lines = File.ReadAllLines(Program.StagedAddPath);
-                    try { File.Delete(Program.StagedAddPath); } catch { }
-                }
-
-                foreach (var line in lines)
-                {
-                    var path = line.Trim();
-                    if (path.Length > 0)
-                    {
-                        StageExternalAdd(path);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Program.LogDebug("Could not consume the staged add: " + ex.Message);
+                StageExternalAdd(path);
             }
         }
 
@@ -4188,6 +4202,7 @@ namespace KeyPulse
                 || e.CloseReason == WindowCloseReason.ApplicationShutdown
                 || e.CloseReason == WindowCloseReason.OSShutdown)
             {
+                ConfigStore.Flush();
                 return;
             }
 

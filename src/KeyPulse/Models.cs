@@ -158,7 +158,7 @@ namespace KeyPulse
             get
             {
                 if (_keyCombinations == null || _keyCombinations.Count == 0)
-                    return "No keyboard shortcut assigned. Run manually or from Quick Actions.";
+                    return "No shortcut key yet. Run it with ▶ Run or from the tray menu.";
                 if (_keyCombinations.Count == 1)
                     return _keyCombinations[0];
                 return string.Join("\n", _keyCombinations);
@@ -334,7 +334,7 @@ namespace KeyPulse
         public string QuickActionIndicator => AddToQuickActionMenu ? "⚡" : string.Empty;
 
         [JsonIgnore]
-        public string QuickActionTooltip => AddToQuickActionMenu ? "In Quick Action Menu (Right-click system tray)" : string.Empty;
+        public string QuickActionTooltip => AddToQuickActionMenu ? "Shown in the tray menu (right-click the KeyPulse tray icon)" : string.Empty;
 
         /// <summary>True while the value must not be shown anywhere in the list.</summary>
         [JsonIgnore]
@@ -756,6 +756,10 @@ namespace KeyPulse
         public int DisplayCount { get; set; }
         public int IconSpacingX { get; set; } = 76;
         public int IconSpacingY { get; set; } = 100;
+        /// <summary>Desktop icon size in pixels when the layout was saved (48 = Medium). 0 = unknown (older layouts).</summary>
+        public int DesktopIconSize { get; set; } = 0;
+        /// <summary>FOLDERVIEWMODE reported with DesktopIconSize (1 = icons).</summary>
+        public uint DesktopViewMode { get; set; } = 0;
         public bool IsAutoSnapshot { get; set; } = false;
         public List<DesktopMonitorSnapshot> Monitors { get; set; } = new();
         public List<DesktopIconSnapshot> Icons { get; set; } = new();
@@ -824,6 +828,17 @@ namespace KeyPulse
         public string StepDownHotkey { get; set; } = string.Empty;
         public int StepDelta { get; set; } = 5;
         public bool LockMonitorDifferential { get; set; } = true;
+        /// <summary>Focus Mode key; defaults for existing configs too (empty = no key).</summary>
+        public string FocusModeHotkey { get; set; } = ScreenBrightnessService.DefaultFocusModeHotkey;
+        public string FocusModeName { get; set; } = ScreenBrightnessService.DefaultFocusModeName;
+        /// <summary>Brightness (0-30 %) the other screens drop to.</summary>
+        public int FocusModeDimLevel { get; set; } = 0;
+        /// <summary>Also lower contrast on dimmed screens (never below the hardware contrast floor).</summary>
+        public bool FocusModeLowerContrast { get; set; } = false;
+        public bool FocusModeActive { get; set; } = false;
+        public int FocusModePrimarySlot { get; set; } = 0;
+        /// <summary>Levels of the dimmed screens from before Focus Mode, restored when it is switched off.</summary>
+        public List<ScreenCycleEntry> FocusModeSavedLevels { get; set; } = new();
         public double OverlayWindowX { get; set; } = double.NaN;
         public double OverlayWindowY { get; set; } = double.NaN;
         public double OverlayWindowWidth { get; set; } = 700;

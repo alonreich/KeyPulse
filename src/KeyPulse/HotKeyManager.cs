@@ -147,10 +147,8 @@ namespace KeyPulse
             _thread = new Thread(() =>
             {
                 _hWnd = CreateWindowEx(0, "Static", "KeyPulseMessageWindow", 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                InstallDisplayChangeListener(_hWnd);
                 tcs.Set();
-
-                const int WM_DISPLAYCHANGE = 0x007E;
-                const int WM_POWERBROADCAST = 0x0218;
 
                 int bRet;
                 while ((bRet = GetMessage(out MSG msg, IntPtr.Zero, 0, 0)) != 0)
@@ -179,25 +177,10 @@ namespace KeyPulse
                             try { task(); } catch { }
                         }
                     }
-                    else if (msg.message == WM_DISPLAYCHANGE || msg.message == WM_POWERBROADCAST)
-                    {
-                        ThreadPool.QueueUserWorkItem(_ =>
-                        {
-                            try
-                            {
-                                Program.LogDebug("[System] WM_DISPLAYCHANGE / WM_POWERBROADCAST detected. Refreshing monitors & DDC bus.");
-                                ScreenBrightnessService.OnDisplayChangedOrWoken();
-                                DesktopOrganizerService.HandleDisplayChangeDebounced();
-                            }
-                            catch (Exception ex)
-                            {
-                                Program.LogDebug($"[System] Error handling display change: {ex.Message}");
-                            }
-                        });
-                    }
                     TranslateMessage(ref msg);
                     DispatchMessage(ref msg);
                 }
+                RemoveDisplayChangeListener(_hWnd);
                 DestroyWindow(_hWnd);
                 _hWnd = IntPtr.Zero;
             });
@@ -215,6 +198,155 @@ namespace KeyPulse
                 PostMessage(_hWnd, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
                 _thread?.Join(2000);
                 _thread = null;
+            }
+        }
+
+        // WM_DISPLAYCHANGE and WM_POWERBROADCAST are SENT messages: Windows delivers them straight to
+        // the window procedure and GetMessage never returns them. Checking msg.message in the loop
+        // (the old approach) could never fire, so DDC bus recovery after monitor sleep never ran.
+        // The "Static" window is therefore subclassed, and GUID_CONSOLE_DISPLAY_STATE is registered
+        // so monitor off/on (not only system resume) is reported too.
+        private const uint WM_DISPLAYCHANGE = 0x007E;
+        private const uint WM_POWERBROADCAST = 0x0218;
+        private const int PBT_APMRESUMESUSPEND = 0x0007;
+        private const int PBT_APMRESUMEAUTOMATIC = 0x0012;
+        private const int PBT_POWERSETTINGCHANGE = 0x8013;
+        private const int GWLP_WNDPROC = -4;
+        private const int DisplayRefreshDebounceMs = 750;
+        private static Guid GuidConsoleDisplayState = new("6FE69556-704A-47A0-8F24-C28D936FDA47");
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+        [DllImport("user32.dll", EntryPoint = "CallWindowProcW")]
+        private static extern IntPtr CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr RegisterPowerSettingNotification(IntPtr hRecipient, ref Guid powerSettingGuid, int flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
+
+        private static IntPtr _originalWndProc;
+        private static IntPtr _displayStateNotification;
+        private static int? _lastConsoleDisplayState;
+        private static Timer? _displayRefreshTimer;
+        private static readonly object DisplayRefreshLock = new();
+
+        /// <summary>Hook for tests: replaces the work done once a display event burst settles.</summary>
+        internal static Action? DisplayRefreshOverrideForTesting;
+
+        private static unsafe void InstallDisplayChangeListener(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return;
+            try
+            {
+                var proc = (IntPtr)(delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr, IntPtr, IntPtr>)&SubclassWndProc;
+                _originalWndProc = SetWindowLongPtr(hWnd, GWLP_WNDPROC, proc);
+                if (_originalWndProc == IntPtr.Zero)
+                {
+                    Program.LogDebug($"[System] Could not subclass the message window (win32Err={Marshal.GetLastWin32Error()}); display change recovery is off.");
+                    return;
+                }
+
+                _displayStateNotification = RegisterPowerSettingNotification(hWnd, ref GuidConsoleDisplayState, 0);
+                if (_displayStateNotification == IntPtr.Zero)
+                {
+                    Program.LogDebug($"[System] RegisterPowerSettingNotification failed (win32Err={Marshal.GetLastWin32Error()}); only WM_DISPLAYCHANGE / resume will trigger recovery.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug("[System] Display change listener setup failed: " + ex.Message);
+            }
+        }
+
+        private static void RemoveDisplayChangeListener(IntPtr hWnd)
+        {
+            try
+            {
+                if (_displayStateNotification != IntPtr.Zero) UnregisterPowerSettingNotification(_displayStateNotification);
+                _displayStateNotification = IntPtr.Zero;
+                if (_originalWndProc != IntPtr.Zero && hWnd != IntPtr.Zero) SetWindowLongPtr(hWnd, GWLP_WNDPROC, _originalWndProc);
+                _originalWndProc = IntPtr.Zero;
+                _lastConsoleDisplayState = null;
+                lock (DisplayRefreshLock)
+                {
+                    _displayRefreshTimer?.Dispose();
+                    _displayRefreshTimer = null;
+                }
+            }
+            catch { }
+        }
+
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvStdcall) })]
+        private static IntPtr SubclassWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (msg == WM_DISPLAYCHANGE || msg == WM_POWERBROADCAST)
+                {
+                    int? displayState = null;
+                    if (msg == WM_POWERBROADCAST && wParam.ToInt64() == PBT_POWERSETTINGCHANGE && lParam != IntPtr.Zero)
+                    {
+                        // POWERBROADCAST_SETTING: GUID (16 bytes), DWORD DataLength, then the data.
+                        var setting = Marshal.PtrToStructure<Guid>(lParam);
+                        if (setting == GuidConsoleDisplayState) displayState = Marshal.ReadInt32(lParam, 20);
+                    }
+
+                    var previous = _lastConsoleDisplayState;
+                    if (displayState.HasValue) _lastConsoleDisplayState = displayState;
+                    if (IsDisplayRefreshTrigger(msg, wParam, displayState, previous)) ScheduleDisplayRefresh();
+                }
+            }
+            catch { }
+
+            return CallWindowProc(_originalWndProc, hWnd, msg, wParam, lParam);
+        }
+
+        /// <summary>
+        /// True for a display topology change, a resume from sleep, or a monitor turning back on
+        /// (GUID_CONSOLE_DISPLAY_STATE: 0 = off, 1 = on, 2 = dimmed). Suspend and monitor-off are ignored.
+        /// Windows reports the current display state once, immediately after registration; with no
+        /// previous state that report is only a baseline, so startup does not trigger a bus refresh.
+        /// </summary>
+        internal static bool IsDisplayRefreshTrigger(uint msg, IntPtr wParam, int? displayState, int? previousDisplayState)
+        {
+            if (msg == WM_DISPLAYCHANGE) return true;
+            if (msg != WM_POWERBROADCAST) return false;
+
+            var pbt = wParam.ToInt64();
+            if (pbt == PBT_APMRESUMEAUTOMATIC || pbt == PBT_APMRESUMESUSPEND) return true;
+            return pbt == PBT_POWERSETTINGCHANGE && displayState == 1 && previousDisplayState.HasValue && previousDisplayState != 1;
+        }
+
+        /// <summary>Coalesces a burst of display/power events into one refresh after it settles.</summary>
+        internal static void ScheduleDisplayRefresh()
+        {
+            lock (DisplayRefreshLock)
+            {
+                _displayRefreshTimer ??= new Timer(_ => RunDisplayRefresh(), null, Timeout.Infinite, Timeout.Infinite);
+                _displayRefreshTimer.Change(DisplayRefreshDebounceMs, Timeout.Infinite);
+            }
+        }
+
+        private static void RunDisplayRefresh()
+        {
+            try
+            {
+                if (DisplayRefreshOverrideForTesting != null)
+                {
+                    DisplayRefreshOverrideForTesting();
+                    return;
+                }
+
+                Program.LogDebug("[System] Display change / resume / monitor-on detected. Refreshing monitors & DDC bus.");
+                ScreenBrightnessService.OnDisplayChangedOrWoken();
+                DesktopOrganizerService.HandleDisplayChangeDebounced();
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug($"[System] Error handling display change: {ex.Message}");
             }
         }
 
@@ -420,6 +552,36 @@ namespace KeyPulse
                 if (active.modifiers == modifiers && active.vk == vk) return true;
             }
             return false;
+        }
+
+        private static readonly Dictionary<uint, string> FriendlyKeyNames = new()
+        {
+            [0x6A] = "Num *", [0x6B] = "Num +", [0x6C] = "Num Enter", [0x6D] = "Num -", [0x6E] = "Num .", [0x6F] = "Num /",
+            [0x60] = "Num 0", [0x61] = "Num 1", [0x62] = "Num 2", [0x63] = "Num 3", [0x64] = "Num 4",
+            [0x65] = "Num 5", [0x66] = "Num 6", [0x67] = "Num 7", [0x68] = "Num 8", [0x69] = "Num 9",
+            [0xBB] = "=", [0xBD] = "-", [0xBC] = ",", [0xBE] = ".", [0xBF] = "/", [0xBA] = ";", [0xDE] = "'",
+            [0xDB] = "[", [0xDD] = "]", [0xDC] = "\\", [0xC0] = "`", [0x2E] = "Del", [0x22] = "PgDn", [0x21] = "PgUp"
+        };
+
+        /// <summary>Human-friendly text for a comma-separated combo list, e.g. "Ctrl+Alt+Num *, Ctrl+Alt+=".</summary>
+        public static string DescribeComboList(string? combos)
+        {
+            if (string.IsNullOrWhiteSpace(combos)) return string.Empty;
+            var parts = new List<string>();
+            foreach (var raw in combos.Split(','))
+            {
+                var combo = raw.Trim();
+                if (combo.Length == 0) continue;
+                if (!ParseCombo(combo, out var mods, out var vk)) { parts.Add(combo); continue; }
+                var words = new List<string>();
+                if ((mods & ModCtrl) != 0) words.Add("Ctrl");
+                if ((mods & ModAlt) != 0) words.Add("Alt");
+                if ((mods & ModShift) != 0) words.Add("Shift");
+                if ((mods & ModWin) != 0) words.Add("Win");
+                words.Add(FriendlyKeyNames.TryGetValue(vk, out var friendly) ? friendly : VirtualKeyToName(vk));
+                parts.Add(string.Join("+", words));
+            }
+            return string.Join(", ", parts);
         }
 
         public static string DescribeCombo(uint modifiers, uint vk)

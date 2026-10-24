@@ -15,6 +15,8 @@ public partial class App : Application
 
     public bool IsExiting { get; private set; }
 
+    internal const int ExitBusLockTimeoutMs = 1500;
+
     public static MainWindow? HiddenWindow;
 
     /// <summary>ISSUE_21: honour the user's Light / Dark / System choice.</summary>
@@ -37,19 +39,38 @@ public partial class App : Application
     /// </summary>
     public static void UpdateTrayStatus(int active, int inactive)
     {
+        _lastTrayActive = active;
+        _lastTrayInactive = inactive;
+        _hasTrayCounts = true;
+        RefreshTrayTooltip();
+    }
+
+    private static int _lastTrayActive;
+    private static int _lastTrayInactive;
+    private static bool _hasTrayCounts;
+
+    /// <summary>F7: the tooltip also says when Focus Mode is on, so a dark second screen is never a mystery.</summary>
+    private static void RefreshTrayTooltip()
+    {
         try
         {
             var current = Current;
-            if (current == null) return;
+            if (current == null || !_hasTrayCounts) return;
 
             var icons = TrayIcon.GetIcons(current);
             if (icons == null || icons.Count == 0) return;
 
             if (!icons[0].IsVisible) icons[0].IsVisible = true;
 
-            icons[0].ToolTipText = inactive > 0
-                ? $"KeyPulse - {active} working, {inactive} NOT working (click to fix)"
-                : $"KeyPulse - {active} shortcut{(active == 1 ? "" : "s")} working";
+            var text = _lastTrayInactive > 0
+                ? $"KeyPulse - {_lastTrayActive} working, {_lastTrayInactive} NOT working (click to fix)"
+                : $"KeyPulse - {_lastTrayActive} shortcut{(_lastTrayActive == 1 ? "" : "s")} working";
+            if (ScreenBrightnessService.IsFeatureActive && ScreenBrightnessService.IsFocusModeActive)
+            {
+                var cfg = ScreenBrightnessService.LoadConfig();
+                text += $" - {ScreenBrightnessService.FocusModeDisplayName(cfg)} on";
+            }
+            icons[0].ToolTipText = text;
         }
         catch
         {
@@ -71,7 +92,11 @@ public partial class App : Application
                 _brightnessHookRegistered = true;
                 ScreenBrightnessService.StateChanged += () =>
                 {
-                    Avalonia.Threading.Dispatcher.UIThread.Post(() => UpdateTrayQuickActions(null));
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        UpdateTrayQuickActions(null);
+                        RefreshTrayTooltip();
+                    });
                 };
             }
 
@@ -107,6 +132,13 @@ public partial class App : Application
                     pItem.Click += (s, e) => ScreenBrightnessService.ApplyProfileAsync(capturedProfile);
                     trayIcon.Menu.Items.Add(pItem);
                 }
+
+                // F1/F7: Focus Mode toggle with a checkmark while it is on.
+                var focusName = ScreenBrightnessService.FocusModeDisplayName(sbConfig);
+                var focusKey = string.IsNullOrWhiteSpace(sbConfig.FocusModeHotkey) ? string.Empty : $" ({HotkeyManager.DescribeComboList(sbConfig.FocusModeHotkey)})";
+                var focusItem = new NativeMenuItem((sbConfig.FocusModeActive ? "    ✓ " : "       ") + focusName + focusKey);
+                focusItem.Click += (s, e) => ScreenBrightnessService.ToggleFocusMode();
+                trayIcon.Menu.Items.Add(focusItem);
                 trayIcon.Menu.Items.Add(new NativeMenuItemSeparator());
             }
 
@@ -340,6 +372,7 @@ public partial class App : Application
                 }
 
                 DesktopOrganizerService.EnsureAutoSnapshotScheduler();
+                _ = DesktopOrganizerService.LogDesktopShellHealthAsync();
                 _ = System.Threading.Tasks.Task.Run(async () =>
                 {
                     await System.Threading.Tasks.Task.Delay(15000);
@@ -457,8 +490,11 @@ public partial class App : Application
     public void Exit_Clicked(object? sender, System.EventArgs e)
     {
         IsExiting = true;
+        ConfigStore.Flush();
         ScreenBrightnessService.FlushConfig();
-        try { ScreenBrightnessService.InvalidateAllSessions(); } catch { }
+        // Short wait: a single DDC transaction finishes well within it, and if one is still running
+        // the handles are left for process teardown instead of being destroyed mid-transaction.
+        try { ScreenBrightnessService.InvalidateAllSessions(ExitBusLockTimeoutMs); } catch { }
         IpcService.StopServer();
         InputSimulator.CancelTyping();
         HotkeyManager.DisableCaptureHook();

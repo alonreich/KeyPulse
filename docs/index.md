@@ -23,12 +23,12 @@ A change that crosses subsystems (for example: a new persisted setting shown in 
 
 | File | Read |
 |---|---|
-| `Program.cs`, `App.axaml(.cs)`, `SetupWindow.cs`, `UpdateChecker.cs`, `StartupElevationService.cs` | boot-install-update.md (+ main-window.md for `StartupElevationService`) |
+| `Program.cs`, `App.axaml(.cs)`, `SetupWindow.cs`, `UpdateChecker.cs`, `AuthenticodeVerifier.cs`, `StartupElevationService.cs` | boot-install-update.md (+ main-window.md for `StartupElevationService`) |
 | `MainWindow.axaml(.cs)`, `MainWindow.Actions.cs`, `MainWindow.Settings.cs`, `MainWindow.Backup.cs`, `BrowserDetectionService.cs`, `HotkeyCoordinator.cs` | main-window.md |
 | `HotKeyManager.cs`, `InputSimulator.cs` | hotkeys-input.md |
 | `BackupService.cs` | backup-restore.md |
-| `DesktopOrganizerService.cs`, `DesktopOrganizerWindow.axaml(.cs)` | desktop-organizer.md |
-| `ScreenBrightnessService.cs`, `ScreenBrightnessWindow.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessListReconciler.cs`, `DdcWriteSafety.cs` | screen-brightness.md |
+| `DesktopOrganizerService.cs`, `DesktopOrganizerService.Shell.cs`, `DesktopOrganizerWindow.axaml(.cs)` | desktop-organizer.md |
+| `ScreenBrightnessService.cs`, `ScreenBrightnessService.FocusMode.cs`, `ScreenBrightnessWindow.cs`, `ScreenBrightnessWindow.Shortcuts.cs`, `ScreenBrightnessOverlayWindow.cs`, `ScreenBrightnessListReconciler.cs`, `DdcWriteSafety.cs` | screen-brightness.md |
 | `Models.cs`, `ConfigStore.cs`, `CryptoHelper.cs`, `AtomicFileWriter.cs`, `IpcService.cs`, `ComActivation.cs` | persistence-interop.md |
 | `build\*`, `*.cmd`, `developer_tools\*`, `.github\workflows\*` | dev-workflow-release.md |
 

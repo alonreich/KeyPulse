@@ -15,7 +15,7 @@
         MinHeight="500"
         WindowStartupLocation="CenterScreen">
 
-    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto,Auto" Margin="20">
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto" Margin="20">
 
         <!-- Header Block -->
         <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
@@ -46,9 +46,41 @@
             </Border>
         </Grid>
 
+        <StackPanel Grid.Row="1">
+        <!-- Desktop icon size (D3): always shown; warning colours + Reset when not the normal size -->
+        <Border Name="IconSizeBanner"
+                Background="{DynamicResource AppPanelRaisedBrush}"
+                BorderBrush="{DynamicResource AppBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="12,8"
+                Margin="0,0,0,14">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center" Margin="0,0,10,0">
+                    <TextBlock Name="IconSizeStatusText"
+                               Text="Icon size: checking..."
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap" />
+                    <TextBlock Name="IconSizeHintText"
+                               IsVisible="False"
+                               Classes="Muted"
+                               FontSize="11"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1"
+                        Name="ResetIconSizeBtn"
+                        Content="Reset to normal"
+                        Classes="Secondary"
+                        IsVisible="False"
+                        VerticalAlignment="Center"
+                        Click="ResetIconSize_Click"
+                        ToolTip.Tip="Sets the desktop icons back to Medium, the Windows default. Windows will re-flow your icons; arrange them, then save." />
+            </Grid>
+        </Border>
+
         <!-- Auto-Arrange Warning Banner (visible only if Windows Auto Arrange is on) -->
-        <Border Grid.Row="1"
-                Name="AutoArrangeWarning"
+        <Border Name="AutoArrangeWarning"
                 IsVisible="False"
                 Background="{DynamicResource AppPanelRaisedBrush}"
                 BorderBrush="{DynamicResource AppWarningBrush}"
@@ -66,9 +98,10 @@
                            VerticalAlignment="Center" />
             </Grid>
         </Border>
+        </StackPanel>
 
-        <!-- Action Toolbar -->
-        <Border Grid.Row="2"
+        <!-- Action Toolbar (below the saved layouts: restoring is the main task) -->
+        <Border Grid.Row="3"
                 Classes="Panel"
                 Margin="0,0,0,14"
                 Padding="12">
@@ -117,7 +150,7 @@
         </Border>
 
         <!-- Profiles List Area -->
-        <Border Grid.Row="3"
+        <Border Grid.Row="2"
                 Classes="Panel"
                 Padding="8"
                 Margin="0,0,0,14">
@@ -141,7 +174,7 @@
                                Classes="SectionTitle"
                                FontSize="16"
                                HorizontalAlignment="Center" />
-                    <TextBlock Text="Arrange your desktop icons the way you want them, type a name above, and click 'Save Current Layout'."
+                    <TextBlock Text="Arrange your desktop icons the way you want them, type a name below, and click 'Save Current Layout'."
                                Classes="Muted"
                                TextWrapping="Wrap"
                                TextAlignment="Center"
@@ -150,29 +183,15 @@
             </Grid>
         </Border>
 
-        <!-- Automation & Behavioral Settings Panel -->
-        <Border Grid.Row="4"
-                Classes="Panel"
-                Padding="14,12"
-                Margin="0,0,0,12">
-            <StackPanel Spacing="10">
-                <!-- Panel Header + Restore Defaults -->
-                <Grid ColumnDefinitions="*,Auto">
-                    <TextBlock Grid.Column="0"
-                               Text="Automation &amp; Restore Preferences"
-                               FontWeight="Bold"
-                               FontSize="13"
-                               VerticalAlignment="Center" />
-                    <Button Grid.Column="1"
-                            Name="RestoreDefaultsBtn"
-                            Content="Restore Defaults"
-                            Classes="Secondary"
-                            TabIndex="11"
-                            Padding="10,4"
-                            FontSize="12"
-                            Click="RestoreDefaults_Click"
-                            ToolTip.Tip="Reset these desktop automation and icon placement settings back to their original out-of-the-box defaults. Your saved layout profiles are kept safe." />
-                </Grid>
+        <!-- Automatic options (folded away: set once, rarely changed) -->
+        <Expander Grid.Row="4"
+                  Name="AutomaticExpander"
+                  Header="Automatic"
+                  IsExpanded="False"
+                  HorizontalAlignment="Stretch"
+                  HorizontalContentAlignment="Stretch"
+                  Margin="0,0,0,12">
+            <StackPanel Spacing="10" Margin="4,4,4,2">
 
                 <!-- Auto-Restore Checkbox -->
                 <StackPanel Spacing="2">
@@ -300,14 +319,24 @@
                         <ComboBoxItem Content="Group in center of secondary monitor" />
                     </ComboBox>
                 </WrapPanel>
+
+                <Button Name="RestoreDefaultsBtn"
+                        Content="Reset organizer options"
+                        Classes="Secondary"
+                        TabIndex="11"
+                        Padding="10,4"
+                        FontSize="12"
+                        HorizontalAlignment="Left"
+                        Click="RestoreDefaults_Click"
+                        ToolTip.Tip="Resets the options in this section. Your saved layouts are kept." />
             </StackPanel>
-        </Border>
+        </Expander>
 
         <!-- Footer / Status Notification Bar -->
         <Grid Grid.Row="5" ColumnDefinitions="*,Auto">
             <TextBlock Grid.Column="0"
                        Name="StatusNotificationText"
-                       Text="Ready."
+                       Text=""
                        Classes="Muted"
                        FontSize="12"
                        VerticalAlignment="Center" />

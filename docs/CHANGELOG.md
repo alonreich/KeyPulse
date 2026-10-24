@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Focus Mode** (Ctrl+Alt+Num *): dims every screen except your main one. Press it again to bring them back; your main screen stays where it is. Linked screens (⇄) follow your main screen again as soon as you change its brightness. Rename it, pick how dark (0-30%) and the key in Brightness settings. While it is on, the tray menu shows a checkmark and the brightness slider shows a "Turn off" button.
+- Desktop Organizer watches your **desktop icon size**. If Ctrl + mouse wheel changed it, you see it right away, with a **Reset to normal** button and the keys to fix it yourself. Saving a layout at an unusual size asks first.
+- Every saved layout remembers its icon size, and restoring it puts that size back first, so icons land exactly where you saved them.
+
+### Changed
+- Brightness settings: all brightness shortcuts are in **one list**. Rarely used options are under **Advanced**.
+- Clearer names: "Brightness slider" and "Brightness settings"; "Keep the gap between screens"; "Screen shortcuts"; "Show in tray menu".
+- Settings: Brightness and Desktop Organizer options are only in their own windows now. One **Reset…** button lets you pick exactly what to reset.
+- Desktop Organizer: your layouts come first; automatic options are folded under **Automatic**.
+- Official releases are now digitally signed, at no cost.
+
+### Fixed
+- Desktop Organizer could not save or restore layouts in installed versions of KeyPulse. It works again.
+- "Run as admin" now talks to Windows Task Scheduler directly again in installed versions, instead of always falling back to a slower command-line tool.
+- Brightness control now recovers by itself after your monitors sleep and wake up, or after a display is plugged in. Before, the recovery never actually ran.
+- After an update, KeyPulse makes sure its graphics components match the new version. Before, an update could start with old components and crash at startup.
+- Clicking or resizing things in the main window no longer pauses while settings are saved. Saving happens in the background, and everything is still written before KeyPulse exits or restarts.
+- Settings backups now cover a real history (recent ones plus one per day for two weeks) instead of the last few seconds of edits.
+- Window positions of the Desktop Organizer and Brightness windows are no longer lost when the main window saves its own settings.
+- "Add to KeyPulse" from Explorer no longer loses items when several are added quickly or another app is slow.
+- Closing KeyPulse no longer hangs for up to 5 seconds while a monitor is busy.
+
+### Security
+- Updates are only installed when the download is signed by the KeyPulse release certificate (checked properly by Windows), or matches its published checksum. A file that merely claims to be from "KeyPulse" is rejected.
+
 ## [v2026.10.23.1922] - 2026-10-23
 
 ### Changed

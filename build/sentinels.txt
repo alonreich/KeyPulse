@@ -33,3 +33,26 @@ GetTargetKeyboardLayout=src/KeyPulse/InputSimulator.cs
 GetClipboardSequenceNumber=src/KeyPulse/InputSimulator.cs
 SaveAllWipeSafetyCopies=src/KeyPulse/ConfigStore.cs
 WriteAtomic=src/KeyPulse/AtomicFileWriter.cs
+
+# Pre-Ship Architectural Audit Guards
+WinVerifyTrust=src/KeyPulse/AuthenticodeVerifier.cs
+PinnedSignerThumbprints=src/KeyPulse/AuthenticodeVerifier.cs
+NativeLibFingerprintFileName=src/KeyPulse/Program.cs
+SubclassWndProc=src/KeyPulse/HotKeyManager.cs
+RegisterPowerSettingNotification=src/KeyPulse/HotKeyManager.cs
+QueueSave=src/KeyPulse/ConfigStore.cs
+RegisterLiveOwner=src/KeyPulse/ConfigStore.cs
+SelectBackupsToPrune=src/KeyPulse/ConfigStore.cs
+IsPositiveAck=src/KeyPulse/IpcService.cs
+TakeStagedAddTargets=src/KeyPulse/Program.cs
+ExitBusLockTimeoutMs=src/KeyPulse/App.axaml.cs
+
+# Free Signing, NativeAOT Desktop Shell, Icon Size & Focus Mode Guards
+Test-PinnedSignature=build/BuildPipeline.ps1
+DesktopShellView=src/KeyPulse/DesktopOrganizerService.Shell.cs
+FolderView2GetViewModeAndIconSizeSlot=src/KeyPulse/DesktopOrganizerService.cs
+CollapseLinkedFocusLocked=src/KeyPulse/ScreenBrightnessService.FocusMode.cs
+PrepareForMainScreenAdjustment=src/KeyPulse/ScreenBrightnessOverlayWindow.cs
+PrepareForMainScreenAdjustment=src/KeyPulse/ScreenBrightnessWindow.cs
+TaskSchedulerCom=src/KeyPulse/Program.cs
+IsNotFound=src/KeyPulse/TaskSchedulerCom.cs

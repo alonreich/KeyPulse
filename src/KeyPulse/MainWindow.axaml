@@ -23,7 +23,7 @@
                   ColumnDefinitions="Auto,Auto,*,Auto">
                 <TextBlock Grid.Row="0"
                            Grid.Column="0"
-                           Text="Shortcuts (Alternative Keys)"
+                           Text="Shortcut keys"
                            Classes="Label"
                            Margin="0,0,8,4" />
                 <TextBlock Grid.Row="0"
@@ -176,7 +176,7 @@
                               TabIndex="5" />
                     <CheckBox Grid.Column="2"
                               Name="QuickActionCheck"
-                              Content="Add to Quick Action Menu"
+                              Content="Show in tray menu"
                               ToolTip.Tip="Show this shortcut in the right-click system tray menu for one-click execution without using the keyboard"
                               Margin="0,0,8,0"
                               VerticalAlignment="Center"
@@ -707,7 +707,7 @@
                         Orientation="Horizontal"
                         Spacing="8"
                         HorizontalAlignment="Right">
-                <Button x:Name="ScreenBrightnessBottomBtn" Content="Screen Brightness"
+                <Button x:Name="ScreenBrightnessBottomBtn" Content="Brightness"
                         Classes="Secondary"
                         Click="ScreenBrightness_Click"
                         TabIndex="16"

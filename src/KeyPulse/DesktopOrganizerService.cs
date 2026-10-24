@@ -29,7 +29,7 @@ namespace KeyPulse
         public bool IsReadOnly => Status == DesktopOrganizerLoadStatus.Inaccessible || Status == DesktopOrganizerLoadStatus.Corrupt;
     }
 
-    public static class DesktopOrganizerService
+    public static partial class DesktopOrganizerService
     {
         private const int GWL_STYLE = -16;
         private const int LVS_AUTOARRANGE = 0x0100;
@@ -93,85 +93,6 @@ namespace KeyPulse
         private static extern bool UpdateWindow(IntPtr hWnd);
 
 
-        [ComImport, Guid("85CB6900-4D95-11CF-960C-0080C7F4EE85"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
-        private interface IShellWindows
-        {
-            int Count { get; }
-            [return: MarshalAs(UnmanagedType.IDispatch)] object Item([MarshalAs(UnmanagedType.Struct)] object index);
-            [return: MarshalAs(UnmanagedType.IUnknown)] object _NewEnum();
-            void Register([MarshalAs(UnmanagedType.IDispatch)] object pid, int hwnd, int swClass, out int pdwCookie);
-            void RegisterPending(int lThreadId, [In] ref object pvarloc, [In] ref object pvarlocRoot, int swClass, out int pdwCookie);
-            void Revoke(int dwCookie);
-            void OnNavigated(int dwCookie, [In] ref object pvarloc);
-            [PreserveSig]
-            int FindWindowSW([In] ref object pvarloc, [In] ref object pvarlocRoot, int swClass, out int phwnd, int swflags, [MarshalAs(UnmanagedType.IDispatch)] out object ppdispOut);
-            void OnCreated(int dwCookie, [MarshalAs(UnmanagedType.IUnknown)] object punk);
-            void ProcessAttachDetach(bool fAttach);
-        }
-
-        [ComImport, Guid("6D5140C1-7436-11CE-8034-00AA006009FA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IServiceProvider
-        {
-            [return: MarshalAs(UnmanagedType.IUnknown)]
-            object QueryService([In] ref Guid guidService, [In] ref Guid riid);
-        }
-
-        [ComImport, Guid("000214E2-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IShellBrowser
-        {
-            void Dummy1();
-            void GetWindow(out IntPtr phwnd);
-            void ContextSensitiveHelp(int fEnterMode);
-            void InsertMenusSB(IntPtr hmenuShared, IntPtr lpMenuWidths);
-            void SetMenuSB(IntPtr hmenuShared, IntPtr holeMenu, IntPtr hwndActiveObject);
-            void RemoveMenusSB(IntPtr hmenuShared);
-            void SetStatusTextSB([MarshalAs(UnmanagedType.LPWStr)] string pszStatusText);
-            void EnableModelessSB(int fEnable);
-            void TranslateAcceleratorSB(IntPtr pmsg, ushort wID);
-            void BrowseObject(IntPtr pidl, uint wFlags);
-            void GetViewStateStream(uint grfMode, IntPtr ppStm);
-            void GetControlWindow(uint id, out IntPtr phwnd);
-            void SendControlMsg(uint id, uint uMsg, IntPtr wParam, IntPtr lParam, out IntPtr pResult);
-            void QueryActiveShellView(out IntPtr ppshv);
-        }
-
-        [ComImport, Guid("000214E3-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IShellView
-        {
-            void GetWindow(out IntPtr phwnd);
-            void ContextSensitiveHelp(int fEnterMode);
-            void TranslateAccelerator(IntPtr pmsg);
-            void EnableModeless(int fEnable);
-            void UIActivate(uint uState);
-            void Refresh();
-            void CreateViewWindow(IntPtr psavView, IntPtr psfvPns, IntPtr psfsStMode, IntPtr prcView, out IntPtr phwndView);
-            void DestroyViewWindow();
-            void GetCurrentInfo(IntPtr lpfs);
-            void AddPropertySheetPages(uint dwReserved, IntPtr lpfn, IntPtr lparam);
-            void SaveViewState();
-            void SelectItem(IntPtr pidlItem, uint uFlags);
-            void GetItemObject(uint uItem, ref Guid riid, out IntPtr ppv);
-        }
-
-        [ComImport, Guid("cde725b0-ccc9-4519-917e-325d72fab4ce"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IFolderView
-        {
-            void GetCurrentViewMode(out uint pViewMode);
-            void SetCurrentViewMode(uint ViewMode);
-            void GetFolder(ref Guid riid, out IntPtr ppv);
-            void Item(int iItemIndex, out IntPtr ppidl);
-            void ItemCount(uint uFlags, out int pcItems);
-            void Items(uint uFlags, ref Guid riid, out IntPtr ppv);
-            void GetSelectionMarkedItem(out int piItem);
-            void GetFocusedItem(out int piItem);
-            void GetItemPosition(IntPtr pidl, out POINT ppt);
-            void GetSpacing([In, Out] ref POINT ppt);
-            void GetDefaultSpacing(out POINT ppt);
-            [PreserveSig] int GetAutoArrange();
-            void SelectItem(int iItem, uint dwFlags);
-            [PreserveSig] int SelectAndPositionItems(uint cidl, [In] IntPtr[] apidl, [In] POINT[] apt, uint dwFlags);
-        }
-
         [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern int SHGetNameFromIDList(IntPtr pidl, uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
 
@@ -194,6 +115,9 @@ namespace KeyPulse
         private static readonly object SyncLock = new();
 
         public static bool HasUndo => Volatile.Read(ref _lastUndoSnapshot) != null;
+
+        /// <summary>Pause after an icon size change before positions are written (desktop re-flow).</summary>
+        internal static int IconSizeSettleMs = 600;
 
         internal static DesktopLayoutProfile? PeekUndoSnapshot() => Volatile.Read(ref _lastUndoSnapshot);
 
@@ -725,60 +649,161 @@ namespace KeyPulse
             return RunInStaAsync(action, cancellationToken).GetAwaiter().GetResult();
         }
 
-        private static bool TryGetDesktopFolderView(out IFolderView? folderView, out IShellView? shellView, out IntPtr hwndDesktop)
+        // ---- Desktop icon size (D1-D4) ------------------------------------------------------------
+        // Ctrl + mouse wheel on the desktop silently changes the icon size, and with it the icon grid.
+        // Positions saved at one size land scrambled at another, so each layout records the size it
+        // was saved at and Restore puts that size back before moving any icon.
+        private static readonly Guid IID_IFolderView2 = new("1af3a467-214f-4298-908e-06b03e0b39f9");
+
+        // vtable slots: IUnknown (3) + IFolderView (14) = 17, then IFolderView2 in declaration order:
+        // ... InvokeVerbOnSelection (17+17), SetViewModeAndIconSize (17+18), GetViewModeAndIconSize (17+19).
+        private const int FolderView2SetViewModeAndIconSizeSlot = 35;
+        private const int FolderView2GetViewModeAndIconSizeSlot = 36;
+        private const uint FVM_ICON = 1;
+
+        /// <summary>Windows' "Medium icons" desktop size - the normal size, and the size Reset uses.</summary>
+        public const int NormalDesktopIconSize = 48;
+        public const int SmallDesktopIconSize = 32;
+        public const int LargeDesktopIconSize = 96;
+
+        public readonly record struct DesktopIconSizeInfo(int Size, uint ViewMode)
         {
-            folderView = null;
-            shellView = null;
-            hwndDesktop = IntPtr.Zero;
+            public bool IsNormal => Size == NormalDesktopIconSize;
+        }
 
-            IShellWindows? shellWindows = null;
-            object? disp = null;
-            object? browserObj = null;
-            IntPtr pShellView = IntPtr.Zero;
-            IntPtr pFolderView = IntPtr.Zero;
+        /// <summary>Plain-English name for an icon size, e.g. "Medium (normal)", "Large", "72 px".</summary>
+        public static string DescribeIconSize(int size) => size switch
+        {
+            NormalDesktopIconSize => "Medium (normal)",
+            SmallDesktopIconSize => "Small",
+            LargeDesktopIconSize => "Large",
+            256 => "Extra large",
+            _ => size + " px"
+        };
 
+        /// <summary>One sentence saying how far the icons are from normal, or null when they are normal.</summary>
+        public static string? DescribeIconSizeDifference(int size)
+        {
+            if (size <= 0 || size == NormalDesktopIconSize) return null;
+            var direction = size > NormalDesktopIconSize ? "larger" : "smaller";
+            var ratio = size > NormalDesktopIconSize ? (double)size / NormalDesktopIconSize : (double)NormalDesktopIconSize / size;
+            var amount = ratio < 1.25 ? "slightly " : ratio < 2 ? string.Empty : "much ";
+            var label = DescribeIconSize(size);
+            var shown = label.EndsWith(" px", StringComparison.Ordinal) ? label : $"{label} ({size} px)";
+            return $"Your desktop icons are {shown}, {amount}{direction} than normal (Medium, {NormalDesktopIconSize} px).";
+        }
+
+        public static DesktopIconSizeInfo? GetDesktopIconSize()
+        {
             try
             {
-                var clsid = new Guid("9BA05972-F6A8-11CF-A442-00A0C90A8F39");
-                shellWindows = ComActivation.CreateInstance<IShellWindows>(clsid);
-                object loc = 0;
-                object empty = Type.Missing;
-                int hr = shellWindows.FindWindowSW(ref loc, ref empty, 8, out int hwnd, 1, out disp);
-                if (hr != 0 || disp == null) return false;
-                hwndDesktop = (IntPtr)hwnd;
-
-                if (disp is not IServiceProvider sp) return false;
-                var sid = new Guid("4C96BE40-915C-11CF-99D3-00AA004AE837");
-                var iid = typeof(IShellBrowser).GUID;
-                browserObj = sp.QueryService(ref sid, ref iid);
-                if (browserObj is not IShellBrowser browser) return false;
-
-                browser.QueryActiveShellView(out pShellView);
-                if (pShellView == IntPtr.Zero) return false;
-
-                Guid IID_IFolderView = new Guid("cde725b0-ccc9-4519-917e-325d72fab4ce");
-                hr = Marshal.QueryInterface(pShellView, in IID_IFolderView, out pFolderView);
-                shellView = (IShellView)Marshal.GetUniqueObjectForIUnknown(pShellView);
-
-                if (hr == 0 && pFolderView != IntPtr.Zero)
-                {
-                    folderView = (IFolderView)Marshal.GetUniqueObjectForIUnknown(pFolderView);
-                    return true;
-                }
+                return RunInSta(GetDesktopIconSizeCore);
             }
             catch (Exception ex)
             {
-                Program.LogDebug($"DesktopOrganizer: COM folder view failed: {ex.Message}");
+                Program.LogDebug("DesktopOrganizer: reading the icon size failed: " + ex.Message);
+                return null;
             }
-            finally
+        }
+
+        /// <summary>One read-only startup line proving the desktop shell is reachable (or why not).</summary>
+        public static async Task LogDesktopShellHealthAsync()
+        {
+            try
             {
-                if (pFolderView != IntPtr.Zero) Marshal.Release(pFolderView);
-                if (pShellView != IntPtr.Zero) Marshal.Release(pShellView);
-                if (browserObj != null) { try { Marshal.ReleaseComObject(browserObj); } catch { } }
-                if (disp != null) { try { Marshal.ReleaseComObject(disp); } catch { } }
-                if (shellWindows != null) { try { Marshal.ReleaseComObject(shellWindows); } catch { } }
+                await Task.Delay(3000).ConfigureAwait(false);
+                var size = await GetDesktopIconSizeAsync().ConfigureAwait(false);
+                Program.LogDebug(size.HasValue
+                    ? $"DesktopOrganizer: desktop shell reachable; icon size {size.Value.Size} px (normal {NormalDesktopIconSize})."
+                    : "DesktopOrganizer: desktop shell NOT reachable at startup; Save/Restore layout will report the reason.");
             }
-            return false;
+            catch (Exception ex)
+            {
+                Program.LogDebug("DesktopOrganizer: startup shell check failed: " + ex.Message);
+            }
+        }
+
+        public static Task<DesktopIconSizeInfo?> GetDesktopIconSizeAsync(CancellationToken cancellationToken = default)
+            => RunInStaAsync(GetDesktopIconSizeCore, cancellationToken);
+
+        public static Task<bool> SetDesktopIconSizeAsync(int size, CancellationToken cancellationToken = default)
+            => RunInStaAsync(() => SetDesktopIconSizeCore(size), cancellationToken);
+
+        private static DesktopIconSizeInfo? GetDesktopIconSizeCore()
+        {
+            using var view = DesktopShellView.TryOpen(true, out var error);
+            if (view == null || view.FolderView2 == IntPtr.Zero)
+            {
+                if (view == null) Program.LogDebug("DesktopOrganizer: desktop shell view unavailable: " + error);
+                return null;
+            }
+            return ReadIconSize(view.FolderView2);
+        }
+
+        private static bool SetDesktopIconSizeCore(int size)
+        {
+            using var view = DesktopShellView.TryOpen(true, out var error);
+            if (view == null || view.FolderView2 == IntPtr.Zero)
+            {
+                if (view == null) Program.LogDebug("DesktopOrganizer: desktop shell view unavailable: " + error);
+                return false;
+            }
+            var current = ReadIconSize(view.FolderView2);
+            var ok = WriteIconSize(view.FolderView2, current?.ViewMode ?? FVM_ICON, size);
+            if (ok) RedrawDesktop(view);
+            return ok;
+        }
+
+        private static void RedrawDesktop(DesktopShellView view)
+        {
+            try { view.Refresh(); } catch { }
+            if (view.DesktopHwnd != IntPtr.Zero)
+            {
+                InvalidateRect(view.DesktopHwnd, IntPtr.Zero, true);
+                UpdateWindow(view.DesktopHwnd);
+            }
+        }
+
+        private static unsafe DesktopIconSizeInfo? ReadIconSize(IntPtr folderView2)
+        {
+            var vtbl = *(IntPtr**)folderView2;
+            var get = (delegate* unmanaged[Stdcall]<IntPtr, uint*, int*, int>)vtbl[FolderView2GetViewModeAndIconSizeSlot];
+            uint mode = 0;
+            int size = 0;
+            int hr = get(folderView2, &mode, &size);
+            return hr == 0 && size > 0 ? new DesktopIconSizeInfo(size, mode) : null;
+        }
+
+        private static unsafe bool WriteIconSize(IntPtr folderView2, uint viewMode, int size)
+        {
+            if (size <= 0) return false;
+            var vtbl = *(IntPtr**)folderView2;
+            var set = (delegate* unmanaged[Stdcall]<IntPtr, uint, int, int>)vtbl[FolderView2SetViewModeAndIconSizeSlot];
+            int hr = set(folderView2, viewMode == 0 ? FVM_ICON : viewMode, size);
+            if (hr != 0) Program.LogDebug($"DesktopOrganizer: SetViewModeAndIconSize({size}) failed (hr=0x{hr:X8}).");
+            return hr == 0;
+        }
+
+        /// <summary>
+        /// Describes how the current displays differ from the ones a layout was saved on, or returns
+        /// null when they match (same count, sizes and primary).
+        /// </summary>
+        internal static string? DescribeDisplayDifference(DesktopLayoutProfile profile, IReadOnlyList<(int Index, int Width, int Height, bool IsPrimary)> current)
+        {
+            if (profile.Monitors == null || profile.Monitors.Count == 0) return null;
+            if (profile.Monitors.Count != current.Count)
+            {
+                return $"This layout was saved with {profile.Monitors.Count} display(s); {current.Count} are connected now, so icons from missing displays were placed on the main screen.";
+            }
+            foreach (var saved in profile.Monitors)
+            {
+                var now = current.FirstOrDefault(m => m.Index == saved.Index);
+                if (now.Index != saved.Index || now.Width != saved.Width || now.Height != saved.Height || now.IsPrimary != saved.IsPrimary)
+                {
+                    return "Your display arrangement or resolution changed since this layout was saved, so some icons may sit at slightly different spots.";
+                }
+            }
+            return null;
         }
 
         public static bool IsAutoArrangeActive(out bool isDesktopVisible)
@@ -786,23 +811,14 @@ namespace KeyPulse
             bool visible = true;
             bool result = RunInSta(() =>
             {
-                IFolderView? fv = null;
-                IShellView? sv = null;
-                try
+                using (var view = DesktopShellView.TryOpen(false, out var error))
                 {
-                    if (TryGetDesktopFolderView(out fv, out sv, out var hwnd))
+                    if (view != null)
                     {
-                        if (hwnd != IntPtr.Zero) visible = IsWindowVisible(hwnd);
-                        if (fv != null)
-                        {
-                            return fv.GetAutoArrange() == 0;
-                        }
+                        if (view.DesktopHwnd != IntPtr.Zero) visible = IsWindowVisible(view.DesktopHwnd);
+                        return view.IsAutoArrangeOn();
                     }
-                }
-                finally
-                {
-                    if (fv != null) { try { Marshal.ReleaseComObject(fv); } catch { } }
-                    if (sv != null) { try { Marshal.ReleaseComObject(sv); } catch { } }
+                    Program.LogDebug("DesktopOrganizer: desktop shell view unavailable: " + error);
                 }
 
                 IntPtr listviewHwnd = GetDesktopListView();
@@ -862,16 +878,18 @@ namespace KeyPulse
                 return null;
             }
 
-            IFolderView? folderView = null;
-            IShellView? shellView = null;
+            DesktopShellView? view = null;
 
             try
             {
-                if (!TryGetDesktopFolderView(out folderView, out shellView, out _) || folderView == null)
+                view = DesktopShellView.TryOpen(true, out var openError);
+                if (view == null)
                 {
-                    error = "Could not connect to Windows Desktop Shell COM interface.";
+                    Program.LogDebug("DesktopOrganizer: desktop shell view unavailable: " + openError);
+                    error = "Could not connect to the Windows desktop (" + openError + ").";
                     return null;
                 }
+                var folderView2 = view.FolderView2;
 
                 var monitors = GetMonitors();
                 var profile = new DesktopLayoutProfile
@@ -895,15 +913,28 @@ namespace KeyPulse
                 }
 
                 var spacingPt = new POINT();
-                try { folderView.GetSpacing(ref spacingPt); } catch { }
-                if (spacingPt.X <= 0 || spacingPt.Y <= 0)
-                {
-                    try { folderView.GetDefaultSpacing(out spacingPt); } catch { }
-                }
+                try { spacingPt = view.GetSpacing(); } catch { }
                 profile.IconSpacingX = spacingPt.X > 0 ? spacingPt.X : 76;
                 profile.IconSpacingY = spacingPt.Y > 0 ? spacingPt.Y : 100;
 
-                folderView.ItemCount(0, out int itemCount);
+                if (folderView2 != IntPtr.Zero)
+                {
+                    try
+                    {
+                        var iconSize = ReadIconSize(folderView2);
+                        if (iconSize.HasValue)
+                        {
+                            profile.DesktopIconSize = iconSize.Value.Size;
+                            profile.DesktopViewMode = iconSize.Value.ViewMode;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.LogDebug("DesktopOrganizer: could not read the icon size during capture: " + ex.Message);
+                    }
+                }
+
+                int itemCount = view.ItemCount();
 
                 for (int i = 0; i < itemCount; i++)
                 {
@@ -913,7 +944,7 @@ namespace KeyPulse
                         return null;
                     }
 
-                    folderView.Item(i, out IntPtr pidl);
+                    IntPtr pidl = view.Item(i);
                     if (pidl == IntPtr.Zero) continue;
 
                     string? text = null;
@@ -926,8 +957,9 @@ namespace KeyPulse
                     }
                     catch { }
 
-                    folderView.GetItemPosition(pidl, out POINT pt);
-                    CoTaskMemFree(pidl);
+                    POINT pt;
+                    try { pt = view.GetItemPosition(pidl); }
+                    finally { CoTaskMemFree(pidl); }
 
                     if (!string.IsNullOrEmpty(text))
                     {
@@ -965,8 +997,7 @@ namespace KeyPulse
             }
             finally
             {
-                if (folderView != null) { try { Marshal.ReleaseComObject(folderView); } catch { } }
-                if (shellView != null) { try { Marshal.ReleaseComObject(shellView); } catch { } }
+                view?.Dispose();
             }
         }
 
@@ -1045,20 +1076,41 @@ namespace KeyPulse
                 preRestoreSnapshot = CaptureCurrentLayout("Pre-Restore Snapshot (" + DateTime.Now.ToString("HH:mm:ss") + ")", out _, cancellationToken);
             }
 
-            IFolderView? folderView = null;
-            IShellView? shellView = null;
-            IntPtr hwndDesktop = IntPtr.Zero;
+            DesktopShellView? view = null;
+            string iconSizeNote = string.Empty;
 
             try
             {
-                if (!TryGetDesktopFolderView(out folderView, out shellView, out hwndDesktop) || folderView == null)
+                view = DesktopShellView.TryOpen(true, out var openError);
+                if (view == null)
                 {
-                    report = "Could not connect to Windows Desktop Shell COM interface.";
+                    Program.LogDebug("DesktopOrganizer: desktop shell view unavailable: " + openError);
+                    report = "Could not connect to the Windows desktop (" + openError + ").";
                     return false;
+                }
+                var folderView2 = view.FolderView2;
+
+                if (profile.DesktopIconSize > 0 && folderView2 != IntPtr.Zero)
+                {
+                    var currentSize = ReadIconSize(folderView2);
+                    if (currentSize.HasValue && currentSize.Value.Size != profile.DesktopIconSize)
+                    {
+                        if (WriteIconSize(folderView2, profile.DesktopViewMode != 0 ? profile.DesktopViewMode : currentSize.Value.ViewMode, profile.DesktopIconSize))
+                        {
+                            iconSizeNote = $" Icon size set back to {DescribeIconSize(profile.DesktopIconSize)}.";
+                            // The desktop re-flows its grid asynchronously after a size change; let it settle
+                            // before positions are written, or Explorer re-snaps them to the new grid.
+                            Thread.Sleep(IconSizeSettleMs);
+                        }
+                        else
+                        {
+                            iconSizeNote = $" The icon size could not be set back to {DescribeIconSize(profile.DesktopIconSize)}; positions may look off.";
+                        }
+                    }
                 }
 
                 var primaryMonitor = monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
-                folderView.ItemCount(0, out int itemCount);
+                int itemCount = view.ItemCount();
 
                 if (!isUndoOperation && preRestoreSnapshot != null)
                 {
@@ -1084,7 +1136,7 @@ namespace KeyPulse
                         return false;
                     }
 
-                    folderView.Item(i, out IntPtr pidl);
+                    IntPtr pidl = view.Item(i);
                     if (pidl == IntPtr.Zero) continue;
 
                     string? text = null;
@@ -1147,7 +1199,7 @@ namespace KeyPulse
 
                         occupiedSlots.Add((destX, destY));
                         var pt = new POINT { X = destX, Y = destY };
-                        folderView.SelectAndPositionItems(1, new IntPtr[] { pidl }, new POINT[] { pt }, 0);
+                        try { view.PositionItem(pidl, pt); } catch (Exception ex) { Program.LogDebug("DesktopOrganizer: positioning an icon failed: " + ex.Message); }
                         CoTaskMemFree(pidl);
                         placedCount++;
                     }
@@ -1210,7 +1262,7 @@ namespace KeyPulse
 
                             occupiedSlots.Add((destX, destY));
                             var pt = new POINT { X = destX, Y = destY };
-                            folderView.SelectAndPositionItems(1, new IntPtr[] { unsavedItems[k].Pidl }, new POINT[] { pt }, 0);
+                            try { view.PositionItem(unsavedItems[k].Pidl, pt); } catch (Exception ex) { Program.LogDebug("DesktopOrganizer: positioning an icon failed: " + ex.Message); }
                             newArranged++;
                         }
                     }
@@ -1248,7 +1300,7 @@ namespace KeyPulse
 
                             occupiedSlots.Add((curX, curY));
                             var pt = new POINT { X = curX, Y = curY };
-                            folderView.SelectAndPositionItems(1, new IntPtr[] { unsavedItems[k].Pidl }, new POINT[] { pt }, 0);
+                            try { view.PositionItem(unsavedItems[k].Pidl, pt); } catch (Exception ex) { Program.LogDebug("DesktopOrganizer: positioning an icon failed: " + ex.Message); }
                             newArranged++;
                             curY += spaceY;
                         }
@@ -1268,16 +1320,14 @@ namespace KeyPulse
 
                 }
 
-                try { shellView?.Refresh(); } catch { }
-                if (hwndDesktop != IntPtr.Zero)
-                {
-                    InvalidateRect(hwndDesktop, IntPtr.Zero, true);
-                    UpdateWindow(hwndDesktop);
-                }
+                RedrawDesktop(view);
 
                 report = newArranged > 0
                     ? $"Restored \"{profile.Name}\": {placedCount} icons restored, {newArranged} new icons organized."
                     : $"Restored \"{profile.Name}\": {placedCount} icons restored.";
+                report += iconSizeNote;
+                var displayNote = DescribeDisplayDifference(profile, monitors.Select(m => (m.Index, m.MonitorRect.Width, m.MonitorRect.Height, m.IsPrimary)).ToList());
+                if (displayNote != null) report += " " + displayNote;
 
                 return true;
             }
@@ -1288,8 +1338,7 @@ namespace KeyPulse
             }
             finally
             {
-                if (folderView != null) { try { Marshal.ReleaseComObject(folderView); } catch { } }
-                if (shellView != null) { try { Marshal.ReleaseComObject(shellView); } catch { } }
+                view?.Dispose();
             }
         }
 

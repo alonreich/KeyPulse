@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Threading;
 
 namespace KeyPulse
 {
@@ -87,11 +88,65 @@ namespace KeyPulse
 
         private static readonly object IoLock = new object();
 
+        // ---- Background writer (audit #4) ---------------------------------------------------------
+        // Saves used to run synchronously on the UI thread: read the live file, write a backup, list
+        // and prune the folder, fsync the atomic write (with sleep-retries) and fsync the LKG copy -
+        // on every column resize or settings click. QueueSave serializes a snapshot on the caller's
+        // thread and hands the disk work to one background drain. Every write carries a sequence
+        // number, so an older snapshot can never land on top of a newer one, and Load() returns the
+        // newest queued snapshot until it is on disk (read-your-writes).
+        private static readonly object PendingLock = new object();
+        private static string? _pendingJson;
+        private static bool _pendingHasHotkeys;
+        private static long _pendingSeq;
+        private static long _nextSeq;
+        private static long _lastWrittenSeq;
+        private static int _drainScheduled;
+
+        /// <summary>Raised on the writer thread when a queued save fails.</summary>
+        public static event Action<string>? BackgroundSaveFailed;
+
+        /// <summary>
+        /// Audit #5: the live in-memory owner of AppConfig (the main window). When one is registered,
+        /// TryUpdate applies its mutation to that live object instead of doing a disk
+        /// read-modify-write that the owner's next whole-object save would silently overwrite.
+        /// </summary>
+        private static Func<Action<AppConfig>, string?>? _liveOwner;
+
+        public static void RegisterLiveOwner(Func<Action<AppConfig>, string?>? applyMutation)
+        {
+            _liveOwner = applyMutation;
+        }
+
+        public static bool HasPendingWrite
+        {
+            get { lock (PendingLock) return _pendingJson != null; }
+        }
+
         public static AppConfig Load(out string? loadError, out string? quarantinePath)
         {
             loadError = null;
             quarantinePath = null;
 
+            string? pending;
+            lock (PendingLock) pending = _pendingJson;
+            if (pending != null)
+            {
+                try
+                {
+                    var queued = JsonSerializer.Deserialize(pending, AppConfigJsonContext.Default.AppConfig);
+                    if (queued != null)
+                    {
+                        if (queued.Hotkeys == null) queued.Hotkeys = new List<HotkeyEntry>();
+                        return queued;
+                    }
+                }
+                catch { }
+            }
+
+            // Audit #5: Load never writes config.json or the LKG copy. A recovered configuration is
+            // persisted by the next ordinary Save, so a background Load() cannot write underneath
+            // the running window. A damaged file is still renamed aside (never deleted).
             lock (IoLock)
             {
                 if (!File.Exists(ConfigPath))
@@ -106,7 +161,6 @@ namespace KeyPulse
                             {
                                 if (recovered.Hotkeys == null) recovered.Hotkeys = new List<HotkeyEntry>();
                                 MigrateConfig(recovered);
-                                Save(recovered, out _);
                                 loadError = "Your KeyPulse settings file was missing and has been automatically restored from your last known good backup.";
                                 return recovered;
                             }
@@ -164,6 +218,7 @@ namespace KeyPulse
             }
         }
 
+        /// <summary>Synchronous save; supersedes any queued snapshot. Use where the result matters (restore, setup).</summary>
         public static bool Save(AppConfig config, out string error)
         {
             error = string.Empty;
@@ -174,8 +229,125 @@ namespace KeyPulse
                 return false;
             }
 
+            string json;
+            long seq;
+            try
+            {
+                config.SchemaVersion = Math.Max(config.SchemaVersion, CurrentSchemaVersion);
+                json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+
+            lock (PendingLock)
+            {
+                seq = ++_nextSeq;
+                _pendingJson = null;
+            }
+
+            return WriteSerialized(json, config.Hotkeys != null && config.Hotkeys.Count > 0, seq, out error);
+        }
+
+        /// <summary>
+        /// Non-blocking save for UI callers. The snapshot is serialized now (so later edits to the
+        /// object cannot tear it) and written by the background drain. Returns false only for a
+        /// read-only session or a serialization failure.
+        /// </summary>
+        public static bool QueueSave(AppConfig config, out string error)
+        {
+            error = string.Empty;
+            if (config.IsReadOnlySession)
+            {
+                error = "Settings are locked because the existing settings file could not be read.";
+                return false;
+            }
+
+            string json;
+            try
+            {
+                config.SchemaVersion = Math.Max(config.SchemaVersion, CurrentSchemaVersion);
+                json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+
+            lock (PendingLock)
+            {
+                _pendingJson = json;
+                _pendingHasHotkeys = config.Hotkeys != null && config.Hotkeys.Count > 0;
+                _pendingSeq = ++_nextSeq;
+            }
+
+            if (Interlocked.Exchange(ref _drainScheduled, 1) == 0)
+            {
+                ThreadPool.QueueUserWorkItem(_ => DrainPending());
+            }
+            return true;
+        }
+
+        /// <summary>Writes any queued snapshot now, on the calling thread. Call on exit and before restores.</summary>
+        public static bool Flush(out string error)
+        {
+            error = string.Empty;
+            while (true)
+            {
+                string? json;
+                bool hasHotkeys;
+                long seq;
+                lock (PendingLock)
+                {
+                    json = _pendingJson;
+                    hasHotkeys = _pendingHasHotkeys;
+                    seq = _pendingSeq;
+                }
+                if (json == null) return true;
+
+                var ok = WriteSerialized(json, hasHotkeys, seq, out error);
+                lock (PendingLock)
+                {
+                    if (_pendingSeq == seq) _pendingJson = null;
+                }
+                if (!ok) return false;
+            }
+        }
+
+        public static void Flush() => Flush(out _);
+
+        private static void DrainPending()
+        {
+            while (true)
+            {
+                if (!Flush(out var error))
+                {
+                    // The snapshot stays queued: the next QueueSave, or Flush on exit, retries it.
+                    Program.LogCrash("Could not save configuration (background): " + error);
+                    try { BackgroundSaveFailed?.Invoke(error); } catch { }
+                    Interlocked.Exchange(ref _drainScheduled, 0);
+                    return;
+                }
+
+                Interlocked.Exchange(ref _drainScheduled, 0);
+                lock (PendingLock)
+                {
+                    if (_pendingJson == null) return;
+                }
+                if (Interlocked.Exchange(ref _drainScheduled, 1) != 0) return;
+            }
+        }
+
+        private static bool WriteSerialized(string json, bool hasHotkeys, long seq, out string error)
+        {
+            error = string.Empty;
             lock (IoLock)
             {
+                if (seq <= _lastWrittenSeq) return true;
+
                 try
                 {
                     Directory.CreateDirectory(ConfigDirectory);
@@ -185,34 +357,42 @@ namespace KeyPulse
                         try
                         {
                             var existingRaw = File.ReadAllText(ConfigPath);
+                            if (string.Equals(existingRaw, json, StringComparison.Ordinal))
+                            {
+                                _lastWrittenSeq = seq;
+                                return true;
+                            }
+
                             bool hadShortcuts = existingRaw.Contains("\"KeyCombinations\"") || existingRaw.Contains("\"KeyCombination\"");
                             if (hadShortcuts)
                             {
-                                var backupName = $"config.backup-{DateTime.UtcNow:yyyyMMdd-HHmmss}.json";
-                                var backupTarget = Path.Combine(ConfigDirectory, backupName);
-                                if (!File.Exists(backupTarget))
+                                var now = DateTime.UtcNow;
+                                if (ShouldTakeBackup(ConfigDirectory, now))
                                 {
-                                    File.WriteAllText(backupTarget, existingRaw);
+                                    var backupName = $"config.backup-{now:yyyyMMdd-HHmmss}.json";
+                                    var backupTarget = Path.Combine(ConfigDirectory, backupName);
+                                    if (!File.Exists(backupTarget))
+                                    {
+                                        AtomicFileWriter.WriteAtomic(backupTarget, existingRaw, out _);
+                                    }
+                                    PruneOldBackups(ConfigDirectory, now);
                                 }
 
-                                if (config.Hotkeys == null || config.Hotkeys.Count == 0)
+                                if (!hasHotkeys)
                                 {
                                     var safetyPath = Path.Combine(ConfigDirectory, "config.safety-shortcuts.json");
-                                    File.WriteAllText(safetyPath, existingRaw);
+                                    AtomicFileWriter.WriteAtomic(safetyPath, existingRaw, out _);
                                     Program.LogDebug("DATA SAFETY: Preserved config.safety-shortcuts.json before saving configuration with 0 shortcuts.");
                                 }
-
-                                PruneOldBackups(ConfigDirectory, 10);
                             }
                         }
                         catch { }
                     }
 
-                    config.SchemaVersion = Math.Max(config.SchemaVersion, CurrentSchemaVersion);
-                    var json = JsonSerializer.Serialize(config, AppConfigJsonContext.Default.AppConfig);
                     var ok = AtomicFileWriter.WriteAtomic(ConfigPath, json, out error);
                     if (ok)
                     {
+                        _lastWrittenSeq = seq;
                         UpdateLkgCopy(json);
                     }
                     return ok;
@@ -225,18 +405,79 @@ namespace KeyPulse
             }
         }
 
-        private static void PruneOldBackups(string dir, int keepCount)
+        // ---- Backup retention (audit #4) ---------------------------------------------------------
+        // The old policy wrote a backup on EVERY save and kept the newest 10, so ten quick edits
+        // replaced every useful history point (six backups within 19 seconds were observed).
+        // Now: at most one backup per BackupMinInterval, and retention keeps the newest
+        // BackupKeepRecent plus the newest backup of each of the last BackupKeepDays days.
+        internal static readonly TimeSpan BackupMinInterval = TimeSpan.FromMinutes(30);
+        internal const int BackupKeepRecent = 5;
+        internal const int BackupKeepDays = 14;
+        private const string BackupPrefix = "config.backup-";
+
+        internal static bool TryParseBackupTimestamp(string fileName, out DateTime utc)
+        {
+            utc = default;
+            if (!fileName.StartsWith(BackupPrefix, StringComparison.OrdinalIgnoreCase) || !fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return false;
+            var stamp = fileName.Substring(BackupPrefix.Length, fileName.Length - BackupPrefix.Length - 5);
+            return DateTime.TryParseExact(stamp, "yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out utc);
+        }
+
+        private static bool ShouldTakeBackup(string dir, DateTime nowUtc)
         {
             try
             {
-                var files = new DirectoryInfo(dir).GetFiles("config.backup-*.json");
-                if (files.Length > keepCount)
+                DateTime newest = DateTime.MinValue;
+                foreach (var file in Directory.EnumerateFiles(dir, BackupPrefix + "*.json"))
                 {
-                    Array.Sort(files, (a, b) => b.CreationTimeUtc.CompareTo(a.CreationTimeUtc));
-                    for (int i = keepCount; i < files.Length; i++)
-                    {
-                        try { files[i].Delete(); } catch { }
-                    }
+                    if (TryParseBackupTimestamp(Path.GetFileName(file), out var ts) && ts > newest) newest = ts;
+                }
+                return nowUtc - newest >= BackupMinInterval;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        /// <summary>Pure retention rule: returns the backup names to delete.</summary>
+        internal static List<string> SelectBackupsToPrune(IEnumerable<string> fileNames, DateTime nowUtc)
+        {
+            var dated = new List<(string Name, DateTime Utc)>();
+            foreach (var name in fileNames)
+            {
+                if (TryParseBackupTimestamp(name, out var ts)) dated.Add((name, ts));
+            }
+            dated.Sort((a, b) => b.Utc.CompareTo(a.Utc));
+
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < dated.Count && i < BackupKeepRecent; i++) keep.Add(dated[i].Name);
+
+            var cutoff = nowUtc.Date.AddDays(-(BackupKeepDays - 1));
+            var daysKept = new HashSet<DateTime>();
+            foreach (var (name, utc) in dated)
+            {
+                if (utc.Date >= cutoff && daysKept.Add(utc.Date)) keep.Add(name);
+            }
+
+            var delete = new List<string>();
+            foreach (var (name, _) in dated)
+            {
+                if (!keep.Contains(name)) delete.Add(name);
+            }
+            return delete;
+        }
+
+        private static void PruneOldBackups(string dir, DateTime nowUtc)
+        {
+            try
+            {
+                var names = new List<string>();
+                foreach (var file in Directory.EnumerateFiles(dir, BackupPrefix + "*.json")) names.Add(Path.GetFileName(file));
+                foreach (var name in SelectBackupsToPrune(names, nowUtc))
+                {
+                    try { File.Delete(Path.Combine(dir, name)); } catch { }
                 }
             }
             catch { }
@@ -256,7 +497,6 @@ namespace KeyPulse
                     if (loaded.Hotkeys == null) loaded.Hotkeys = new List<HotkeyEntry>();
                     MigrateConfig(loaded);
                     config = loaded;
-                    AtomicFileWriter.WriteAtomic(ConfigPath, lkgJson, out _);
                     return true;
                 }
             }
@@ -276,6 +516,7 @@ namespace KeyPulse
                     try
                     {
                         var lkgRaw = File.ReadAllText(ConfigLkgPath);
+                        if (string.Equals(lkgRaw, verifiedJson, StringComparison.Ordinal)) return;
                         bool lkgHadShortcuts = lkgRaw.Contains("\"KeyCombinations\"") || lkgRaw.Contains("\"KeyCombination\"");
                         bool newHasShortcuts = verifiedJson.Contains("\"KeyCombinations\"") || verifiedJson.Contains("\"KeyCombination\"");
                         if (lkgHadShortcuts && !newHasShortcuts)
@@ -309,6 +550,14 @@ namespace KeyPulse
         /// </summary>
         public static bool TryUpdate(Action<AppConfig> mutate, out string error)
         {
+            var owner = _liveOwner;
+            if (owner != null)
+            {
+                var ownerError = owner(mutate);
+                error = ownerError ?? string.Empty;
+                return ownerError == null;
+            }
+
             var config = Load(out var loadError, out var quarantinePath);
 
             if (!string.IsNullOrEmpty(loadError) && (config.IsReadOnlySession || quarantinePath != null))
@@ -333,6 +582,7 @@ namespace KeyPulse
         /// </summary>
         public static string? SaveRollbackCopy(string reason)
         {
+            Flush(); // a queued snapshot must be on disk before it is copied
             lock (IoLock)
             {
                 try
@@ -360,6 +610,7 @@ namespace KeyPulse
         /// </summary>
         public static List<string> SaveAllRollbackCopies(string reason)
         {
+            Flush(); // a queued snapshot must be on disk before it is copied
             var copies = new List<string>();
             lock (IoLock)
             {
@@ -419,6 +670,7 @@ namespace KeyPulse
         /// </summary>
         public static string? SaveWipeSafetyCopy()
         {
+            Flush(); // a queued snapshot must be on disk before it is copied
             lock (IoLock)
             {
                 try
@@ -478,6 +730,7 @@ namespace KeyPulse
         /// </summary>
         public static bool SaveAllWipeSafetyCopies(out List<string> createdCopies, out string error)
         {
+            Flush(); // a queued snapshot must be on disk before it is copied
             createdCopies = new List<string>();
             error = string.Empty;
 

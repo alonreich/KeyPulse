@@ -54,6 +54,8 @@ namespace KeyPulse
             }
 
             KeyDown += OnWindowKeyDown;
+            // Coming back after fixing the icon size on the desktop refreshes the banner.
+            Activated += (_, _) => RefreshIconSizeStatus();
             DesktopOrganizerService.ProfilesChanged += OnExternalProfilesChanged;
             Closing += (s, e) => SaveWindowGeometry();
             Closed += (s, e) =>
@@ -244,6 +246,8 @@ namespace KeyPulse
                 warningBanner.IsVisible = autoArrangeOn;
             }
 
+            RefreshIconSizeStatus();
+
             if (this.FindControl<TextBlock>("MonitorStatusText") is TextBlock statusTxt)
             {
                 string monitorSummary;
@@ -278,6 +282,175 @@ namespace KeyPulse
                     undoBtn.Content = "Undo Last Restore";
                 }
             }
+        }
+
+        // ---- Desktop icon size (D1-D4) ------------------------------------------------------------
+
+        private const string IconSizeKeysHint =
+            "To fix it yourself: click an empty spot on the desktop and press Ctrl+Shift+3 (Medium icons), or right-click the desktop > View > Medium icons. Ctrl + mouse wheel on the desktop changes the size one step per notch.";
+
+        private DesktopOrganizerService.DesktopIconSizeInfo? _lastIconSize;
+
+        private void RefreshIconSizeStatus()
+        {
+            var size = DesktopOrganizerService.GetDesktopIconSize();
+            _lastIconSize = size;
+
+            var banner = this.FindControl<Border>("IconSizeBanner");
+            var status = this.FindControl<TextBlock>("IconSizeStatusText");
+            var hint = this.FindControl<TextBlock>("IconSizeHintText");
+            var resetBtn = this.FindControl<Button>("ResetIconSizeBtn");
+            if (banner == null || status == null || hint == null || resetBtn == null) return;
+
+            if (size == null)
+            {
+                status.Text = "Icon size: could not be read from Windows.";
+                status.Foreground = AppBrush("AppTextMutedBrush");
+                banner.BorderBrush = AppBrush("AppBorderBrush");
+                hint.IsVisible = false;
+                resetBtn.IsVisible = false;
+                return;
+            }
+
+            if (size.Value.IsNormal)
+            {
+                status.Text = "Icon size: " + DesktopOrganizerService.DescribeIconSize(size.Value.Size) + " ✓";
+                status.Foreground = AppBrush("AppSuccessSoftBrush");
+                banner.BorderBrush = AppBrush("AppBorderBrush");
+                hint.IsVisible = false;
+                resetBtn.IsVisible = false;
+            }
+            else
+            {
+                status.Text = "⚠️ " + DesktopOrganizerService.DescribeIconSizeDifference(size.Value.Size);
+                status.Foreground = AppBrush("AppWarningBrush");
+                banner.BorderBrush = AppBrush("AppWarningBrush");
+                hint.Text = IconSizeKeysHint;
+                hint.IsVisible = true;
+                resetBtn.IsVisible = !_isBusy;
+            }
+        }
+
+        private async void ResetIconSize_Click(object? sender, RoutedEventArgs e)
+        {
+            if (_isBusy) return;
+            Program.PlaySound("click");
+            await ResetIconSizeToNormalAsync();
+        }
+
+        /// <summary>
+        /// Sets Medium and deliberately does NOT save: the desktop re-flows its icons after a size
+        /// change, so the user arranges them first and comes back to save (with no warning then).
+        /// </summary>
+        private async Task ResetIconSizeToNormalAsync()
+        {
+            _isBusy = true;
+            bool ok;
+            try
+            {
+                ok = await DesktopOrganizerService.SetDesktopIconSizeAsync(DesktopOrganizerService.NormalDesktopIconSize);
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug("DesktopOrganizer: icon size reset failed: " + ex.Message);
+                ok = false;
+            }
+            _isBusy = false;
+
+            RefreshIconSizeStatus();
+            if (ok)
+            {
+                SetStatus("✓ Desktop icons are back to the normal size. Windows may have moved some icons: arrange them the way you want, then come back and click Save Current Layout.", true);
+            }
+            else
+            {
+                Program.PlaySound("error");
+                SetStatus("⚠️ Windows did not accept the size change. " + IconSizeKeysHint, false);
+            }
+        }
+
+        private enum IconSizeChoice { Cancel, ResetToNormal, SaveAnyway }
+
+        /// <summary>D1: asks before saving a layout at an unusual icon size. Returns SaveAnyway when the size is normal.</summary>
+        private async Task<IconSizeChoice> CheckIconSizeBeforeSaveAsync()
+        {
+            DesktopOrganizerService.DesktopIconSizeInfo? size;
+            try
+            {
+                size = await DesktopOrganizerService.GetDesktopIconSizeAsync();
+            }
+            catch
+            {
+                size = null;
+            }
+            if (size == null || size.Value.IsNormal) return IconSizeChoice.SaveAnyway;
+
+            var tcs = new TaskCompletionSource<IconSizeChoice>();
+            var dlg = new Window
+            {
+                Title = "Desktop icons are not the normal size",
+                Width = 500,
+                SizeToContent = SizeToContent.Height,
+                CanResize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Icon = Icon
+            };
+
+            var root = new StackPanel { Margin = new Thickness(20), Spacing = 12 };
+            root.Children.Add(new TextBlock { Text = "Desktop icons are not the normal size", Classes = { "SectionTitle" }, FontSize = 16 });
+            root.Children.Add(new TextBlock
+            {
+                Text = DesktopOrganizerService.DescribeIconSizeDifference(size.Value.Size),
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 13,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = AppBrush("AppWarningBrush")
+            });
+            root.Children.Add(new TextBlock
+            {
+                Text = "This usually happens after Ctrl + mouse wheel on the desktop. A layout saved now remembers this size and puts it back on every restore.\n\n"
+                     + "\"Reset to normal\" changes the size now but does not save: Windows re-flows the icons, so arrange them first, then come back and save.\n\n"
+                     + IconSizeKeysHint,
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 12.5,
+                Foreground = AppBrush("AppTextPrimaryBrush")
+            });
+
+            var btnRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 10, Margin = new Thickness(0, 6, 0, 0) };
+            void Choose(IconSizeChoice choice) { tcs.TrySetResult(choice); dlg.Close(); }
+
+            var cancelBtn = new Button { Content = "Cancel", Classes = { "Secondary" }, MinWidth = 90 };
+            cancelBtn.Click += (_, _) => Choose(IconSizeChoice.Cancel);
+            var saveAnywayBtn = new Button { Content = "Save at this size", Classes = { "Secondary" }, MinWidth = 120 };
+            saveAnywayBtn.Click += (_, _) => Choose(IconSizeChoice.SaveAnyway);
+            var resetBtn = new Button { Content = "Reset to normal", Classes = { "Primary" }, MinWidth = 130 };
+            resetBtn.Click += (_, _) => Choose(IconSizeChoice.ResetToNormal);
+
+            btnRow.Children.Add(cancelBtn);
+            btnRow.Children.Add(saveAnywayBtn);
+            btnRow.Children.Add(resetBtn);
+            root.Children.Add(btnRow);
+
+            dlg.KeyDown += (_, ke) =>
+            {
+                if (ke.Key == Avalonia.Input.Key.Escape) { ke.Handled = true; Choose(IconSizeChoice.Cancel); }
+            };
+            dlg.Closed += (_, _) => tcs.TrySetResult(IconSizeChoice.Cancel);
+            dlg.Content = root;
+            await dlg.ShowDialog(this);
+            return await tcs.Task;
+        }
+
+        /// <summary>Runs the D1 check; true when the caller should go on and save.</summary>
+        private async Task<bool> ConfirmIconSizeForSaveAsync()
+        {
+            var choice = await CheckIconSizeBeforeSaveAsync();
+            if (choice == IconSizeChoice.ResetToNormal)
+            {
+                await ResetIconSizeToNormalAsync();
+                return false;
+            }
+            return choice == IconSizeChoice.SaveAnyway;
         }
 
         private const uint SMTO_ABORTIFHUNG = 0x0002;
@@ -541,6 +714,12 @@ namespace KeyPulse
             }
 
             metaRow.Children.Add(CreateBadge($"{profile.IconCount} Icons"));
+            if (profile.DesktopIconSize > 0)
+            {
+                var sizeBadge = CreateBadge("Icon size: " + DesktopOrganizerService.DescribeIconSize(profile.DesktopIconSize));
+                ToolTip.SetTip(sizeBadge, "Restoring this layout sets the desktop icons back to this size first, so every icon lands where it was saved.");
+                metaRow.Children.Add(sizeBadge);
+            }
             metaRow.Children.Add(new TextBlock
             {
                 Text = $"Saved: {profile.CreatedAt}",
@@ -590,6 +769,7 @@ namespace KeyPulse
 
                 _isBusy = false;
                 restoreBtn.IsEnabled = true;
+                RefreshIconSizeStatus();
 
                 if (ok)
                 {
@@ -645,6 +825,7 @@ namespace KeyPulse
                     $"Overwrite layout \"{profile.Name}\" with your current desktop icon positions? This replaces the {profile.IconCount} previously saved icon coordinates.",
                     "Update Layout");
                 if (!confirmed) return;
+                if (!await ConfirmIconSizeForSaveAsync()) return;
 
                 _isBusy = true;
                 updateBtn.IsEnabled = false;
@@ -663,6 +844,8 @@ namespace KeyPulse
                     profile.DisplayCount = updated.DisplayCount;
                     profile.IconSpacingX = updated.IconSpacingX;
                     profile.IconSpacingY = updated.IconSpacingY;
+                    profile.DesktopIconSize = updated.DesktopIconSize;
+                    profile.DesktopViewMode = updated.DesktopViewMode;
                     profile.CreatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
                     _config.ActiveProfileId = profile.Id;
                     saved = DesktopOrganizerService.SaveConfig(_config, out err);
@@ -861,6 +1044,8 @@ namespace KeyPulse
                 SetStatus($"⚠️ A saved layout named \"{name}\" already exists. Choose a unique name or click Update on that layout.", false);
                 return;
             }
+
+            if (!await ConfirmIconSizeForSaveAsync()) return;
 
             if (string.IsNullOrWhiteSpace(name))
             {

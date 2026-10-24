@@ -16,6 +16,52 @@ namespace KeyPulse
 {
     public partial class MainWindow
     {
+        /// <summary>U8: checkbox list of setting groups to reset; null when cancelled.</summary>
+        private async System.Threading.Tasks.Task<bool[]?> AskResetGroupsAsync(Window owner, string[] groups, int preselected)
+        {
+            var dlg = CreateAppDialog("Reset settings", 520, 380, 420, 300, WindowStartupLocation.CenterOwner, false, true);
+            var panel = CreateDialogPanel(12);
+            panel.Children.Add(new TextBlock { Text = "Reset settings", Classes = { "SectionTitle" } });
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Tick what should go back to its default. Your shortcuts and saved desktop layouts are never deleted.",
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+                Classes = { "Muted" }
+            });
+
+            var boxes = new CheckBox[groups.Length];
+            for (int i = 0; i < groups.Length; i++)
+            {
+                boxes[i] = new CheckBox
+                {
+                    Content = new TextBlock { Text = groups[i], TextWrapping = Avalonia.Media.TextWrapping.Wrap },
+                    IsChecked = i == preselected
+                };
+                panel.Children.Add(boxes[i]);
+            }
+
+            bool[]? result = null;
+            var buttons = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 10 };
+            var cancel = new Button { Content = "Cancel", Classes = { "Secondary" }, MinWidth = 90 };
+            cancel.Click += (_, _) => dlg.Close();
+            var reset = new Button { Content = "Reset selected", Classes = { "Danger" }, MinWidth = 120 };
+            void UpdateEnabled() => reset.IsEnabled = boxes.Any(b => b.IsChecked == true);
+            foreach (var b in boxes) b.IsCheckedChanged += (_, _) => UpdateEnabled();
+            UpdateEnabled();
+            reset.Click += (_, _) =>
+            {
+                result = boxes.Select(b => b.IsChecked == true).ToArray();
+                dlg.Close();
+            };
+            buttons.Children.Add(cancel);
+            buttons.Children.Add(reset);
+            panel.Children.Add(buttons);
+            dlg.Content = panel;
+
+            await ShowDialogOrWindowAsync(dlg, owner);
+            return result;
+        }
+
         private async System.Threading.Tasks.Task<bool> ConfirmSettingsActionAsync(Window owner, string title, string message, string confirmButtonText, bool isDanger = true)
         {
             var dialog = CreateAppDialog(title, 460, 250, 420, 210, WindowStartupLocation.CenterOwner, false, false);
@@ -242,7 +288,7 @@ namespace KeyPulse
 
             var restoreTabDefaultsBtn = new Button
             {
-                Content = "Restore Tab Defaults",
+                Content = "Reset…",
                 Classes = { "Secondary" },
                 Padding = new Avalonia.Thickness(10, 5),
                 FontSize = 11.5,
@@ -250,7 +296,7 @@ namespace KeyPulse
                 TabIndex = 6,
                 IsTabStop = true
             };
-            ToolTip.SetTip(restoreTabDefaultsBtn, "Reset only the settings on this current tab back to their original out-of-the-box defaults.");
+            ToolTip.SetTip(restoreTabDefaultsBtn, "Choose which settings go back to their defaults. Your shortcuts and saved desktop layouts are never deleted.");
 
             var cardsStack = new StackPanel { Spacing = 10, Margin = new Avalonia.Thickness(0, 0, 4, 0) };
             var settingCards = new List<(Border Card, int TabCategory, string Keywords)>();
@@ -781,7 +827,7 @@ namespace KeyPulse
 
             var sbEnableChk = new CheckBox
             {
-                Content = "Enable Screen Brightness & Hardware Display Control",
+                Content = "Turn on brightness control",
                 IsChecked = sbCfg.IsFeatureActive,
                 FontWeight = Avalonia.Media.FontWeight.SemiBold,
                 TabIndex = 32,
@@ -847,36 +893,9 @@ namespace KeyPulse
                     ? "Hardware display control is active."
                     : "Hardware display control is completely turned off. No hardware queries or DDC/CI communications will occur.";
             };
-            var sbLockChk = new CheckBox
-            {
-                Content = "Lock brightness and contrast together across all screens",
-                IsChecked = sbCfg.GlobalLockBrightnessContrast,
-                TabIndex = 33,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(sbLockChk, "When checked, moving a Brightness slider automatically updates Contrast to the same level on all monitors.");
-            sbLockChk.IsCheckedChanged += (s, ev) =>
-            {
-                if (suppressSyncEvents) return;
-                var cfg = ScreenBrightnessService.LoadConfig();
-                bool locked = sbLockChk.IsChecked == true;
-                cfg.GlobalLockBrightnessContrast = locked;
-                foreach (var scr in cfg.Screens)
-                {
-                    scr.LockRatio = locked;
-                    if (locked)
-                    {
-                        scr.LastContrast = scr.LastBrightness;
-                        ScreenBrightnessService.RequestScreenLevelChange(scr.SlotIndex, scr.LastBrightness, scr.LastBrightness, updateContrastFromLock: true);
-                    }
-                }
-                ScreenBrightnessService.SaveConfig(cfg);
-                ScreenBrightnessService.NotifyStateChanged();
-            };
-
             var openBrightnessBtn = new Button
             {
-                Content = "Open Screen Brightness Manager...",
+                Content = "Open Brightness settings...",
                 Classes = { "Secondary" },
                 Width = 270,
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
@@ -885,16 +904,15 @@ namespace KeyPulse
                 TabIndex = 34,
                 IsTabStop = true
             };
-            ToolTip.SetTip(openBrightnessBtn, "Open the Screen Brightness & Contrast manager to tune per-monitor sliders and shortcut cycle presets.");
+            ToolTip.SetTip(openBrightnessBtn, "Screens, shortcuts, presets and Focus Mode.");
             openBrightnessBtn.Click += (s, ev) =>
             {
                 Program.PlaySound("click");
                 ScreenBrightnessWindow.OpenWindow(w);
             };
-            sbControlsPanel.Children.Add(sbLockChk);
             sbControlsPanel.Children.Add(new TextBlock
             {
-                Text = "Adjust hardware monitor brightness & contrast via DDC/CI or laptop backlight and configure in-game shortcut cycle presets.",
+                Text = "All brightness options - screens, shortcuts, presets and Focus Mode - are in Brightness settings.",
                 Classes = { "Muted" },
                 FontSize = 11.5,
                 TextWrapping = Avalonia.Media.TextWrapping.Wrap
@@ -905,46 +923,12 @@ namespace KeyPulse
             sbBody.Children.Add(sbEnableChk);
             sbBody.Children.Add(sbStatusText);
             sbBody.Children.Add(sbControlsPanel);
-            RegisterSettingCard(2, "Screen Brightness & Contrast",
-                "Manage hardware monitor brightness, contrast ratio syncing, and shortcut cycle presets without OSD popups or focus loss.",
+            RegisterSettingCard(2, "Brightness",
+                "Control monitor brightness and contrast from KeyPulse, without the monitor's own buttons.",
                 "screen brightness contrast monitor display ddc backlight preset cycle sync lock",
                 sbBody);
 
             var doCfg = DesktopOrganizerService.LoadConfig();
-            var doAutoRestoreCheck = new CheckBox
-            {
-                Content = "Automatically restore icon positions on display or resolution change",
-                IsChecked = doCfg.AutoRestoreOnDisplayChange,
-                TabIndex = 35,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(doAutoRestoreCheck, "When checked, KeyPulse automatically detects display connection, disconnection, or resolution changes and restores your saved desktop icon positions.");
-            doAutoRestoreCheck.IsCheckedChanged += (s, ev) =>
-            {
-                if (suppressSyncEvents) return;
-                var cfg = DesktopOrganizerService.LoadConfig();
-                cfg.AutoRestoreOnDisplayChange = doAutoRestoreCheck.IsChecked == true;
-                DesktopOrganizerService.SaveConfig(cfg, out _);
-                DesktopOrganizerService.RaiseProfilesChanged();
-            };
-
-            var doAutoBackupCheck = new CheckBox
-            {
-                Content = "Automatically create periodic backup snapshots of desktop icons",
-                IsChecked = doCfg.AutoPeriodicSnapshotEnabled,
-                TabIndex = 36,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(doAutoBackupCheck, "When checked, KeyPulse automatically creates periodic background snapshots of your desktop icon positions so you can always roll back after messy reorganizations.");
-            doAutoBackupCheck.IsCheckedChanged += (s, ev) =>
-            {
-                if (suppressSyncEvents) return;
-                var cfg = DesktopOrganizerService.LoadConfig();
-                cfg.AutoPeriodicSnapshotEnabled = doAutoBackupCheck.IsChecked == true;
-                DesktopOrganizerService.SaveConfig(cfg, out _);
-                DesktopOrganizerService.RaiseProfilesChanged();
-            };
-
             var doSummaryText = new TextBlock
             {
                 Classes = { "Muted" },
@@ -964,7 +948,7 @@ namespace KeyPulse
 
             var openOrganizerBtn = new Button
             {
-                Content = "Open Desktop Icon Organizer...",
+                Content = "Open Desktop Organizer...",
                 Classes = { "Secondary" },
                 Width = 270,
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
@@ -973,18 +957,16 @@ namespace KeyPulse
                 TabIndex = 37,
                 IsTabStop = true
             };
-            ToolTip.SetTip(openOrganizerBtn, "Open Desktop Icon Organizer to save, restore, or automate desktop icon layouts across your monitors.");
+            ToolTip.SetTip(openOrganizerBtn, "Save and restore desktop icon layouts. Automatic restore and backups are under \"Automatic\" there.");
             openOrganizerBtn.Click += (s, ev) =>
             {
                 Program.PlaySound("click");
                 DesktopOrganizerWindow.OpenOrganizer(w);
             };
             var doBody = new StackPanel { Spacing = 6 };
-            doBody.Children.Add(doAutoRestoreCheck);
-            doBody.Children.Add(doAutoBackupCheck);
             doBody.Children.Add(doSummaryText);
             doBody.Children.Add(openOrganizerBtn);
-            RegisterSettingCard(3, "Desktop Icon Organizer",
+            RegisterSettingCard(3, "Desktop Organizer",
                 "Saves and restores your desktop icon positions across single or multi-monitor setups, with optional auto-restore when displays connect or change resolution.",
                 "desktop icon organizer layout restore snapshot monitor grid",
                 doBody);
@@ -1198,32 +1180,6 @@ namespace KeyPulse
                 "backup restore export import configuration file json encrypt password",
                 backupBody);
 
-            var resetAllBtn = new Button
-            {
-                Content = "Restore All Default Settings...",
-                Classes = { "Danger" },
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                Padding = new Avalonia.Thickness(12, 8),
-                TabIndex = 44,
-                IsTabStop = true
-            };
-            ToolTip.SetTip(resetAllBtn, "Reset all KeyPulse preferences, typing speed, theme, update channel, screen brightness presets, and desktop organizer automation settings back to factory defaults. Your saved shortcuts and manual desktop layouts are kept safe.");
-
-            var dangerBody = new StackPanel { Spacing = 10 };
-            dangerBody.Children.Add(new TextBlock
-            {
-                Text = "Reset all application preferences, presets, and behavior back to their original factory defaults. Your saved shortcuts and custom desktop layouts will NOT be deleted.",
-                Classes = { "Muted" },
-                FontSize = 11.5,
-                TextWrapping = Avalonia.Media.TextWrapping.Wrap
-            });
-            dangerBody.Children.Add(resetAllBtn);
-            RegisterSettingCard(4, "Danger Zone — Factory Reset",
-                "Destructive preference reset action that restores all out-of-the-box defaults for startup, theme, sounds, typing, brightness, and updates without deleting saved shortcuts.",
-                "danger zone factory reset restore defaults wipe all settings preferences",
-                dangerBody,
-                isDangerZone: true);
 
             var emptySearchPanel = new Border
             {
@@ -1390,12 +1346,6 @@ namespace KeyPulse
                         themeSegmentButtons[j].Classes.Add(active ? "Primary" : "Secondary");
                     }
 
-                    var latestSb = ScreenBrightnessService.LoadConfig();
-                    sbLockChk.IsChecked = latestSb.GlobalLockBrightnessContrast;
-
-                    var latestDo = DesktopOrganizerService.LoadConfig();
-                    doAutoRestoreCheck.IsChecked = latestDo.AutoRestoreOnDisplayChange;
-                    doAutoBackupCheck.IsChecked = latestDo.AutoPeriodicSnapshotEnabled;
                     RefreshDesktopOrganizerSummary();
 
                     autoUpdateCheck.IsChecked = _currentConfig.AutoCheckForUpdates;
@@ -1440,7 +1390,7 @@ namespace KeyPulse
                     }
                 }
 
-                restoreTabDefaultsBtn.IsVisible = !isSearching && activeTab != 3;
+                restoreTabDefaultsBtn.IsVisible = !isSearching;
                 if (isSearching)
                 {
                     tabPageTitle.Text = $"Search Results for \"{query}\"";
@@ -1520,20 +1470,25 @@ namespace KeyPulse
             searchBox.TextChanged += (_, _) => RefreshVisibleCards();
             RefreshVisibleCards();
 
+            // U8: one "Reset…" dialog that says exactly what will be reset (it replaced "Restore Tab
+            // Defaults" and the separate "Restore All Default Settings" card).
             restoreTabDefaultsBtn.Click += async (_, _) =>
             {
                 Program.PlaySound("click");
-                string tabTitle = tabNames[activeTab];
-                bool confirmed = await ConfirmSettingsActionAsync(
-                    w,
-                    $"Restore {tabTitle} Defaults",
-                    $"Reset all settings on the '{tabTitle}' tab back to their out-of-the-box defaults?\n\nYour saved shortcuts and manual desktop layouts will not be deleted.",
-                    "Restore Defaults");
-                if (!confirmed) return;
-
-                if (activeTab == 0)
+                var groups = new[]
                 {
-                    if (StartupElevationService.SetStartup(true, out var startErr))
+                    "General: start with Windows (on), sounds (on), browser (Windows default), typing speed (Fast)",
+                    "Appearance: theme (match Windows)",
+                    "Brightness: presets, shortcuts, screen names and Focus Mode options",
+                    "Desktop Organizer options: automatic restore and backups (off), new icon placement. Saved layouts are kept",
+                    "Updates: automatic checks (on), Stable channel"
+                };
+                var picked = await AskResetGroupsAsync(w, groups, Math.Clamp(activeTab, 0, groups.Length - 1));
+                if (picked == null || !picked.Any(x => x)) return;
+
+                if (picked[0])
+                {
+                    if (StartupElevationService.SetStartup(true, out _))
                     {
                         _currentConfig.LaunchOnBoot = true;
                         suppressStartupEvent = true;
@@ -1548,77 +1503,25 @@ namespace KeyPulse
                     _currentConfig.UseGoogleChromeForUrls = false;
                     _currentConfig.TypingDelayMs = TypingDelayFast;
                     InputSimulator.CharacterDelayMs = TypingDelayFast;
-                    SaveConfig();
                 }
-                else if (activeTab == 1)
+                if (picked[1])
                 {
                     _currentConfig.Theme = "System";
                     App.ApplyTheme(_currentConfig.Theme);
-                    SaveConfig();
                 }
-                else if (activeTab == 2)
-                {
-                    ScreenBrightnessService.ResetToDefaults();
-                    SaveConfig();
-                }
-                else if (activeTab == 3)
-                {
-                    DesktopOrganizerService.ResetBehavioralDefaults(out _);
-                    SaveConfig();
-                }
-                else if (activeTab == 4)
+                if (picked[2]) ScreenBrightnessService.ResetToDefaults();
+                if (picked[3]) DesktopOrganizerService.ResetBehavioralDefaults(out _);
+                if (picked[4])
                 {
                     _currentConfig.AutoCheckForUpdates = true;
                     _currentConfig.UpdateChannel = "Stable";
                     _currentConfig.SkippedUpdateVersion = string.Empty;
-                    SaveConfig();
                 }
-
-                SyncAllSettingsControls();
-                Program.PlaySound("click");
-                statusTxt.Text = $"✓ Restored default settings for the {tabTitle} tab.";
-                statusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
-            };
-
-            resetAllBtn.Click += async (_, _) =>
-            {
-                Program.PlaySound("click");
-                bool confirmed = await ConfirmSettingsActionAsync(
-                    w,
-                    "Restore All Default Settings",
-                    "Reset ALL KeyPulse preferences across every tab back to their original factory defaults?\n\n• Startup: Launch with Windows (On)\n• Theme: Match Windows\n• Sound effects: On\n• Browser: System Default\n• Typing speed: Fast (1 ms)\n• Updates: Automatic checks on (Stable channel)\n• Screen Brightness: Sync On + 3 default presets\n• Desktop Organizer: Auto-restore Off, Auto-backup Off (3 days)\n\nYour saved keyboard shortcuts and manual desktop icon layouts will NOT be deleted.",
-                    "Restore All Defaults");
-                if (!confirmed) return;
-
-                if (StartupElevationService.SetStartup(true, out _))
-                {
-                    _currentConfig.LaunchOnBoot = true;
-                    suppressStartupEvent = true;
-                    chk.IsChecked = true;
-                    suppressStartupEvent = false;
-                    startupStatus.Text = "KeyPulse will start hidden in the tray when Windows starts.";
-                    startupStatus.Foreground = AppBrush("AppSuccessSoftBrush");
-                }
-
-                _currentConfig.Theme = "System";
-                _currentConfig.SoundEnabled = true;
-                _currentConfig.PreferredBrowser = "System";
-                _currentConfig.UseGoogleChromeForUrls = false;
-                _currentConfig.TypingDelayMs = TypingDelayFast;
-                _currentConfig.AutoCheckForUpdates = true;
-                _currentConfig.UpdateChannel = "Stable";
-                _currentConfig.SkippedUpdateVersion = string.Empty;
-                Program.SoundEnabled = true;
-                InputSimulator.CharacterDelayMs = TypingDelayFast;
-                App.ApplyTheme(_currentConfig.Theme);
                 SaveConfig();
 
-                ScreenBrightnessService.ResetToDefaults();
-                DesktopOrganizerService.ResetBehavioralDefaults(out _);
-
                 SyncAllSettingsControls();
                 Program.PlaySound("click");
-                statusTxt.Text = "✓ All preferences and presets have been restored to factory defaults.";
+                statusTxt.Text = $"✓ Reset {picked.Count(x => x)} group(s) to their defaults. Shortcuts and saved layouts were not touched.";
                 statusTxt.Foreground = AppBrush("AppSuccessSoftBrush");
             };
 
@@ -1913,25 +1816,11 @@ namespace KeyPulse
                 }
             };
 
-            void OnBrightnessStateChanged()
-            {
-                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    var latest = ScreenBrightnessService.LoadConfig();
-                    if (sbLockChk.IsChecked != latest.GlobalLockBrightnessContrast)
-                    {
-                        suppressSyncEvents = true;
-                        sbLockChk.IsChecked = latest.GlobalLockBrightnessContrast;
-                        suppressSyncEvents = false;
-                    }
-                });
-            }
             void OnOrganizerProfilesChanged()
             {
                 Avalonia.Threading.Dispatcher.UIThread.Post(RefreshDesktopOrganizerSummary);
             }
 
-            ScreenBrightnessService.StateChanged += OnBrightnessStateChanged;
             DesktopOrganizerService.ProfilesChanged += OnOrganizerProfilesChanged;
 
             w.KeyDown += (_, ke) =>
@@ -1952,7 +1841,6 @@ namespace KeyPulse
             w.Closing += (senderClosing, args) =>
             {
                 _activeSettingsWindow = null;
-                ScreenBrightnessService.StateChanged -= OnBrightnessStateChanged;
                 DesktopOrganizerService.ProfilesChanged -= OnOrganizerProfilesChanged;
                 _currentConfig.SettingsWindowState = w.WindowState.ToString();
                 if (w.WindowState == WindowState.Normal)
@@ -2024,6 +1912,7 @@ namespace KeyPulse
             try
             {
                 SaveConfig();
+                if (!ConfigStore.Flush(out var flushError)) throw new IOException(flushError);
             }
             catch (Exception ex)
             {

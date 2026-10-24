@@ -32,6 +32,10 @@
 │       ├── App.axaml / .cs
 │       ├── MainWindow.axaml / .cs (with .Actions.cs, .Backup.cs, .Settings.cs)
 │       ├── DesktopOrganizerWindow.axaml / .cs
+│       ├── DesktopOrganizerService.cs (+ .Shell.cs: NativeAOT-safe desktop COM)
+│       ├── ScreenBrightnessService.cs (+ .FocusMode.cs)
+│       ├── ScreenBrightnessWindow.cs (+ .Shortcuts.cs)
+│       ├── AuthenticodeVerifier.cs / TaskSchedulerCom.cs
 │       ├── KeyPulse.csproj  # Main project definition
 │       ├── KeyPulse.ico     # Multi-resolution application icon
 │       ├── app.manifest     # DPI & OS manifest
@@ -50,10 +54,14 @@
 │       ├── DesktopOrganizerUiThreadComBlockTests.cs
 │       ├── DesktopOrganizerUndoStateTearingTests.cs
 │       ├── MainWindowServiceExtractionTests.cs
+│       ├── PhysicalMonitorHandleZeroGuardTests.cs
+│       ├── PreShipAuditRegressionTests.cs
+│       ├── FocusModeAndDesktopIconSizeTests.cs
 │       ├── ProgramAudioStreamStarvationTests.cs
 │       ├── ScreenBrightnessAsyncVoidCrashTests.cs
 │       ├── ScreenBrightnessAtomicPersistenceTests.cs
 │       ├── ScreenBrightnessBusLockThreadStarvationTests.cs
+│       ├── ScreenBrightnessHotkeyRetryTests.cs
 │       ├── ScreenBrightnessMutableConfigRaceTests.cs
 │       └── ScreenBrightnessUiRenderThrashingTests.cs
 ├── .gitattributes

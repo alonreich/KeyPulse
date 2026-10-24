@@ -74,7 +74,7 @@ namespace KeyPulse
         public ScreenBrightnessOverlayWindow()
         {
             var cfg = ScreenBrightnessService.LoadConfig();
-            Title = "Brightness/Contrast Slider";
+            Title = "Brightness slider";
             Width = cfg.OverlayWindowWidth >= 500 ? cfg.OverlayWindowWidth : 700;
             Height = cfg.OverlayWindowHeight >= 400 ? cfg.OverlayWindowHeight : 540;
             MinWidth = 620;
@@ -205,7 +205,7 @@ namespace KeyPulse
             var titleStack = new StackPanel { Spacing = 2 };
             titleStack.Children.Add(new TextBlock
             {
-                Text = "Screen Brightness & Contrast",
+                Text = "Brightness slider",
                 FontSize = 15,
                 FontWeight = FontWeight.Bold,
                 Foreground = AppBrush("AppTextPrimaryBrush", "#F8FAFC")
@@ -218,6 +218,35 @@ namespace KeyPulse
                 IsVisible = false
             };
             titleStack.Children.Add(_headerStatusText);
+
+            // F7: visible while Focus Mode has the other screens dimmed.
+            _focusModeText = new TextBlock
+            {
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = AppBrush("AppAccentBrush", "#38BDF8"),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextWrapping = TextWrapping.Wrap
+            };
+            var focusOffBtn = new Button
+            {
+                Content = "Turn off",
+                Classes = { "Secondary" },
+                FontSize = 11,
+                Padding = new Thickness(8, 1),
+                MinHeight = 0,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            ToolTip.SetTip(focusOffBtn, "Brings the other screens back to their brightness from before. The main screen stays as it is.");
+            focusOffBtn.Click += (_, _) =>
+            {
+                Program.PlaySound("click");
+                if (ScreenBrightnessService.IsFocusModeActive) ScreenBrightnessService.ToggleFocusMode();
+            };
+            _focusModeChip = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, IsVisible = false, Margin = new Thickness(0, 2, 0, 0) };
+            _focusModeChip.Children.Add(_focusModeText);
+            _focusModeChip.Children.Add(focusOffBtn);
+            titleStack.Children.Add(_focusModeChip);
             Grid.SetColumn(titleStack, 0);
             headerGrid.Children.Add(titleStack);
 
@@ -243,7 +272,7 @@ namespace KeyPulse
                 ScreenBrightnessService.ShowIdentifyBanners();
             };
 
-            var setupItem = new MenuItem { Header = "Presets, shortcuts & setup…" };
+            var setupItem = new MenuItem { Header = "Brightness settings…" };
             setupItem.Click += (_, _) =>
             {
                 Program.PlaySound("click");
@@ -376,6 +405,8 @@ namespace KeyPulse
             _masterSlider.AddHandler(InputElement.PointerPressedEvent, (_, _) =>
             {
                 _isUserDraggingMaster = true;
+                // Focus Mode: linked screens snap to the main screen before the drag baselines are read.
+                ScreenBrightnessService.PrepareForMainScreenAdjustment();
                 var states = ScreenBrightnessService.GetImmediateCachedStates();
                 var activeScreens = states.Where(s => s.IsConnected).OrderBy(s => s.SlotIndex).ToList();
                 if (activeScreens.Count == 0 && states.Count > 0)
@@ -796,7 +827,7 @@ namespace KeyPulse
             else if (up.Length > 0) lines.Add($"{up} = brighter (all screens).");
             else if (down.Length > 0) lines.Add($"{down} = darker (all screens).");
             lines.Add("Tray icon > presets, one click.");
-            lines.Add("⚙ > Presets, shortcuts & setup: give one screen its own key.");
+            lines.Add("⚙ > Brightness settings: shortcuts, presets and Focus Mode.");
             return string.Join("\n", lines);
         }
 
@@ -886,6 +917,7 @@ namespace KeyPulse
         private async void OnOverlayOpened(object? sender, EventArgs e)
         {
             _openedUtc = DateTime.UtcNow;
+            UpdateFocusModeChip();
             CancellationToken token;
             try
             {
@@ -922,6 +954,7 @@ namespace KeyPulse
 
                     _hardwareReadFailed = outcome.IsFallback;
                     UpdateHeaderStatus();
+                    UpdateFocusModeChip();
                 });
             }
             catch (OperationCanceledException)
@@ -954,6 +987,20 @@ namespace KeyPulse
             }
         }
 
+        private TextBlock? _focusModeText;
+        private StackPanel? _focusModeChip;
+
+        private void UpdateFocusModeChip()
+        {
+            if (_focusModeChip == null || _focusModeText == null) return;
+            var cfg = ScreenBrightnessService.LoadConfig();
+            _focusModeChip.IsVisible = cfg.FocusModeActive;
+            if (!cfg.FocusModeActive) return;
+            var key = HotkeyManager.DescribeComboList(cfg.FocusModeHotkey);
+            _focusModeText.Text = "🎯 " + ScreenBrightnessService.FocusModeDisplayName(cfg) + " on"
+                + (string.IsNullOrEmpty(key) ? string.Empty : " - " + key + " brings the other screens back");
+        }
+
         private void OnServiceStateChanged()
         {
             void Update()
@@ -978,6 +1025,7 @@ namespace KeyPulse
                     UpdateMasterBaselineFromScreens();
                 }
                 UpdateHeaderStatus();
+                UpdateFocusModeChip();
             }
 
             if (Dispatcher.UIThread.CheckAccess())

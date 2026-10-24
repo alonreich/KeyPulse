@@ -36,7 +36,7 @@ namespace KeyPulse
         public PixelRect Bounds { get; set; }
     }
 
-    public static class ScreenBrightnessService
+    public static partial class ScreenBrightnessService
     {
         public const int MaxScreens = 3;
         public const int MaxTrayQuickActions = 3;
@@ -361,6 +361,15 @@ namespace KeyPulse
                 StepDownHotkey = src.StepDownHotkey,
                 StepDelta = src.StepDelta,
                 LockMonitorDifferential = src.LockMonitorDifferential,
+                FocusModeHotkey = src.FocusModeHotkey,
+                FocusModeName = src.FocusModeName,
+                FocusModeDimLevel = src.FocusModeDimLevel,
+                FocusModeLowerContrast = src.FocusModeLowerContrast,
+                FocusModeActive = src.FocusModeActive,
+                FocusModePrimarySlot = src.FocusModePrimarySlot,
+                FocusModeSavedLevels = (src.FocusModeSavedLevels ?? new List<ScreenCycleEntry>())
+                    .Select(e => new ScreenCycleEntry { SlotIndex = e.SlotIndex, HardwareId = e.HardwareId, Brightness = e.Brightness, Contrast = e.Contrast, Enabled = e.Enabled })
+                    .ToList(),
                 OverlayWindowX = src.OverlayWindowX,
                 OverlayWindowY = src.OverlayWindowY,
                 OverlayWindowWidth = src.OverlayWindowWidth,
@@ -492,6 +501,8 @@ namespace KeyPulse
                 StepDownHotkey = "Ctrl+Alt+-, Ctrl+Alt+NumPadSubtract",
                 StepDelta = 5,
                 LockMonitorDifferential = true,
+                FocusModeHotkey = DefaultFocusModeHotkey,
+                FocusModeName = DefaultFocusModeName,
                 DirectHotkeys = new List<ScreenDirectHotkey>(),
                 Screens = new List<ScreenHardwareSetting>
                 {
@@ -644,8 +655,25 @@ namespace KeyPulse
             public bool? SupportsContrast { get; set; }
         }
 
+        /// <summary>Test seam: fake connected monitors (HMonitor, hardware id, is Windows main display).</summary>
+        internal static Func<IReadOnlyList<(IntPtr HMonitor, string HardwareId, bool IsPrimary)>>? ConnectedMonitorsOverrideForTesting { get; set; }
+
         private static List<ConnectedMonitorDescriptor> EnumerateConnectedMonitors()
         {
+            var fake = ConnectedMonitorsOverrideForTesting;
+            if (fake != null)
+            {
+                return fake().Select((m, i) => new ConnectedMonitorDescriptor
+                {
+                    HMonitor = m.HMonitor,
+                    DeviceName = $@"\\.\DISPLAY{i + 1}",
+                    HardwareId = m.HardwareId,
+                    ModelName = "Test Display " + (i + 1),
+                    IsPrimary = m.IsPrimary,
+                    Bounds = new PixelRect(i * 1920, 0, 1920, 1080)
+                }).Take(MaxScreens).ToList();
+            }
+
             var raw = new List<ConnectedMonitorDescriptor>();
             var internalPanels = GetInternalPanelDeviceNames();
 
@@ -951,14 +979,22 @@ namespace KeyPulse
         internal static Func<IntPtr, (bool success, uint count, PHYSICAL_MONITOR[]? pms)>? PhysicalMonitorsProviderForTesting { get; set; }
         internal static Action<uint, PHYSICAL_MONITOR[]>? DestroyPhysicalMonitorsHookForTesting { get; set; }
 
-        public static void InvalidateAllSessions()
+        /// <summary>
+        /// Audit #7: destroys cached physical monitor handles ONLY while holding BusLock. The old
+        /// version went ahead without the lock after a 5 s timeout, so DestroyPhysicalMonitors could
+        /// run in the middle of another thread's I2C transaction on the same handle. On timeout the
+        /// handles are now left alone: the in-flight transaction finishes, and process teardown (the
+        /// only caller that uses a short timeout is exit) releases them.
+        /// </summary>
+        public static bool InvalidateAllSessions(int lockTimeoutMs = 5000)
         {
             try
             {
-                bool acquired = BusLock.Wait(5000);
+                bool acquired = BusLock.Wait(lockTimeoutMs);
                 if (!acquired)
                 {
-                    LogDdc("[DDC-SESSION] Warning: BusLock acquisition timed out (5000ms) during InvalidateAllSessions. Proceeding with handle invalidation.");
+                    LogDdc($"[DDC-SESSION] BusLock busy for {lockTimeoutMs}ms during InvalidateAllSessions; a DDC transaction is in flight, so handles were NOT destroyed.");
+                    return false;
                 }
 
                 try
@@ -984,15 +1020,14 @@ namespace KeyPulse
                 }
                 finally
                 {
-                    if (acquired)
-                    {
-                        BusLock.Release();
-                    }
+                    BusLock.Release();
                 }
+                return true;
             }
             catch (Exception ex)
             {
                 LogDdc($"[DDC-SESSION] Error during InvalidateAllSessions: {ex.Message}");
+                return false;
             }
         }
 
@@ -1814,6 +1849,7 @@ namespace KeyPulse
         public static void TriggerShortcutCycleStep(bool reverse = false)
         {
             if (!IsFeatureActive) return;
+            EndFocusModeBecauseLevelsWereSet();
             ScreenBrightnessProfile? targetProfile = null;
             CancellationToken token;
             int cycleApplyDelayMs = 0;
@@ -1897,6 +1933,7 @@ namespace KeyPulse
         public static void ApplyProfileAsync(ScreenBrightnessProfile profile)
         {
             if (!IsFeatureActive || profile == null) return;
+            EndFocusModeBecauseLevelsWereSet();
             CancellationToken token;
 
             lock (CycleLock)
@@ -2079,6 +2116,7 @@ namespace KeyPulse
             "StepDown" => "darker",
             "CycleUp" => "next preset",
             "CycleDown" => "previous preset",
+            "FocusMode" => "Focus Mode",
             _ when desc.StartsWith("Direct-", StringComparison.Ordinal) => "screen key",
             _ when desc.StartsWith("Profile ", StringComparison.Ordinal) => "preset " + desc.Substring("Profile ".Length).Trim('\''),
             _ => desc
@@ -2151,6 +2189,11 @@ namespace KeyPulse
                     RegisterKeyList(cfg.StepDownHotkey, () => TriggerBrightnessStep(-delta), "StepDown");
                 }
 
+                if (!string.IsNullOrWhiteSpace(cfg.FocusModeHotkey))
+                {
+                    RegisterKeyList(cfg.FocusModeHotkey, () => ToggleFocusMode(), "FocusMode");
+                }
+
                 foreach (var profile in cfg.Profiles)
                 {
                     if (!string.IsNullOrWhiteSpace(profile.Hotkey))
@@ -2189,6 +2232,12 @@ namespace KeyPulse
             var cfg = LoadConfig();
             var connectedSlots = GetConnectedSlotIndices(cfg);
             if (connectedSlots.Count == 0) return;
+
+            if (cfg.FocusModeActive && (cfg.LockMonitorDifferential || connectedSlots.Count == 1 || GetFocusedScreenSlot(cfg) == cfg.FocusModePrimarySlot))
+            {
+                PrepareForMainScreenAdjustment();
+                cfg = LoadConfig();
+            }
 
             if (cfg.LockMonitorDifferential || connectedSlots.Count == 1)
             {
@@ -2239,6 +2288,7 @@ namespace KeyPulse
 
         public static void TriggerDirectHotkey(ScreenDirectHotkey dh)
         {
+            EndFocusModeBecauseLevelsWereSet();
             var cfg = LoadConfig();
             int b = Math.Clamp(dh.Brightness, 0, 100);
             int c = dh.LockRatio ? b : Math.Clamp(dh.Contrast, 0, 100);
@@ -2291,6 +2341,7 @@ namespace KeyPulse
             lock (ConfigLock)
             {
                 var cfg = GetLiveConfigLocked();
+                CollapseLinkedFocusLocked(cfg);
                 foreach (var slot in connectedSlots)
                 {
                     var screen = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slot);
@@ -2347,6 +2398,11 @@ namespace KeyPulse
                 var cfg = GetLiveConfigLocked();
                 var sourceSlotCfg = cfg.Screens.FirstOrDefault(s => s.SlotIndex == slotIndex);
                 if (sourceSlotCfg == null) return;
+
+                if (cfg.FocusModeActive && (slotIndex == cfg.FocusModePrimarySlot || GetLinkedSlotGroup(cfg, cfg.FocusModePrimarySlot).Contains(slotIndex)))
+                {
+                    CollapseLinkedFocusLocked(cfg);
+                }
 
                 int deltaB = brightness - sourceSlotCfg.LastBrightness;
                 int deltaC = contrast - sourceSlotCfg.LastContrast;

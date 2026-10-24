@@ -69,20 +69,35 @@ namespace KeyPulse
         private static CancellationTokenSource? _serverCts;
         private static Task? _serverTask;
 
+        /// <summary>A connected client must deliver its whole request within this window.</summary>
+        internal static int ClientReadTimeoutMs = 5000;
+
+        /// <summary>Connections served at once. Each one has its own pipe instance.</summary>
+        private const int MaxConcurrentClients = 4;
+
         public static void StartServer(Action<string> onAddTarget)
         {
             StopServer();
             _serverCts = new CancellationTokenSource();
             var token = _serverCts.Token;
 
+            // Audit #6: the old loop served ONE pipe instance at a time and read with no deadline,
+            // so a single client that connected and stalled blocked every later request (they timed
+            // out and fell back to the staged file). Each connection is now handed to its own task,
+            // the next instance is listening immediately, and every read has a deadline.
             _serverTask = Task.Run(async () =>
             {
                 Program.LogDebug($"IPC server listening on {PipeName}");
+                var slots = new SemaphoreSlim(MaxConcurrentClients, MaxConcurrentClients);
                 while (!token.IsCancellationRequested)
                 {
                     NamedPipeServerStream? server = null;
+                    var slotTaken = false;
                     try
                     {
+                        await slots.WaitAsync(token);
+                        slotTaken = true;
+
                         server = CreateServerPipe();
                         if (server == null)
                         {
@@ -92,24 +107,20 @@ namespace KeyPulse
 
                         await server.WaitForConnectionAsync(token);
 
-                        var msg = await ReadMessageAsync(server, token);
-                        if (msg != null && msg.Command == "AddTarget" && !string.IsNullOrWhiteSpace(msg.Target))
+                        var connection = server;
+                        server = null;
+                        slotTaken = false;
+                        _ = Task.Run(async () =>
                         {
-                            Program.LogDebug($"IPC received AddTarget: {msg.Target}");
-                            await SendResponseAsync(server, new IpcResponse { Success = true, Message = "Accepted" }, token);
                             try
                             {
-                                onAddTarget(msg.Target);
+                                await HandleClientAsync(connection, onAddTarget, token);
                             }
-                            catch (Exception ex)
+                            finally
                             {
-                                Program.LogCrash($"IPC onAddTarget error: {ex.Message}");
+                                slots.Release();
                             }
-                        }
-                        else
-                        {
-                            await SendResponseAsync(server, new IpcResponse { Success = false, Message = "Invalid message" }, token);
-                        }
+                        });
                     }
                     catch (OperationCanceledException)
                     {
@@ -118,22 +129,66 @@ namespace KeyPulse
                     catch (Exception ex)
                     {
                         Program.LogDebug($"IPC server loop exception: {ex.Message}");
-                        await Task.Delay(200, token);
+                        try { await Task.Delay(200, token); } catch (OperationCanceledException) { break; }
                     }
                     finally
                     {
-                        if (server != null)
-                        {
-                            try
-                            {
-                                if (server.IsConnected) server.Disconnect();
-                            }
-                            catch { }
-                            server.Dispose();
-                        }
+                        if (server != null) DisposeServer(server);
+                        if (slotTaken) slots.Release();
                     }
                 }
             }, token);
+        }
+
+        private static async Task HandleClientAsync(NamedPipeServerStream server, Action<string> onAddTarget, CancellationToken serverToken)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(serverToken);
+            deadline.CancelAfter(ClientReadTimeoutMs);
+            try
+            {
+                var msg = await ReadMessageAsync(server, deadline.Token);
+                if (msg != null && msg.Command == "AddTarget" && !string.IsNullOrWhiteSpace(msg.Target))
+                {
+                    Program.LogDebug($"IPC received AddTarget: {msg.Target}");
+                    try
+                    {
+                        onAddTarget(msg.Target);
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.LogCrash($"IPC onAddTarget error: {ex.Message}");
+                        await SendResponseAsync(server, new IpcResponse { Success = false, Message = "Not accepted" }, deadline.Token);
+                        return;
+                    }
+                    await SendResponseAsync(server, new IpcResponse { Success = true, Message = "Accepted" }, deadline.Token);
+                }
+                else
+                {
+                    await SendResponseAsync(server, new IpcResponse { Success = false, Message = "Invalid message" }, deadline.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (!serverToken.IsCancellationRequested) Program.LogDebug("IPC client did not complete its request in time; connection dropped.");
+            }
+            catch (Exception ex)
+            {
+                Program.LogDebug($"IPC client handler exception: {ex.Message}");
+            }
+            finally
+            {
+                DisposeServer(server);
+            }
+        }
+
+        private static void DisposeServer(NamedPipeServerStream server)
+        {
+            try
+            {
+                if (server.IsConnected) server.Disconnect();
+            }
+            catch { }
+            try { server.Dispose(); } catch { }
         }
 
         public static void StopServer()
@@ -147,6 +202,12 @@ namespace KeyPulse
             catch { }
         }
 
+        /// <summary>
+        /// True ONLY when the running instance replied with a well-formed, positive acknowledgement.
+        /// The old version returned true when the reply could not be read at all and ignored the
+        /// reply's Success flag, so a rejected or lost request skipped the staged-file fallback and
+        /// the target silently vanished (audit #6).
+        /// </summary>
         public static bool TrySendAddTarget(string target, int timeoutMs = 3000)
         {
             try
@@ -158,28 +219,49 @@ namespace KeyPulse
                 var msg = new IpcMessage { Command = "AddTarget", Target = target };
                 var json = JsonSerializer.Serialize(msg, AppConfigJsonContext.Default.IpcMessage);
                 var bytes = Encoding.UTF8.GetBytes(json);
+                if (bytes.Length > MaxMessageBytes)
+                {
+                    Program.LogDebug("IPC TrySendAddTarget: target too long for the pipe; using the staged file.");
+                    return false;
+                }
 
                 var lengthBytes = BitConverter.GetBytes(bytes.Length);
                 client.Write(lengthBytes, 0, 4);
                 client.Write(bytes, 0, bytes.Length);
                 client.Flush();
 
-                var respLenBytes = new byte[4];
-                if (ReadExact(client, respLenBytes, 0, 4))
+                var reply = Task.Run(() =>
                 {
-                    int respLen = BitConverter.ToInt32(respLenBytes, 0);
-                    if (respLen > 0 && respLen <= MaxMessageBytes)
-                    {
-                        var respBytes = new byte[respLen];
-                        return ReadExact(client, respBytes, 0, respLen);
-                    }
-                }
+                    var respLenBytes = new byte[4];
+                    if (!ReadExact(client, respLenBytes, 0, 4)) return false;
 
-                return true;
+                    int respLen = BitConverter.ToInt32(respLenBytes, 0);
+                    if (respLen <= 0 || respLen > MaxMessageBytes) return false;
+
+                    var respBytes = new byte[respLen];
+                    if (!ReadExact(client, respBytes, 0, respLen)) return false;
+
+                    return IsPositiveAck(respBytes);
+                });
+
+                return reply.Wait(timeoutMs) && reply.Result;
             }
             catch (Exception ex)
             {
                 Program.LogDebug($"IPC TrySendAddTarget failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        internal static bool IsPositiveAck(byte[] responseBytes)
+        {
+            try
+            {
+                var response = JsonSerializer.Deserialize(Encoding.UTF8.GetString(responseBytes), AppConfigJsonContext.Default.IpcResponse);
+                return response != null && response.Success;
+            }
+            catch
+            {
                 return false;
             }
         }

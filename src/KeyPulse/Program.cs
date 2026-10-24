@@ -584,6 +584,7 @@ class Program
         }
         finally
         {
+            try { ConfigStore.Flush(); } catch { }
             ReleaseSingleInstanceLock();
         }
     }
@@ -767,6 +768,9 @@ class Program
     /// </summary>
     public static void ReleaseSingleInstanceLock()
     {
+        // Every hard exit passes through here; queued settings must reach disk first.
+        try { ConfigStore.Flush(); } catch { }
+
         if (_mutex != null)
         {
             if (_mutexOwned)
@@ -882,89 +886,27 @@ class Program
         return state;
     }
 
-    private static readonly Guid CLSID_TaskScheduler = new Guid("0f87369f-a4e5-4cfc-bd3e-73e6154572dd");
-    private static ITaskService CreateTaskService() => ComActivation.CreateInstance<ITaskService>(CLSID_TaskScheduler);
-
+    // Task Scheduler 2.0 through TaskSchedulerCom (vtable calls, NativeAOT-safe). Every caller keeps
+    // schtasks.exe as the fallback.
     private static bool TryGetAdminTaskViaCom(out string? xml, out bool isEnabled, out bool notFound)
     {
-        xml = null;
-        isEnabled = false;
-        notFound = false;
-        try
-        {
-            var service = CreateTaskService();
-            service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
-            var folder = service.GetFolder(@"\");
-            try
-            {
-                var task = folder.GetTask(AdminTaskName);
-                if (task != null)
-                {
-                    xml = task.Xml;
-                    isEnabled = task.Enabled;
-                    return true;
-                }
-            }
-            catch (FileNotFoundException)
-            {
-                notFound = true;
-                return false;
-            }
-            catch (COMException ex) when ((uint)ex.HResult == 0x80070002 || (uint)ex.HResult == 0x80041318)
-            {
-                notFound = true;
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            LogDebug($"Task Scheduler COM query failed: {ex.Message}");
-        }
-        return false;
+        var ok = TaskSchedulerCom.TryGetTask(AdminTaskName, out xml, out isEnabled, out notFound, out var error);
+        if (!ok && !notFound) LogDebug($"Task Scheduler COM query failed: {error}");
+        return ok;
     }
 
     private static bool TryRegisterAdminTaskViaCom(string xml, out string error)
     {
-        error = string.Empty;
-        try
-        {
-            var service = CreateTaskService();
-            service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
-            var folder = service.GetFolder(@"\");
-            var task = folder.RegisterTask(AdminTaskName, xml, 6, Type.Missing, Type.Missing, 3, Type.Missing);
-            if (task != null) return true;
-        }
-        catch (Exception ex)
-        {
-            error = ex.Message;
-            LogDebug($"Task Scheduler COM registration failed: {ex.Message}");
-        }
-        return false;
+        var ok = TaskSchedulerCom.TryRegisterTask(AdminTaskName, xml, out error);
+        if (!ok) LogDebug($"Task Scheduler COM registration failed: {error}");
+        return ok;
     }
 
     private static bool TryDeleteAdminTaskViaCom()
     {
-        try
-        {
-            var service = CreateTaskService();
-            service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
-            var folder = service.GetFolder(@"\");
-            folder.DeleteTask(AdminTaskName, 0);
-            return true;
-        }
-        catch (FileNotFoundException)
-        {
-            return true;
-        }
-        catch (COMException ex) when ((uint)ex.HResult == 0x80070002 || (uint)ex.HResult == 0x80041318)
-        {
-            return true;
-        }
-        catch (Exception ex)
-        {
-            LogDebug($"Task Scheduler COM delete failed: {ex.Message}");
-            return false;
-        }
+        var ok = TaskSchedulerCom.TryDeleteTask(AdminTaskName, out var error);
+        if (!ok) LogDebug($"Task Scheduler COM delete failed: {error}");
+        return ok;
     }
 
     private static AdminTaskState QueryAdminTaskState()
@@ -1552,6 +1494,56 @@ class Program
         }
     }
 
+    /// <summary>
+    /// Audit #6: claims the staged-add file by renaming it before reading it. The writer is a
+    /// different process, so the old read-then-delete (guarded by an in-process lock) dropped any
+    /// line appended between the two calls. A rename is atomic: an appender either finishes on the
+    /// old name first (the rename then fails with a sharing violation and is retried next time) or
+    /// creates a fresh file that the next consume picks up. Claimed files left by a crash mid-read
+    /// are picked up too.
+    /// </summary>
+    public static List<string> TakeStagedAddTargets()
+    {
+        var targets = new List<string>();
+        try
+        {
+            var dir = Path.GetDirectoryName(StagedAddPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return targets;
+
+            if (File.Exists(StagedAddPath))
+            {
+                var claimed = StagedAddPath + ".claimed-" + Guid.NewGuid().ToString("N");
+                try { File.Move(StagedAddPath, claimed); }
+                catch (IOException ex) { LogDebug("Staged add is still being written; will retry: " + ex.Message); }
+            }
+
+            var stagedName = Path.GetFileName(StagedAddPath);
+            var claimedFiles = Directory.GetFiles(dir, stagedName + ".claimed-*");
+            Array.Sort(claimedFiles, (a, b) => File.GetLastWriteTimeUtc(a).CompareTo(File.GetLastWriteTimeUtc(b)));
+            foreach (var file in claimedFiles)
+            {
+                try
+                {
+                    foreach (var line in File.ReadAllLines(file))
+                    {
+                        var path = line.Trim();
+                        if (path.Length > 0) targets.Add(path);
+                    }
+                    File.Delete(file);
+                }
+                catch (Exception ex)
+                {
+                    LogDebug("Could not read a claimed staged add: " + ex.Message);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug("Could not consume the staged add: " + ex.Message);
+        }
+        return targets;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern bool SetDllDirectory(string lpPathName);
 
@@ -1570,20 +1562,22 @@ class Program
         LogDebug("ExtractNativeLibs started");
 
         var outDir = RuntimeLibDir;
-        if (Directory.Exists(outDir) &&
-            File.Exists(Path.Combine(outDir, "libSkiaSharp.dll")) &&
-            File.Exists(Path.Combine(outDir, "av_libglesv2.dll")) &&
-            File.Exists(Path.Combine(outDir, "libHarfBuzzSharp.dll")))
+        var asm = Assembly.GetExecutingAssembly();
+        var resources = asm.GetManifestResourceNames();
+
+        // The fast path is keyed to THIS build's embedded libraries. Existence alone is not enough:
+        // an update that ships a new SkiaSharp/Avalonia would otherwise load the previous build's
+        // DLLs (ABI mismatch, crash at startup), and a damaged DLL would never be repaired.
+        var fingerprint = BuildNativeLibFingerprint(asm, resources);
+        var fingerprintPath = Path.Combine(outDir, NativeLibFingerprintFileName);
+        if (IsNativeLibFastPathValid(outDir, fingerprintPath, fingerprint))
         {
             SetDllDirectory(outDir);
-            LogDebug("ExtractNativeLibs fast-path: native libraries already present.");
+            LogDebug("ExtractNativeLibs fast-path: native libraries match this build.");
             return;
         }
 
         try { if (Directory.Exists(LegacyNativeLibDir)) Directory.Delete(LegacyNativeLibDir, true); } catch { }
-
-        var asm = Assembly.GetExecutingAssembly();
-        var resources = asm.GetManifestResourceNames();
 
         try
         {
@@ -1727,8 +1721,62 @@ class Program
             return;
         }
 
+        try
+        {
+            AtomicFileWriter.WriteAtomic(fingerprintPath, fingerprint, out _);
+        }
+        catch (Exception ex)
+        {
+            LogDebug("Could not write the native library fingerprint: " + ex.Message);
+        }
+
         SetDllDirectory(outDir);
         LogDebug("ExtractNativeLibs finished: all native libraries verified.");
+    }
+
+    internal const string NativeLibFingerprintFileName = "native.fingerprint";
+
+    internal static readonly string[] RequiredNativeLibs = { "libSkiaSharp.dll", "av_libglesv2.dll", "libHarfBuzzSharp.dll" };
+
+    /// <summary>App version plus the name and length of every embedded native library resource.</summary>
+    internal static string BuildNativeLibFingerprint(Assembly asm, string[] resources)
+    {
+        var sb = new System.Text.StringBuilder(AppVersion);
+        foreach (var res in resources.OrderBy(r => r, StringComparer.Ordinal))
+        {
+            if (!res.EndsWith(".dll.gz", StringComparison.OrdinalIgnoreCase) && !res.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) continue;
+            long length = -1;
+            try
+            {
+                using var stream = asm.GetManifestResourceStream(res);
+                if (stream != null) length = stream.Length;
+            }
+            catch { }
+            sb.Append('|').Append(res).Append(':').Append(length);
+        }
+        return sb.ToString();
+    }
+
+    internal static bool IsNativeLibFastPathValid(string outDir, string fingerprintPath, string expectedFingerprint)
+    {
+        try
+        {
+            if (!Directory.Exists(outDir) || !File.Exists(fingerprintPath)) return false;
+            if (!string.Equals(File.ReadAllText(fingerprintPath).Trim(), expectedFingerprint, StringComparison.Ordinal)) return false;
+
+            foreach (var lib in RequiredNativeLibs)
+            {
+                var path = Path.Combine(outDir, lib);
+                if (!File.Exists(path) || !File.Exists(path + ".stamp")) return false;
+                using var fs = File.OpenRead(path);
+                if (fs.Length <= 64 || fs.ReadByte() != 0x4D || fs.ReadByte() != 0x5A) return false;
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>ISSUE_11: "<length>|<sha256-hex>" sidecar that makes a repeat launch cheap.</summary>
@@ -1774,21 +1822,9 @@ class Program
 
         if (taskState == AdminTaskState.Enabled || taskState == AdminTaskState.Disabled)
         {
-            bool comToggled = false;
-            try
-            {
-                var service = CreateTaskService();
-                service.Connect(Type.Missing, Type.Missing, Type.Missing, Type.Missing);
-                var folder = service.GetFolder(@"\");
-                var task = folder.GetTask(AdminTaskName);
-                if (task != null)
-                {
-                    task.Enabled = enable;
-                    comToggled = true;
-                    InvalidateAdminTaskState();
-                }
-            }
-            catch { }
+            bool comToggled = TaskSchedulerCom.TrySetEnabled(AdminTaskName, enable, out var toggleError);
+            if (comToggled) InvalidateAdminTaskState();
+            else LogDebug($"Task Scheduler COM enable/disable failed: {toggleError}");
 
             if (!comToggled)
             {
@@ -1988,63 +2024,4 @@ class Program
             .UsePlatformDetect()
             .WithInterFont()
             .LogToTrace();
-}
-
-
-[ComImport, Guid("2FABA4C7-4DA9-4013-9697-20CC3FD40F85"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
-internal interface ITaskService
-{
-    [return: MarshalAs(UnmanagedType.Interface)]
-    ITaskFolder GetFolder([MarshalAs(UnmanagedType.BStr)] string path);
-    void DummyGetRunningTasks();
-    void DummyNewTask();
-    void Connect(
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object serverName,
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object user,
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object domain,
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object password);
-    bool Connected { get; }
-}
-
-[ComImport, Guid("8CFAC062-A080-4C15-9A88-AA7C2AF80DFC"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
-internal interface ITaskFolder
-{
-    string Name { [return: MarshalAs(UnmanagedType.BStr)] get; }
-    string Path { [return: MarshalAs(UnmanagedType.BStr)] get; }
-    [return: MarshalAs(UnmanagedType.Interface)]
-    ITaskFolder GetFolder([MarshalAs(UnmanagedType.BStr)] string path);
-    void DummyGetFolders();
-    void DummyCreateFolder();
-    void DummyDeleteFolder();
-    [return: MarshalAs(UnmanagedType.Interface)]
-    IRegisteredTask GetTask([MarshalAs(UnmanagedType.BStr)] string path);
-    void DummyGetTasks();
-    void DeleteTask([MarshalAs(UnmanagedType.BStr)] string name, int flags);
-    [return: MarshalAs(UnmanagedType.Interface)]
-    IRegisteredTask RegisterTask(
-        [MarshalAs(UnmanagedType.BStr)] string path,
-        [MarshalAs(UnmanagedType.BStr)] string xmlText,
-        int flags,
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object userId,
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object password,
-        int logonType,
-        [In, Optional, MarshalAs(UnmanagedType.Struct)] object sddl);
-}
-
-[ComImport, Guid("9C86F320-DEE3-4DD1-B972-A303F26B061E"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
-internal interface IRegisteredTask
-{
-    string Name { [return: MarshalAs(UnmanagedType.BStr)] get; }
-    string Path { [return: MarshalAs(UnmanagedType.BStr)] get; }
-    int State { get; }
-    bool Enabled { get; [param: MarshalAs(UnmanagedType.VariantBool)] set; }
-    void DummyRun();
-    void DummyRunEx();
-    void DummyGetInstances();
-    void DummyLastRunTime();
-    void DummyLastTaskResult();
-    void DummyNumberOfMissedRuns();
-    void DummyNextRunTime();
-    void DummyDefinition();
-    string Xml { [return: MarshalAs(UnmanagedType.BStr)] get; }
 }

@@ -405,33 +405,19 @@ namespace KeyPulse
                     }
                 }
 
-                bool signatureVerified = false;
-                try
+                var verdict = AuthenticodeVerifier.Verify(partialPath, out var signatureReason);
+                if (verdict == SignatureVerdict.Rejected)
                 {
-#pragma warning disable SYSLIB0057
-                    using var cert = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromSignedFile(partialPath);
-#pragma warning restore SYSLIB0057
-                    if (cert != null)
-                    {
-                        if (!string.IsNullOrWhiteSpace(cert.Subject) && cert.Subject.Contains("KeyPulse", StringComparison.OrdinalIgnoreCase))
-                        {
-                            signatureVerified = true;
-                        }
-                        else
-                        {
-                            try { File.Delete(partialPath); } catch { }
-                            return (false, "Downloaded executable signature is untrusted (signer does not match KeyPulse). Update rejected.", null);
-                        }
-                    }
+                    try { File.Delete(partialPath); } catch { }
+                    Program.LogCrash("Update signature rejected: " + signatureReason);
+                    return (false, "Downloaded executable failed signature verification: " + signatureReason + " Update rejected.", null);
                 }
-                catch (System.Security.Cryptography.CryptographicException)
-                {
-                }
+                bool signatureVerified = verdict == SignatureVerdict.TrustedPinnedSigner;
 
                 if (!shaVerified && !signatureVerified)
                 {
                     try { File.Delete(partialPath); } catch { }
-                    return (false, "Downloaded executable cannot be cryptographically verified (missing published SHA-256 and missing valid KeyPulse digital signature). Update rejected.", null);
+                    return (false, "Downloaded executable cannot be cryptographically verified (no published SHA-256 and no signature from the pinned KeyPulse certificate). Update rejected.", null);
                 }
 
                 if (File.Exists(tempPath))
