@@ -8,6 +8,16 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# build.cmd runs Windows PowerShell 5.1. Started from a PowerShell 7 terminal it inherits PowerShell 7's
+# PSModulePath, so 5.1 tries to load the 7.x Microsoft.PowerShell.Security module and fails - signing
+# (Get-AuthenticodeSignature / Set-AuthenticodeSignature) then aborts the release. Keep only 5.1 paths.
+if ($PSVersionTable.PSEdition -eq 'Desktop' -and $env:PSModulePath) {
+    $env:PSModulePath = (($env:PSModulePath -split ';') | Where-Object {
+        $_ -and ($_ -notmatch '\\PowerShell\\7') -and ($_ -notmatch '\\Documents\\PowerShell\\Modules') -and ($_ -notmatch '\\Program Files\\PowerShell\\Modules')
+    }) -join ';'
+}
+
 $env:DOTNET_CLI_FORCE_UTF8_ENCODING = 'false'
 $env:DOTNET_CLI_UI_LANGUAGE = 'en-US'
 $env:VSCONSOLEOUTPUT = '1'

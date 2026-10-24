@@ -8,6 +8,9 @@ All internal technical, architectural, and low-level engineering changes to KeyP
 
 ## [Unreleased]
 
+### Release Pipeline Runs from PowerShell 7 Terminals (`build\BuildPipeline.ps1`)
+- The first release attempt failed at signing: `build.cmd` -> Windows PowerShell 5.1 inherited PowerShell 7's `PSModulePath` and could not load `Microsoft.PowerShell.Security`. The pipeline now removes PowerShell 7 module folders from `PSModulePath` when running under 5.1 (reproduced through the same pwsh -> cmd -> powershell -> powershell chain and verified fixed).
+
 ### Task Scheduler COM under NativeAOT & Documentation Audit (`TaskSchedulerCom.cs` (new), `Program.cs`, `ComActivation.cs`, `README.md`, `docs/architecture/*.md`)
 - **Admin logon task**: every release build logged "Task Scheduler COM query failed: COM Interop requires ComWrapper instance registered for marshalling" (27 times in one user log) because `ITaskService` / `ITaskFolder` / `IRegisteredTask` were ComImport RCWs; query, register, delete and enable/disable all silently fell back to `schtasks.exe`. `TaskSchedulerCom` calls them through their vtables (slots from `taskschd.h`; BSTR as `IntPtr`, VARIANT as a 24-byte by-value struct, VARIANT_BOOL as `short`; `CO_E_NOTINITIALIZED` -> `CoInitializeEx` retry). Missing tasks are recognised by HRESULT (`IsNotFound`: `0x80070002`, `0x80070003`, `0x80041318`). `schtasks` stays the fallback everywhere. The ComImport interfaces and `CreateTaskService` were removed, and so was `ComActivation.CreateInstance<T>` (RCW-based, unusable under NativeAOT).
 - Verified by a standalone NativeAOT harness compiling `TaskSchedulerCom.cs`: it reads the real `KeyPulse_AdminTask` (enabled, XML with `RunLevel`, matching `schtasks /Query`) and reports a missing task as not found. Write paths were not run against the real task.
