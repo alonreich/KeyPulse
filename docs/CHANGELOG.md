@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2026.10.24.1040] - 2026-10-24
+
 ### Added
 - **Focus Mode** (Ctrl+Alt+Num *): dims every screen except your main one. Press it again to bring them back; your main screen stays where it is. Linked screens (⇄) follow your main screen again as soon as you change its brightness. Rename it, pick how dark (0-30%) and the key in Brightness settings. While it is on, the tray menu shows a checkmark and the brightness slider shows a "Turn off" button.
 - Desktop Organizer watches your **desktop icon size**. If Ctrl + mouse wheel changed it, you see it right away, with a **Reset to normal** button and the keys to fix it yourself. Saving a layout at an unusual size asks first.
@@ -293,24 +295,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-Store Backup Rollback Protection**: Restore operations now automatically snapshot and roll back all secondary stores (`desktop_organizer.json`, `screen_brightness.json`) alongside `config.json`.
 - **Automated Changelog Release Gate**: Preflight and CI pipelines verify that `docs/CHANGELOG.md` contains documented entries under `## [Unreleased]
 
-## [v2026.10.23.1922] - 2026-10-23
+## [v2026.10.24.1040] - 2026-10-24
+
+### Added
+- **Focus Mode** (Ctrl+Alt+Num *): dims every screen except your main one. Press it again to bring them back; your main screen stays where it is. Linked screens (⇄) follow your main screen again as soon as you change its brightness. Rename it, pick how dark (0-30%) and the key in Brightness settings. While it is on, the tray menu shows a checkmark and the brightness slider shows a "Turn off" button.
+- Desktop Organizer watches your **desktop icon size**. If Ctrl + mouse wheel changed it, you see it right away, with a **Reset to normal** button and the keys to fix it yourself. Saving a layout at an unusual size asks first.
+- Every saved layout remembers its icon size, and restoring it puts that size back first, so icons land exactly where you saved them.
 
 ### Changed
-- Brightness slider: extra buttons moved behind one ⚙ button (separate contrast, identify screens, presets & setup).
-- New "⌨ Key" button on each screen in the full Brightness window: give one screen its own shortcut that jumps only that screen to the brightness and contrast you pick. "All screens" keeps the new gap.
-- Tray menu is flat: "Brightness slider" with your presets right under it.
-- If another app is using one of your brightness shortcuts, the brightness windows now say which one. It clears when KeyPulse gets the key.
-- Shortcut list: each row has just On/Off and ▶ Run. Click a row to edit it; Duplicate and Delete are in the editor. Status is a coloured dot (hover for details).
-- Settings: one "Run as admin" switch. The "Displays & Icons" tab is now two tabs, "Brightness" and "Desktop icons".
-- First time you open the brightness slider, a short tips card shows the brightness keys. Click "Got it" and it won't come back.
-- The Brightness/Contrast Slider is simpler: no preset buttons (use the tray menu), no hint line, no status text unless something is wrong.
-- The master bar is now just labelled "All screens".
-- Each screen shows one slider for brightness and contrast together. Want a separate Contrast slider? Slider: ⚙ > "Separate contrast sliders". Full window: untick "Sync ratio".
+- Brightness settings: all brightness shortcuts are in **one list**. Rarely used options are under **Advanced**.
+- Clearer names: "Brightness slider" and "Brightness settings"; "Keep the gap between screens"; "Screen shortcuts"; "Show in tray menu".
+- Settings: Brightness and Desktop Organizer options are only in their own windows now. One **Reset…** button lets you pick exactly what to reset.
+- Desktop Organizer: your layouts come first; automatic options are folded under **Automatic**.
+- Official releases are now digitally signed, at no cost.
 
 ### Fixed
-- Brightness sliders and shortcuts stopped working whenever no other brightness app (such as Twinkle Tray) was running. They now work on their own.
-- The default brighten shortcut Ctrl+Alt+= now works. It was never being recognised before.
-- Brightness shortcuts that another app was using when KeyPulse started now start working automatically within about 10 seconds of that app releasing them.
+- Desktop Organizer could not save or restore layouts in installed versions of KeyPulse. It works again.
+- "Run as admin" now talks to Windows Task Scheduler directly again in installed versions, instead of always falling back to a slower command-line tool.
+- Brightness control now recovers by itself after your monitors sleep and wake up, or after a display is plugged in. Before, the recovery never actually ran.
+- After an update, KeyPulse makes sure its graphics components match the new version. Before, an update could start with old components and crash at startup.
+- Clicking or resizing things in the main window no longer pauses while settings are saved. Saving happens in the background, and everything is still written before KeyPulse exits or restarts.
+- Settings backups now cover a real history (recent ones plus one per day for two weeks) instead of the last few seconds of edits.
+- Window positions of the Desktop Organizer and Brightness windows are no longer lost when the main window saves its own settings.
+- "Add to KeyPulse" from Explorer no longer loses items when several are added quickly or another app is slow.
+- Closing KeyPulse no longer hangs for up to 5 seconds while a monitor is busy.
+
+### Security
+- Updates are only installed when the download is signed by the KeyPulse release certificate (checked properly by Windows), or matches its published checksum. A file that merely claims to be from "KeyPulse" is rejected.
 
 ## [v2026.10.20.1850] - 2026-10-20
 
